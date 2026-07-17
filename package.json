@@ -1,0 +1,20 @@
+{
+  "name": "reaper-of-the-hollow-crown",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test",
+    "check": "find src tests -name '*.js' -print0 | xargs -0 -n1 node --check"
+  },
+  "dependencies": {
+    "three": "0.185.1"
+  },
+  "devDependencies": {
+    "vite": "8.1.5"
+  }
+}
+
