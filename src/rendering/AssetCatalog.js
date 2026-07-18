@@ -41,7 +41,7 @@ export class AssetCatalog {
     const tasks = [
       ...CRITICAL_CHARACTERS.map((key) => ({ label: key, load: () => this.loadCharacter(key) })),
       ...CRITICAL_ENVIRONMENT.map((key) => ({ label: key, load: () => this.loadEnvironment(key) })),
-      { label: "Princess Aurelia", load: () => this.loadTexture("/assets/sprites/princess-world.webp") },
+      { label: "Princess Elowen", load: () => this.loadTexture("/assets/sprites/princess-world.webp") },
     ];
     this.progress = { loaded: 0, total: tasks.length, ratio: 0, label: "Preparing the descent" };
     this.listener?.(this.progress);

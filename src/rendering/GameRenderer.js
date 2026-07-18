@@ -9,6 +9,13 @@ import { GameCamera } from "./GameCamera.js";
 
 const MAX_PROJECTILES = 96;
 
+export function endingCorruptionUrgency(game) {
+  const endingState = game.ending?.snapshot?.();
+  if (game.phase === "endingChoice") return endingState?.decision?.urgency ?? 0;
+  if (endingState?.result?.id === "timeout" && ["dialogue", "endingFade"].includes(game.phase)) return 1;
+  return 0;
+}
+
 function interpolated(previous, current, alpha) {
   return previous + (current - previous) * alpha;
 }
@@ -45,6 +52,7 @@ export class GameRenderer {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x09080d);
     this.scene.fog = new THREE.FogExp2(0x11101a, 0.028);
+    this.baseFogDensity = 0.028;
     this.cameraSystem = new GameCamera(settings);
     this.effects = new EffectsPool(this.scene, settings);
     this.catalog = new AssetCatalog();
@@ -54,6 +62,8 @@ export class GameRenderer {
     this.worldReady = Promise.resolve();
     this.projectileMatrix = new THREE.Matrix4();
     this.projectileColor = new THREE.Color();
+    this.endingAccentBase = new THREE.Color();
+    this.endingAccentCorrupt = new THREE.Color(0xb53d67);
     this.createLighting();
     this.createProjectiles();
     this.createPortal();
@@ -290,6 +300,7 @@ export class GameRenderer {
     this.effects.syncPlayerAttack(game.player, game.combat);
     this.syncProjectiles(game.director.projectiles, alpha);
     const boss = game.director.activeBoss();
+    const endingUrgency = endingCorruptionUrgency(game);
     this.syncPortal(game, dt);
     const playerX = interpolated(game.player.previousPosition.x, game.player.position.x, alpha);
     const playerZ = interpolated(game.player.previousPosition.z, game.player.position.z, alpha);
@@ -300,7 +311,17 @@ export class GameRenderer {
       game.aimPoint,
       Boolean(boss),
       game.portalTraversal?.active ? game.portalTraversal : null,
+      endingUrgency,
     );
+    this.scene.fog.density = this.baseFogDensity + endingUrgency * 0.012;
+    if (endingUrgency > 0) {
+      this.accentLight.intensity = 22 + endingUrgency * 18;
+      this.endingAccentBase.set(getBiome(game.arena.biome).palette.accent);
+      this.accentLight.color.lerpColors(this.endingAccentBase, this.endingAccentCorrupt, endingUrgency);
+    } else {
+      this.accentLight.intensity = 22;
+      this.accentLight.color.set(getBiome(game.arena.biome).palette.accent);
+    }
     this.effects.update(dt);
   }
 
@@ -405,6 +426,16 @@ export class GameRenderer {
       this.effects.spawnBurst(detail.position, detail.type === "queen" ? 0xd77aff : 0xb34c68, detail.type === "queen" ? 70 : 22, 7);
       this.cameraSystem.addTrauma(detail.type === "queen" ? 0.85 : 0.24);
     }
+    if (type === "enemySpawned") {
+      const color = detail.origin === "princess" ? 0x9b3f63 : 0xc8bee0;
+      this.effects.spawnBurst(detail.position, color, detail.origin === "princess" ? 18 : 10, detail.origin === "princess" ? 5.2 : 3.2);
+      this.effects.spawnRing(detail.position, detail.origin === "princess" ? 0.72 : 0.58, color, 0.3);
+    }
+    if (type === "witchOriginDismissed") {
+      for (const actor of detail.actors ?? []) {
+        this.effects.spawnRing(actor.position, 0.7, 0xc8bee0, 0.38);
+      }
+    }
     if (type === "playerHit" && game.player) {
       this.effects.spawnBurst(game.player.position, 0xef4f62, 22, 5);
       this.cameraSystem.addTrauma(0.42);
@@ -426,6 +457,24 @@ export class GameRenderer {
     }
     if (type === "portalTraversalCompleted") {
       this.effects.spawnRing(detail.portal, 0.72, 0x8c36d8, 0.32);
+    }
+    if (type === "witchMagicCeased") {
+      this.effects.spawnRing(game.arena?.portal ?? { x: 0, z: 0 }, 5.5, 0xc8bee0, 0.9);
+      this.cameraSystem.addTrauma(0.72);
+    }
+    if (type === "princessHumanReturned") this.cameraSystem.addTrauma(0.18);
+    if (type === "princessKilled" || type === "corruptionDestroyed") {
+      this.cameraSystem.addTrauma(0.88);
+      this.effects.spawnRing({ x: 2.5, z: 2.1 }, 4.8, 0xf5d993, 0.9);
+    }
+    if (type === "playerKilledByPrincess" && game.player) {
+      this.cameraSystem.addTrauma(1);
+      this.effects.spawnBurst(game.player.position, 0xb53d67, 72, 8);
+    }
+    if (type === "endingChoiceResolved") {
+      this.cameraSystem.addTrauma(detail.ending === "kill" ? 0.95 : 0.78);
+      const color = detail.ending === "kill" ? 0xf5d993 : 0xb53d67;
+      if (game.player) this.effects.spawnBurst(game.player.position, color, 64, 7.5);
     }
   }
 

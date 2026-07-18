@@ -20,6 +20,7 @@ const DEFAULT_CONFIG = Object.freeze({
   dangerPadding: 0.9,
   edgeSteeringDistance: 2.4,
   edgeSteeringStrength: 1.25,
+  endingPolicy: "kill",
 });
 
 const TYPE_PRIORITY = Object.freeze({
@@ -464,6 +465,11 @@ export class AutoplayAgent {
     if (state.phase === "dialogue") return this.decideDialogue(state);
     if (state.phase === "reward") return this.decideRoomReward(state);
     if (state.phase === "blessing") return this.decideBlessing(state);
+    if (state.phase === "endingChoice") {
+      return this.config.endingPolicy === "timeout"
+        ? defaultIntent("ending-timeout-wait")
+        : this.decideUiAction("killPrincess");
+    }
     if (state.phase === "title") return this.decideUiAction("startRun");
     if (state.phase === "dead") return this.decideUiAction("restartRun");
     if (state.phase !== "playing" || !state.player?.position) return defaultIntent(state.phase);
@@ -496,11 +502,8 @@ export class AutoplayAgent {
   }
 
   decideDialogue(state) {
-    if (state.dialogue?.awaitingResponse) return this.decideUiAction("continueDialogue");
-    const choices = state.dialogue?.choices ?? [];
-    if (choices.length === 0) return defaultIntent("dialogue-wait");
-    const preferredIndex = choices.length >= 3 && state.floor >= 10 ? 2 : 0;
-    return this.decideUiAction("chooseDialogue", { index: Math.min(preferredIndex, choices.length - 1) });
+    if (!state.dialogue?.active) return defaultIntent("dialogue-wait");
+    return this.decideUiAction("continueDialogue");
   }
 
   decideBlessing(state) {

@@ -10,6 +10,11 @@ export const RUN_CONFIG = Object.freeze({
   floorRecoveryPercent: 0.24,
 });
 
+export const NARRATIVE_TIMING = Object.freeze({
+  decisionDurationMs: 5_000,
+  fadeDurationMs: 1_200,
+});
+
 export const PORTAL_CONFIG = Object.freeze({
   interactionRadius: 1.85,
   clearanceRadius: 2.4,

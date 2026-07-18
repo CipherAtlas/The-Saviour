@@ -46,7 +46,7 @@ export class GameCamera {
     this.trauma = Math.min(1, this.trauma + amount * this.settings.get("camera.shake"));
   }
 
-  update(dt, playerPosition, aimPoint, bossActive, portalTraversal = null) {
+  update(dt, playerPosition, aimPoint, bossActive, portalTraversal = null, endingUrgency = 0) {
     this.time += dt;
     const lookAheadSetting = this.settings.get("camera.aimLookAhead");
     const dx = aimPoint.x - playerPosition.x;
@@ -66,9 +66,13 @@ export class GameCamera {
     const smoothing = 1 - Math.exp(-followRate * dt);
     this.focus.lerp(target, smoothing);
     this.trauma = Math.max(0, this.trauma - dt * 2.4);
-    const shake = this.trauma * this.trauma;
-    const shakeX = Math.sin(this.time * 43.7) * shake * 0.32;
-    const shakeZ = Math.sin(this.time * 37.1 + 1.7) * shake * 0.25;
+    const narrativeShake = this.settings.get("camera.reducedMotion")
+      ? 0
+      : Math.max(0, Math.min(1, endingUrgency)) * this.settings.get("camera.shake");
+    const shake = Math.max(this.trauma * this.trauma, narrativeShake * narrativeShake * 0.92);
+    const frequency = 1 + narrativeShake * 0.72;
+    const shakeX = Math.sin(this.time * 43.7 * frequency) * shake * 0.32;
+    const shakeZ = Math.sin(this.time * 37.1 * frequency + 1.7) * shake * 0.25;
     let dynamicMultiplier = this.settings.get("camera.dynamicZoom") && bossActive ? CAMERA_CONFIG.bossZoomMultiplier : 1;
     if (portalTraversal && !this.settings.get("camera.reducedMotion")) {
       dynamicMultiplier *= 1 - Math.sin(portalTraversal.progress * Math.PI) * 0.065;

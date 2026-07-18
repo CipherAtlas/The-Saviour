@@ -45,3 +45,21 @@ test("a movement tap between fixed ticks still advances for one simulation step"
   input.endFrame(1);
   assert.deepEqual(input.movement(), { x: 0, y: 0 });
 });
+
+test("discrete actions retain their event timestamp and flush stale ending edges", () => {
+  const input = Object.create(InputController.prototype);
+  input.settings = { get: (path) => path.endsWith("attack") ? ["Mouse0"] : path.endsWith("interact") ? ["KeyE"] : [] };
+  input.pressed = new Set(["Mouse0", "KeyE"]);
+  input.pressedAt = new Map([["Mouse0", 1234], ["KeyE", 1240]]);
+  input.automationPressed = new Set();
+
+  assert.deepEqual(input.consumePressed("attack"), {
+    action: "attack",
+    binding: "Mouse0",
+    timeStamp: 1234,
+  });
+  assert.equal(input.consumePressed("attack"), null);
+  input.flushActions(["interact"]);
+  assert.equal(input.pressed.has("KeyE"), false);
+  assert.equal(input.pressedAt.has("KeyE"), false);
+});

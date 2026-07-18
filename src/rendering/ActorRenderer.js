@@ -260,7 +260,7 @@ export class ActorRenderer {
     let desiredDuration = null;
     let stateKey = "idle";
     let direction = 1;
-    if (game.phase === "dead") {
+    if (game.phase === "dead" || game.flags.princeKilledByPrincess) {
       clip = "Death_A";
       once = true;
       desiredDuration = 0.9;
@@ -503,10 +503,18 @@ export class ActorRenderer {
   }
 
   syncStorySprite(game) {
-    this.princess.visible = game.phase === "victory" || Boolean(game.flags.queenDefeated);
+    const stage = game.endingPresentationStage;
+    this.princess.visible = !["inactive", "witchDeath", "complete"].includes(stage);
     if (!this.princess.visible) return;
     this.princess.position.set(2.5, 2.7, 2.1);
-    this.princess.material.map.offset.x = game.phase === "victory" ? 1 / 3 : 0;
+    const corrupt = stage === "revealCorrupted" || stage === "timeout" || (
+      stage === "fade" && game.ending.snapshot().result?.id === "timeout"
+    );
+    const pleading = stage === "revealHuman" || stage === "decision";
+    this.princess.material.map.offset.x = corrupt ? 2 / 3 : pleading ? 1 / 3 : 0;
+    this.princess.material.color.set(corrupt ? 0xd17491 : 0xffffff);
+    const fadeProgress = game.ending.snapshot().fade?.progress ?? 0;
+    this.princess.material.opacity = 1 - fadeProgress;
   }
 
   handleEvent(event) {

@@ -28,8 +28,7 @@ function createSettings() {
 function startGame(seed) {
   const game = new Game(createInput(), createSettings());
   game.startRun(seed);
-  game.chooseDialogue(0);
-  game.continueDialogue();
+  while (game.phase === "dialogue") game.skipDialogue();
   return game;
 }
 

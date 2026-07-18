@@ -1,15 +1,23 @@
 :root {
   color-scheme: dark;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Avenir Next", "Century Gothic", "Trebuchet MS", sans-serif;
   --ink: #f4ead7;
   --muted: #b7a990;
   --gold: #d9aa52;
   --gold-bright: #ffd985;
+  --gold-dim: #8f6938;
   --blood: #b83f53;
   --violet: #7e4fa3;
   --void: #09080d;
   --panel: rgba(17, 14, 22, 0.94);
   --line: rgba(217, 170, 82, 0.34);
+  --space-xs: 0.35rem;
+  --space-sm: 0.7rem;
+  --space-md: 1.2rem;
+  --space-lg: 2rem;
+  --space-xl: 3.2rem;
+  --shadow-panel: 0 2rem 6rem rgba(0, 0, 0, 0.65), inset 0 0 0 1px rgba(255, 217, 133, 0.06);
+  --ending-corruption: 0;
   --ui-scale: 1;
 }
 
@@ -86,7 +94,31 @@ button {
 }
 
 .title-content {
+  position: relative;
   width: min(42rem, 92vw);
+  padding: clamp(1.2rem, 3vw, 2.4rem) clamp(1rem, 3vw, 2.2rem);
+  border-left: 1px solid var(--gold);
+  background: linear-gradient(90deg, rgba(8, 7, 11, 0.58), transparent 80%);
+}
+
+.title-content::before,
+.title-content::after {
+  position: absolute;
+  left: -0.32rem;
+  width: 0.62rem;
+  height: 0.62rem;
+  border: 1px solid var(--gold-bright);
+  background: var(--void);
+  content: "";
+  transform: rotate(45deg);
+}
+
+.title-content::before {
+  top: -0.3rem;
+}
+
+.title-content::after {
+  bottom: -0.3rem;
 }
 
 .eyebrow {
@@ -102,7 +134,7 @@ h1,
 h2,
 h3 {
   margin: 0;
-  font-family: "Palatino Linotype", Palatino, Georgia, serif;
+  font-family: "Bodoni 72", Didot, "Palatino Linotype", Georgia, serif;
   letter-spacing: 0.02em;
 }
 
@@ -166,6 +198,18 @@ h1 {
   cursor: wait;
   opacity: 0.58;
   transform: none;
+}
+
+.glossary-title-button.locked:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.glossary-lock-note {
+  margin: 0.7rem 0 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
 }
 
 .button-row {
@@ -351,14 +395,18 @@ h1 {
 
 .boss-name {
   margin-bottom: 0.45rem;
-  font-family: "Palatino Linotype", Palatino, Georgia, serif;
+  font-family: "Bodoni 72", Didot, "Palatino Linotype", Georgia, serif;
   color: #f1c6ff;
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
 .modal {
-  padding: 1rem;
+  padding:
+    max(1rem, env(safe-area-inset-top))
+    max(1rem, env(safe-area-inset-right))
+    max(1rem, env(safe-area-inset-bottom))
+    max(1rem, env(safe-area-inset-left));
   background: rgba(4, 4, 7, 0.74);
   backdrop-filter: blur(10px);
 }
@@ -373,7 +421,7 @@ h1 {
   background:
     linear-gradient(145deg, rgba(30, 24, 36, 0.98), rgba(12, 10, 16, 0.98)),
     radial-gradient(circle at top right, rgba(126, 79, 163, 0.2), transparent 40%);
-  box-shadow: 0 2rem 6rem rgba(0, 0, 0, 0.65);
+  box-shadow: var(--shadow-panel);
 }
 
 .panel h2 {
@@ -389,9 +437,15 @@ h1 {
 
 .dialogue-panel {
   display: grid;
-  grid-template-columns: 7rem 1fr;
+  grid-template-columns: 1fr;
   gap: 1.4rem;
   width: min(54rem, 96vw);
+  border-top-color: var(--gold-bright);
+  border-bottom-color: var(--gold-dim);
+}
+
+.dialogue-panel.has-portrait {
+  grid-template-columns: 7rem 1fr;
 }
 
 .dialogue-portrait {
@@ -405,9 +459,39 @@ h1 {
 .dialogue-speaker {
   margin-bottom: 0.4rem;
   color: var(--gold-bright);
-  font-family: "Palatino Linotype", Palatino, Georgia, serif;
+  font-family: "Bodoni 72", Didot, "Palatino Linotype", Georgia, serif;
   font-size: 1.2rem;
   letter-spacing: 0.08em;
+}
+
+.dialogue-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid rgba(217, 170, 82, 0.2);
+  margin-bottom: 0.7rem;
+}
+
+.dialogue-position {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+.dialogue-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.65rem;
+}
+
+.button.quiet {
+  min-width: 7rem;
+  border-color: rgba(217, 170, 82, 0.18);
+  background: transparent;
+  color: var(--muted);
 }
 
 .dialogue-text {
@@ -516,6 +600,339 @@ h1 {
   color: #c9bda8;
   font-size: 0.86rem;
   line-height: 1.55;
+}
+
+.inline-dialogue {
+  position: relative;
+  display: grid;
+  gap: 0.45rem;
+  margin: 1rem 0 1.25rem;
+  border-top: 1px solid rgba(217, 170, 82, 0.42);
+  border-bottom: 1px solid rgba(217, 170, 82, 0.2);
+  padding: 0.9rem clamp(0.7rem, 2vw, 1.2rem);
+  background:
+    linear-gradient(90deg, rgba(217, 170, 82, 0.08), transparent 45%, rgba(126, 79, 163, 0.08)),
+    rgba(5, 5, 8, 0.34);
+}
+
+.inline-dialogue::before,
+.inline-dialogue::after {
+  position: absolute;
+  top: -0.24rem;
+  width: 0.45rem;
+  height: 0.45rem;
+  border: 1px solid var(--gold);
+  background: #16121b;
+  content: "";
+  transform: rotate(45deg);
+}
+
+.inline-dialogue::before { left: 1rem; }
+.inline-dialogue::after { right: 1rem; }
+
+.inline-dialogue-beat {
+  display: grid;
+  grid-template-columns: minmax(6rem, 0.25fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: baseline;
+}
+
+.inline-dialogue-speaker {
+  color: var(--gold-bright);
+  font-family: "Bodoni 72", Didot, "Palatino Linotype", Georgia, serif;
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.inline-dialogue-beat p {
+  margin: 0;
+  color: #dfd3c0;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.ending-decision {
+  z-index: 100;
+  overflow: hidden;
+  --ending-corruption: 0;
+  background:
+    radial-gradient(circle at center, rgba(44, 22, 34, 0.84), rgba(4, 3, 6, 0.97) 68%),
+    #050407;
+  isolation: isolate;
+}
+
+.ending-decision::before,
+.ending-decision::after {
+  position: absolute;
+  inset: -12%;
+  z-index: -2;
+  pointer-events: none;
+  content: "";
+}
+
+.ending-decision::before {
+  background:
+    repeating-linear-gradient(117deg, transparent 0 3rem, rgba(184, 63, 83, 0.16) 3.05rem 3.12rem),
+    repeating-linear-gradient(63deg, transparent 0 4.5rem, rgba(126, 79, 163, 0.14) 4.55rem 4.65rem);
+  opacity: var(--ending-corruption);
+  transform: scale(1.08) rotate(-1deg);
+}
+
+.ending-decision::after {
+  z-index: -1;
+  background: radial-gradient(circle, transparent 28%, rgba(0, 0, 0, 0.88) 82%);
+}
+
+.ending-decision-ornament {
+  position: absolute;
+  inset: 1.2rem;
+  border: 1px solid rgba(217, 170, 82, 0.28);
+  pointer-events: none;
+}
+
+.ending-decision-ornament::before,
+.ending-decision-ornament::after {
+  position: absolute;
+  left: 50%;
+  width: min(28rem, 48vw);
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--gold), transparent);
+  content: "";
+  transform: translateX(-50%);
+}
+
+.ending-decision-ornament::before { top: 1rem; }
+.ending-decision-ornament::after { bottom: 1rem; }
+
+.ending-decision-shell {
+  display: grid;
+  justify-items: center;
+  width: min(34rem, calc(100vw - 2rem));
+  text-align: center;
+}
+
+.ending-decision-shell h2 {
+  color: #fff0d0;
+  font-family: "Bodoni 72", Didot, "Palatino Linotype", Georgia, serif;
+  font-size: clamp(2rem, 6vw, 4.5rem);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  line-height: 0.95;
+  text-transform: uppercase;
+}
+
+.wedding-ring-countdown {
+  width: clamp(12rem, 34vh, 20rem);
+  margin: clamp(0.7rem, 2vh, 1.6rem) 0 0.4rem;
+  aspect-ratio: 1;
+}
+
+.wedding-ring-countdown svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  filter: drop-shadow(0 0 1.4rem rgba(217, 170, 82, 0.2));
+}
+
+.wedding-ring {
+  fill: none;
+  stroke-linecap: butt;
+  transform: rotate(-90deg);
+  transform-origin: center;
+}
+
+.wedding-ring-past {
+  stroke: rgba(120, 82, 48, 0.42);
+  stroke-width: 3;
+  stroke-dasharray: 0.43 0.09 0.43 0.05;
+}
+
+.wedding-ring-track {
+  stroke: rgba(255, 241, 205, 0.13);
+  stroke-width: 8;
+}
+
+.wedding-ring-progress {
+  stroke: var(--gold-bright);
+  stroke-width: 6;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 70ms cubic-bezier(0.2, 0.8, 0.3, 1), stroke 180ms ease;
+}
+
+.wedding-ring-fracture {
+  fill: none;
+  stroke: #120b10;
+  stroke-width: 9;
+  stroke-linecap: square;
+  filter: drop-shadow(0 0 0.25rem rgba(225, 72, 92, 0.35));
+}
+
+.corruption-medium .wedding-ring-progress { stroke: #e89669; }
+.corruption-high .wedding-ring-progress { stroke: #ef526d; }
+
+.ending-decision-status {
+  min-height: 1.5rem;
+  margin: 0 0 1rem;
+  color: #d8c9b4;
+  font-size: 0.82rem;
+  letter-spacing: 0.1em;
+}
+
+.ending-kill-action {
+  display: grid;
+  justify-items: center;
+  width: min(22rem, 86vw);
+  border: 1px solid rgba(255, 217, 133, 0.62);
+  padding: 0.75rem 1.2rem 0.85rem;
+  background:
+    linear-gradient(135deg, transparent 0.8rem, rgba(115, 30, 47, 0.92) 0) top left,
+    #511827;
+  color: #fff2db;
+  box-shadow: 0 0.8rem 2.4rem rgba(0, 0, 0, 0.45), inset 0 0 1.8rem rgba(255, 174, 116, 0.08);
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.ending-kill-action:hover,
+.ending-kill-action:focus-visible {
+  border-color: #fff0bc;
+  outline: 2px solid rgba(255, 240, 188, 0.24);
+  outline-offset: 4px;
+  background: #7f2639;
+  transform: translateY(-2px);
+}
+
+.ending-kill-kicker,
+.ending-kill-hint {
+  color: #d9b99f;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+}
+
+.ending-kill-action strong {
+  margin: 0.15rem 0;
+  font-family: "Bodoni 72", Didot, "Palatino Linotype", Georgia, serif;
+  font-size: 1.35rem;
+  letter-spacing: 0.08em;
+}
+
+.ending-decision.corruption-medium .ending-decision-shell {
+  animation: corruption-shiver 360ms steps(2, end) infinite;
+}
+
+.ending-decision.corruption-high .ending-decision-shell {
+  animation: corruption-shiver 155ms steps(2, end) infinite;
+}
+
+@keyframes corruption-shiver {
+  0%, 100% { transform: translate(0, 0); }
+  33% { transform: translate(0.12rem, -0.05rem); }
+  66% { transform: translate(-0.08rem, 0.06rem); }
+}
+
+.ending-fade {
+  position: absolute;
+  inset: 0;
+  z-index: 180;
+  pointer-events: auto;
+  background: #020204;
+  opacity: var(--ending-fade, 0);
+}
+
+.ending-panel {
+  position: relative;
+  border-top-color: var(--gold-bright);
+  text-align: left;
+}
+
+.ending-panel::before {
+  display: block;
+  width: 5rem;
+  height: 0.3rem;
+  margin-bottom: 1.2rem;
+  background: linear-gradient(90deg, var(--gold), transparent);
+  content: "";
+}
+
+.glossary-modal {
+  z-index: 160;
+  background: rgba(3, 3, 5, 0.9);
+}
+
+.glossary-panel {
+  width: min(72rem, 96vw);
+  height: min(50rem, 92vh);
+  border-top-color: var(--gold-bright);
+}
+
+.glossary-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1rem;
+}
+
+.glossary-heading h2 {
+  margin: 0;
+}
+
+.glossary-intro {
+  max-width: 52rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
+.glossary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid rgba(217, 170, 82, 0.2);
+  background: rgba(217, 170, 82, 0.2);
+}
+
+.glossary-entry {
+  min-height: 12rem;
+  padding: clamp(1rem, 2.2vw, 1.6rem);
+  background:
+    linear-gradient(145deg, rgba(24, 19, 29, 0.98), rgba(9, 8, 12, 0.98));
+}
+
+.glossary-entry h3 {
+  margin-bottom: 0.65rem;
+  color: var(--gold-bright);
+  font-size: 1.12rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+}
+
+.glossary-entry p {
+  margin: 0;
+  color: #c9bda9;
+  font-size: 0.82rem;
+  line-height: 1.62;
+}
+
+.glossary-toast {
+  position: absolute;
+  right: max(1rem, env(safe-area-inset-right));
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  z-index: 210;
+  width: min(28rem, calc(100vw - 2rem));
+  border: 1px solid var(--gold);
+  padding: 0.85rem 1rem;
+  background: rgba(10, 8, 13, 0.97);
+  color: var(--ink);
+  box-shadow: var(--shadow-panel);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  pointer-events: none;
 }
 
 .settings-panel {
@@ -655,9 +1072,26 @@ h1 {
 .high-contrast .health-panel,
 .high-contrast .objective-panel,
 .high-contrast .boss-panel,
-.high-contrast .panel {
+.high-contrast .panel,
+.high-contrast .inline-dialogue,
+.high-contrast .ending-kill-action {
   border-color: #fff1a8;
   background: #08070a;
+}
+
+.high-contrast .wedding-ring-progress {
+  stroke: #fff1a8;
+}
+
+.high-contrast .wedding-ring-track,
+.high-contrast .wedding-ring-past {
+  stroke: #fff;
+}
+
+.high-contrast .ending-decision-status,
+.high-contrast .inline-dialogue-beat p,
+.high-contrast .glossary-entry p {
+  color: #fff;
 }
 
 .palette-deuteranopia {
@@ -679,6 +1113,15 @@ h1 {
   animation-duration: 0.001ms !important;
 }
 
+.reduced-motion .ending-decision-shell {
+  animation: none !important;
+  transform: none !important;
+}
+
+.reduced-motion .wedding-ring-progress {
+  transition: none !important;
+}
+
 @media (pointer: coarse), (max-width: 760px) {
   .touch-controls.enabled {
     display: block;
@@ -688,7 +1131,7 @@ h1 {
     display: none;
   }
 
-  .dialogue-panel {
+  .dialogue-panel.has-portrait {
     grid-template-columns: 4.5rem 1fr;
   }
 
@@ -708,6 +1151,19 @@ h1 {
     min-height: 0;
   }
 
+  .inline-dialogue-beat {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+
+  .glossary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .glossary-entry {
+    min-height: 0;
+  }
+
   .setting-row {
     grid-template-columns: 1fr;
     gap: 0.5rem;
@@ -718,9 +1174,77 @@ h1 {
   }
 }
 
+@media (max-width: 540px) {
+  .title-screen {
+    align-items: center;
+    padding:
+      max(1rem, env(safe-area-inset-top))
+      max(1rem, env(safe-area-inset-right))
+      max(1rem, env(safe-area-inset-bottom))
+      max(1rem, env(safe-area-inset-left));
+  }
+
+  .title-content {
+    width: 100%;
+    padding: 1.1rem 0.9rem 1.1rem 1.15rem;
+  }
+
+  .title-actions,
+  .dialogue-controls,
+  .ending-panel .button-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    width: 100%;
+  }
+
+  .title-actions .button,
+  .dialogue-controls .button,
+  .ending-panel .button {
+    width: 100%;
+  }
+
+  .dialogue-panel.has-portrait {
+    grid-template-columns: 3.7rem minmax(0, 1fr);
+    gap: 0.8rem;
+  }
+
+  .dialogue-portrait {
+    width: 3.7rem;
+  }
+
+  .dialogue-heading {
+    align-items: flex-start;
+  }
+
+  .wedding-ring-countdown {
+    width: min(12rem, 34vh);
+  }
+
+  .ending-decision-ornament {
+    inset:
+      max(0.5rem, env(safe-area-inset-top))
+      max(0.5rem, env(safe-area-inset-right))
+      max(0.5rem, env(safe-area-inset-bottom))
+      max(0.5rem, env(safe-area-inset-left));
+  }
+
+  .glossary-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .glossary-close {
+    width: 100%;
+  }
+}
+
 @media (max-height: 620px) {
   .title-screen {
-    padding: 1.25rem 2rem;
+    padding:
+      max(1.25rem, env(safe-area-inset-top))
+      max(2rem, env(safe-area-inset-right))
+      max(1.25rem, env(safe-area-inset-bottom))
+      max(2rem, env(safe-area-inset-left));
   }
 
   h1 {
@@ -729,5 +1253,22 @@ h1 {
 
   .title-copy {
     margin: 0.8rem 0 1rem;
+  }
+
+  .ending-decision-shell .eyebrow {
+    margin-bottom: 0.35rem;
+  }
+
+  .ending-decision-shell h2 {
+    font-size: clamp(1.8rem, 8vh, 3rem);
+  }
+
+  .wedding-ring-countdown {
+    width: min(9rem, 27vh);
+    margin-top: 0.25rem;
+  }
+
+  .ending-decision-status {
+    margin-bottom: 0.45rem;
   }
 }

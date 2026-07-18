@@ -7,6 +7,7 @@ import { AutoplayAgent } from "./playtest/AutoplayAgent.js";
 import { PlaytestReporter } from "./playtest/PlaytestReporter.js";
 import { GameRenderer } from "./rendering/GameRenderer.js";
 import { SettingsStore } from "./settings/SettingsStore.js";
+import { NarrativeProgressStore } from "./settings/NarrativeProgressStore.js";
 import { GameUi } from "./ui/GameUi.js";
 import { SettingsMenu } from "./ui/SettingsMenu.js";
 
@@ -20,7 +21,6 @@ function worldToScreenMovement(worldMove) {
 }
 
 function autoplayState(game, telegraphs) {
-  const dialogue = game.dialogue.view();
   return {
     phase: game.phase,
     floor: game.floor,
@@ -70,10 +70,8 @@ function autoplayState(game, telegraphs) {
       timeRemaining: projectile.life,
     })),
     telegraphs: telegraphs.map((telegraph) => ({ ...telegraph, position: { ...telegraph.position } })),
-    dialogue: game.phase === "dialogue" ? {
-      awaitingResponse: game.dialogueAwaitingResponse,
-      choices: dialogue?.choices ?? [],
-    } : null,
+    dialogue: game.phase === "dialogue" ? { active: Boolean(game.dialogue.view()) } : null,
+    ending: game.ending.snapshot(),
     blessing: game.phase === "blessing" ? {
       choices: game.pendingBlessings.map(({ id, name, description, path, rank, nextRank, maxRank }) => ({
         id, name, description, path, rank, nextRank, maxRank,
@@ -87,7 +85,7 @@ function autoplayState(game, telegraphs) {
   };
 }
 
-function createAutoplayRuntime({ game, input, renderer, settings, runNumber, seed }) {
+function createAutoplayRuntime({ game, input, renderer, settings, runNumber, seed, endingPolicy }) {
   const telegraphs = [];
   const reporter = new PlaytestReporter({ targetFps: 60 });
   reporter.beginRun({ runNumber, seed, difficulty: settings.get("gameplay.difficulty") });
@@ -120,8 +118,8 @@ function createAutoplayRuntime({ game, input, renderer, settings, runNumber, see
     });
     const action = intent.uiAction;
     if (!action) return;
-    if (action.type === "chooseDialogue") game.chooseDialogue(action.index);
     if (action.type === "continueDialogue") game.continueDialogue();
+    if (action.type === "killPrincess") game.tryKillPrincess(performance.now());
     if (action.type === "chooseRoomReward") game.chooseRoomReward(action.id);
     if (action.type === "chooseBlessing") game.chooseBlessing(action.id);
   }
@@ -130,6 +128,7 @@ function createAutoplayRuntime({ game, input, renderer, settings, runNumber, see
     readState,
     actionSink: applyIntent,
     onDiagnostic: (diagnostic) => reporter.recordDiagnostic(diagnostic),
+    config: { endingPolicy },
   });
 
   function finish() {
@@ -222,6 +221,9 @@ function updateRuntimeProbe(probe, game, renderer) {
   probe.dataset.bossPattern = boss && bossPattern ? bossPattern.queue.join(",") : "";
   probe.dataset.enemyCount = String(game.director.enemies.length);
   probe.dataset.activeEnemies = String(game.director.enemies.filter((enemy) => enemy.active).length);
+  probe.dataset.endingStage = game.ending.snapshot().stage;
+  probe.dataset.endingResult = game.ending.snapshot().result?.id ?? "";
+  probe.dataset.endingPresentation = game.endingPresentationStage;
   const metrics = renderer.metrics();
   probe.dataset.drawCalls = String(metrics.drawCalls);
   probe.dataset.triangles = String(metrics.triangles);
@@ -232,8 +234,9 @@ function updateRuntimeProbe(probe, game, renderer) {
 
 const searchParams = new URLSearchParams(window.location.search);
 const requestedShowcase = searchParams.get("showcase");
-const showcaseMode = requestedShowcase === "boss" || requestedShowcase === "reward" ? requestedShowcase : null;
+const showcaseMode = ["boss", "reward", "ending"].includes(requestedShowcase) ? requestedShowcase : null;
 const autoplayEnabled = searchParams.get("autoplay") === "1" && showcaseMode !== "reward";
+const endingPolicy = searchParams.get("ending") === "timeout" ? "timeout" : "kill";
 const autoplayRunNumber = Math.max(1, Number(searchParams.get("run")) || 1);
 const simulationScale = autoplayEnabled ? Math.min(4, Math.max(1, Number(searchParams.get("timeScale")) || 4)) : 1;
 const canvas = document.querySelector("#game-canvas");
@@ -243,18 +246,22 @@ runtimeProbe.id = "runtime-probe";
 runtimeProbe.hidden = true;
 document.body.append(runtimeProbe);
 const settings = new SettingsStore(searchParams.get("benchmark") === "1" ? null : undefined);
+const narrativeProgress = new NarrativeProgressStore(searchParams.get("benchmark") === "1" ? null : undefined);
 if (autoplayEnabled) settings.set("gameplay.difficulty", searchParams.get("difficulty") ?? "standard");
 const input = new InputController(canvas, settings);
 const audio = new AudioSystem(settings);
 const renderer = new GameRenderer(canvas, settings);
 const game = new Game(input, settings, { requireRoomReady: true });
 const settingsMenu = new SettingsMenu(uiRoot, settings, input);
-const ui = new GameUi(uiRoot, game, settings, input, audio, settingsMenu);
+const ui = new GameUi(uiRoot, game, settings, input, audio, settingsMenu, narrativeProgress);
 let autoplayRuntime = null;
 
 renderer.setLoadProgressListener((progress) => ui.setLoadingProgress(progress));
 
 game.on((event) => {
+  if (event.type === "endingCompleted" && narrativeProgress.unlockGlossary()) {
+    game.emit("glossaryUnlocked", narrativeProgress.getSnapshot());
+  }
   renderer.handleEvent(event, game);
   audio.handleEvent(event);
   ui.handleEvent(event);
@@ -278,6 +285,9 @@ settings.subscribe((values) => {
 
 window.addEventListener("focus", () => audio.setFocused(true));
 window.addEventListener("blur", () => audio.setFocused(false));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && ["playing", "endingChoice"].includes(game.phase)) game.togglePause(performance.now());
+});
 
 try {
   await renderer.ready;
@@ -287,7 +297,9 @@ try {
   ui.setLoadError();
 }
 
-const showcaseSeed = searchParams.get("seed") ?? (showcaseMode === "boss" ? "SHOWCASE-BOSS" : "SHOWCASE-REWARD");
+const showcaseSeed = searchParams.get("seed") ?? (
+  showcaseMode === "boss" ? "SHOWCASE-BOSS" : showcaseMode === "ending" ? "SHOWCASE-ENDING" : "SHOWCASE-REWARD"
+);
 const autoplaySeed = showcaseMode === "boss" ? showcaseSeed : searchParams.get("seed") ?? `AI-RUN-${autoplayRunNumber}`;
 if (autoplayEnabled) {
   autoplayRuntime = createAutoplayRuntime({
@@ -297,10 +309,12 @@ if (autoplayEnabled) {
     settings,
     runNumber: autoplayRunNumber,
     seed: autoplaySeed,
+    endingPolicy,
   });
 }
 if (showcaseMode === "boss") game.enterBossShowcase(showcaseSeed);
 else if (showcaseMode === "reward") game.enterRewardShowcase(showcaseSeed);
+else if (showcaseMode === "ending") game.enterEndingShowcase(showcaseSeed);
 else if (autoplayRuntime) game.startRun(autoplaySeed);
 
 let benchmark = null;
@@ -323,10 +337,17 @@ renderer.setAnimationLoop((time) => {
   previousTime = time;
   lastPresentedAt = time;
 
-  if (input.consume("pause")) {
+  const pauseInput = input.consumePressed("pause");
+  if (pauseInput) {
     if (settingsMenu.isOpen) settingsMenu.close();
-    else game.togglePause();
+    else game.togglePause(pauseInput.timeStamp);
   }
+
+  if (game.phase === "endingChoice") {
+    const killInput = input.consumePressed("attack") ?? input.consumePressed("interact");
+    if (killInput) game.tryKillPrincess(killInput.timeStamp);
+  }
+  game.updateNarrativeClock(time);
 
   if (game.player && !autoplayRuntime?.active) game.setAimPoint(renderer.screenToGround(input.pointerNdc));
   accumulator += Math.min(rawDelta * simulationScale, RUN_CONFIG.fixedStep * RUN_CONFIG.maxFixedSteps);

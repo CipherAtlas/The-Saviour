@@ -16,7 +16,13 @@ const TIMELINE_EVENTS = new Set([
   "enemyDefeated",
   "blessingChosen",
   "dialogueStarted",
-  "dialogueResponse",
+  "dialogueAdvanced",
+  "dialogueCompleted",
+  "witchMagicCeased",
+  "endingDecisionStarted",
+  "endingChoiceResolved",
+  "endingFadeStarted",
+  "endingCompleted",
   "queenVolley",
   "queenSummon",
   "queenTeleport",
@@ -127,6 +133,9 @@ export class PlaytestReporter {
     this.currentRoomKey = null;
     this.floorsReached = new Set();
     this.dialogueChoices = [];
+    this.narrativeSequences = [];
+    this.endingDecision = { startedAt: null, resolvedAt: null, durationSeconds: null, outcome: null };
+    this.endingDecisionStartedAtMs = null;
     this.blessings = [];
     this.chamberRewards = [];
     this.pathRanks = { Reaper: 0, Shade: 0, Grave: 0 };
@@ -204,9 +213,7 @@ export class PlaytestReporter {
     const signature = JSON.stringify(intent.uiAction);
     if (signature === this.lastIntentSignature) return;
     this.lastIntentSignature = signature;
-    if (intent.uiAction.type === "chooseDialogue") {
-      this.dialogueChoices.push({ atSeconds: round(this.elapsed), index: intent.uiAction.index });
-    }
+    if (intent.uiAction.type === "continueDialogue") this.dialogueChoices.push({ atSeconds: round(this.elapsed), action: "continue" });
   }
 
   recordDiagnostic(diagnostic) {
@@ -277,15 +284,43 @@ export class PlaytestReporter {
         rank: detail.rank,
       });
       if (detail.path in this.pathRanks) this.pathRanks[detail.path] += 1;
+    } else if (["roomRewardOffered", "blessingOffered"].includes(event.type)) {
+      this.recordNarrativeSequence(detail.dialogue?.[0]?.sequenceId);
+    } else if (event.type === "dialogueStarted") {
+      this.recordNarrativeSequence(detail.sequenceId);
+    } else if (event.type === "endingDecisionStarted") {
+      this.endingDecision.startedAt = round(this.elapsed);
+      this.endingDecisionStartedAtMs = Number.isFinite(detail.decision?.startedAtMs)
+        ? detail.decision.startedAtMs
+        : null;
+    } else if (event.type === "endingChoiceResolved") {
+      this.endingDecision.resolvedAt = round(this.elapsed);
+      this.endingDecision.outcome = detail.ending ?? null;
+      if (Number.isFinite(detail.decision?.durationMs) && Number.isFinite(detail.decision?.remainingMs)) {
+        this.endingDecision.durationSeconds = round(
+          (detail.decision.durationMs - detail.decision.remainingMs) / 1000,
+        );
+      } else if (this.endingDecisionStartedAtMs !== null && Number.isFinite(detail.result?.resolvedAtMs)) {
+        this.endingDecision.durationSeconds = round(
+          (detail.result.resolvedAtMs - this.endingDecisionStartedAtMs) / 1000,
+        );
+      } else if (this.endingDecision.startedAt !== null) {
+        this.endingDecision.durationSeconds = round(this.endingDecision.resolvedAt - this.endingDecision.startedAt);
+      }
     } else if (event.type === "runEnded") {
-      this.outcome.completed = true;
+      this.outcome.completed = detail.completed === true || detail.victory === true;
       this.outcome.victory = detail.victory === true;
-      this.outcome.reason = detail.victory ? "victory" : "defeat";
+      this.outcome.reason = detail.completed ? "ending" : detail.victory ? "victory" : "defeat";
       this.outcome.ending = detail.ending ?? null;
-      if (!detail.victory) this.outcome.deaths += 1;
+      if (!detail.completed && !detail.victory) this.outcome.deaths += 1;
     }
 
     if (TIMELINE_EVENTS.has(event.type)) this.addTimeline(event.type, detail);
+  }
+
+  recordNarrativeSequence(sequenceId) {
+    if (!sequenceId || this.narrativeSequences.includes(sequenceId)) return;
+    this.narrativeSequences.push(sequenceId);
   }
 
   startRoom(floor, room, boss) {
@@ -352,6 +387,8 @@ export class PlaytestReporter {
         blessings: [...this.blessings],
         pathRanks: { ...this.pathRanks },
         dialogueChoices: [...this.dialogueChoices],
+        narrativeSequences: [...this.narrativeSequences],
+        endingDecision: { ...this.endingDecision },
       },
       combat: {
         ...this.combat,
@@ -440,7 +477,7 @@ export class PlaytestReporter {
     const executedActions = this.combat.attacks;
     const combatStyles = [executedActions.light, executedActions.heavy, executedActions.dash, executedActions.dashAttack].filter((count) => count > 0).length;
 
-    if (this.outcome.victory) strengths.push("The agent completed the full dungeon run and reached a valid ending.");
+    if (this.outcome.completed) strengths.push(`The agent completed the full dungeon run and reached the ${this.outcome.ending} ending.`);
     if (encounteredTypes >= Math.min(4, this.options.expectedEnemyTypeCount)) {
       strengths.push(`Enemy variety remained visible in play (${encounteredTypes} categories encountered).`);
       funMoments.push("Target priorities changed as ranged, melee, specialist, and boss threats overlapped.");
@@ -460,7 +497,7 @@ export class PlaytestReporter {
       strengths.push("No cleared room exceeded the configured pacing ceiling.");
     }
 
-    if (!this.outcome.victory) {
+    if (!this.outcome.completed) {
       friction.push(`The run ended before victory (${this.outcome.reason ?? "unknown reason"}).`);
       recommendations.push({ priority: "high", category: "survivability", finding: "The automated player could not finish the run.", action: "Inspect the final two damage spikes and reduce unavoidable overlap or improve recovery access." });
     }

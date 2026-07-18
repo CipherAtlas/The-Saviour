@@ -186,10 +186,14 @@ test("projectile evasion is redirected away from an arena corner", () => {
 test("dialogue, reward, blessing, and portal phases use only their public action contracts", () => {
   const dialogue = createAgent(createState({
     phase: "dialogue",
-    dialogue: { awaitingResponse: false, choices: [{ text: "A" }, { text: "B" }] },
+    dialogue: { active: true },
   }));
   dialogue.agent.tick(1 / 60);
-  assert.deepEqual(dialogue.intents[0].uiAction, { type: "chooseDialogue", index: 0 });
+  assert.deepEqual(dialogue.intents[0].uiAction, { type: "continueDialogue" });
+
+  const ending = createAgent(createState({ phase: "endingChoice", ending: { stage: "decision" } }));
+  ending.agent.tick(1 / 60);
+  assert.deepEqual(ending.intents[0].uiAction, { type: "killPrincess" });
 
   const blessing = createAgent(createState({
     phase: "blessing",
@@ -262,23 +266,54 @@ test("the reporter emits a serializable full-run assessment", () => {
   reporter.recordEvent({ type: "enemyHit", detail: { type: "wraith", damage: 35, critical: true } });
   reporter.recordEvent({ type: "enemyDefeated", detail: { type: "wraith" } });
   reporter.recordEvent({ type: "playerHit", detail: { amount: 12, source: "wraith" } });
+  reporter.recordEvent({ type: "dialogueStarted", detail: { sequenceId: "opening.ring" } });
+  reporter.recordEvent({ type: "roomRewardOffered", detail: {
+    dialogue: [{ sequenceId: "floor.f01.upgrade.r01" }],
+  } });
+  reporter.recordEvent({ type: "blessingOffered", detail: {
+    dialogue: [{ sequenceId: "floor.f01.upgrade.threshold" }],
+  } });
   reporter.recordEvent({ type: "roomCleared", detail: { floor: 1, room: 1 } }, 24);
   reporter.recordEvent({ type: "roomRewardChosen", detail: {
     floor: 1, room: 1, id: "whetted-crescent", name: "Whetted Crescent", path: "Reaper", rank: 1,
   } });
   reporter.recordEvent({ type: "blessingChosen", detail: { id: "grave-edge", name: "Grave-Tempered Edge" } });
-  reporter.recordEvent({ type: "runEnded", detail: { victory: true, ending: "homecoming" } }, 30);
+  reporter.recordEvent({
+    type: "endingDecisionStarted",
+    detail: { decision: { startedAtMs: 10_000 } },
+  }, 29);
+  reporter.recordEvent({
+    type: "endingChoiceResolved",
+    detail: {
+      ending: "kill",
+      result: { resolvedAtMs: 115_000 },
+      decision: { durationMs: 5_000, remainingMs: 0 },
+    },
+  }, 49);
+  reporter.recordEvent({ type: "runEnded", detail: { completed: true, victory: true, ending: "kill" } }, 50);
 
   const report = reporter.finalize();
   const json = reporter.serialize();
 
   assert.equal(report.outcome.victory, true);
+  assert.equal(report.outcome.ending, "kill");
+  assert.deepEqual(report.progression.endingDecision, {
+    startedAt: 29,
+    resolvedAt: 49,
+    durationSeconds: 5,
+    outcome: "kill",
+  });
   assert.equal(report.combat.damageDealt, 35);
   assert.equal(report.combat.killsByType.wraith, 1);
   assert.equal(report.combat.encounteredByType.wraith, 1);
   assert.equal(report.progression.rooms[0].clearSeconds, 24);
   assert.equal(report.progression.chamberRewards.length, 1);
   assert.equal(report.progression.pathRanks.Reaper, 1);
+  assert.deepEqual(report.progression.narrativeSequences, [
+    "opening.ring",
+    "floor.f01.upgrade.r01",
+    "floor.f01.upgrade.threshold",
+  ]);
   assert.equal(report.performance.fpsP05, 72);
   assert.equal(report.experience.recommendations.some((item) => item.category === "performance"), false);
   assert.ok(report.experience.whatWasGood.length > 0);

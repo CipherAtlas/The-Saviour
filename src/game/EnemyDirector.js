@@ -11,7 +11,7 @@ import {
   queenPhaseForHealth,
   QUEEN_SUMMON_CAP,
 } from "./bossPatterns.js";
-import { createEncounterPlan } from "./encounterPatterns.js";
+import { createEncounterPlan, ENEMY_ORIGINS } from "./encounterPatterns.js";
 
 const PROJECTILE_POOL_SIZE = 144;
 const BOMBADIER_ATTACK_SPACING = 1.15;
@@ -64,6 +64,7 @@ function segmentDistanceSquared(start, end, point) {
 function createProjectile() {
   return {
     active: false,
+    origin: ENEMY_ORIGINS.WITCH,
     kind: PROJECTILE_KINDS.HEX_BOLT,
     mode: "direct",
     sourceType: "hexer",
@@ -97,6 +98,7 @@ export class EnemyDirector {
     this.waveDelay = 0;
     this.encounterFloor = 1;
     this.queenPatternState = null;
+    this.witchOriginDismissed = false;
   }
 
   reset({ arena, floor, room, rng, difficulty, bossModifiers = {} }) {
@@ -112,9 +114,10 @@ export class EnemyDirector {
     this.pendingWaves.length = 0;
     this.waveDelay = 0;
     this.queenPatternState = createQueenPatternState(rng.fork("queen-patterns"));
+    this.witchOriginDismissed = false;
 
     if (arena.boss) {
-      this.spawnEnemy("queen", { x: 0, z: 2.5 }, floor);
+      this.spawnEnemy("queen", { x: 0, z: 2.5 }, floor, { origin: ENEMY_ORIGINS.WITCH });
       return;
     }
 
@@ -129,16 +132,26 @@ export class EnemyDirector {
     this.startNextWave();
   }
 
-  spawnEnemy(type, position, floor = 1) {
+  spawnEnemy(type, position, floor = 1, options = {}) {
     const definition = getEnemyArchetype(type);
+    const requestedOrigin = options.origin ?? ENEMY_ORIGINS.WITCH;
+    if (!Object.values(ENEMY_ORIGINS).includes(requestedOrigin)) throw new RangeError(`Unknown enemy origin: ${requestedOrigin}`);
+    const origin = type === "queen" ? ENEMY_ORIGINS.WITCH : requestedOrigin;
     const stats = definition.stats;
     const difficulty = this.difficulty ?? STANDARD_DIFFICULTY;
     const floorHealth = 1 + Math.max(0, floor - 1) * (type === "queen" ? 0.02 : 0.078);
     const bossHealth = type === "queen" ? 1 + this.bossModifiers.health : 1;
     const maxHealth = Math.round(stats.maxHealth * floorHealth * difficulty.enemyHealth * bossHealth);
+    const id = this.nextEnemyId++;
     const enemy = {
-      id: this.nextEnemyId++,
+      id,
       type,
+      origin,
+      originPhase: Number.isFinite(options.originPhase)
+        ? options.originPhase
+        : (id * 2.399963229728653) % (Math.PI * 2),
+      formationIndex: options.formationIndex ?? 0,
+      dismissed: false,
       modelKey: definition.modelKey,
       behavior: definition.behavior,
       active: true,
@@ -169,6 +182,14 @@ export class EnemyDirector {
       lastAttackKind: null,
     };
     this.enemies.push(enemy);
+    this.emit("enemySpawned", {
+      id: enemy.id,
+      type: enemy.type,
+      origin: enemy.origin,
+      originPhase: enemy.originPhase,
+      formationIndex: enemy.formationIndex,
+      position: clonePosition(enemy.position),
+    });
     return enemy;
   }
 
@@ -199,14 +220,26 @@ export class EnemyDirector {
       const entry = wave.entries[index];
       const fallback = { x: index - wave.entries.length / 2, z: 4 };
       const spawn = this.arena.enemySpawnPoints[entry.spawnIndex % Math.max(1, this.arena.enemySpawnPoints.length)] ?? fallback;
-      this.spawnEnemy(entry.type, spawn, this.encounterFloor);
+      const definition = getEnemyArchetype(entry.type);
+      const position = entry.origin === ENEMY_ORIGINS.PRINCESS
+        ? this.findOpenPoint({
+          x: spawn.x + Math.cos(entry.originPhase) * 0.55,
+          z: spawn.z + Math.sin(entry.originPhase) * 0.55,
+        }, definition.stats.radius)
+        : spawn;
+      this.spawnEnemy(entry.type, position, this.encounterFloor, entry);
     }
     this.waveDelay = this.pendingWaves[0]?.delay ?? 0;
+    const originCounts = wave.entries.reduce((counts, entry) => {
+      counts[entry.origin] += 1;
+      return counts;
+    }, { [ENEMY_ORIGINS.WITCH]: 0, [ENEMY_ORIGINS.PRINCESS]: 0 });
     this.emit("encounterWaveStarted", {
       planId: this.encounterPlan?.id ?? null,
       wave: wave.index + 1,
       totalWaves: this.encounterPlan?.waves.length ?? 1,
       types: wave.entries.map((entry) => entry.type),
+      originCounts,
     });
     return true;
   }
@@ -365,6 +398,7 @@ export class EnemyDirector {
       this.deactivateProjectilesFrom("queen");
       this.emit("bossPhaseChanged", {
         enemyId: enemy.id,
+        origin: enemy.origin,
         phase,
         duration: enemy.actionTimer,
         health: enemy.health,
@@ -390,7 +424,7 @@ export class EnemyDirector {
     enemy.previousPosition.x = target.x;
     enemy.previousPosition.z = target.z;
     enemy.attackCooldown = 0.75;
-    this.emit("queenTeleport", { position: clonePosition(enemy.position), previousPosition });
+    this.emit("queenTeleport", { origin: enemy.origin, position: clonePosition(enemy.position), previousPosition });
   }
 
   summonQueenGuard(enemy) {
@@ -404,10 +438,10 @@ export class EnemyDirector {
         x: enemy.position.x + Math.cos(angle) * 3,
         z: enemy.position.z + Math.sin(angle) * 3,
       }, getEnemyArchetype(selectedTypes[index]).stats.radius);
-      this.spawnEnemy(selectedTypes[index], position, 10);
+      this.spawnEnemy(selectedTypes[index], position, 10, { origin: enemy.origin, formationIndex: index });
     }
     enemy.attackCooldown = 2;
-    this.emit("queenSummon", { position: clonePosition(enemy.position), types: selectedTypes });
+    this.emit("queenSummon", { origin: enemy.origin, position: clonePosition(enemy.position), types: selectedTypes });
   }
 
   facePlayer(enemy, player) {
@@ -455,6 +489,7 @@ export class EnemyDirector {
     this.emit("enemyTelegraph", {
       enemyId: enemy.id,
       type: enemy.type,
+      enemyOrigin: enemy.origin,
       attack: attackKind,
       shape: attack.shape,
       position: targetedCircle ? clonePosition(target) : clonePosition(enemy.position),
@@ -502,6 +537,7 @@ export class EnemyDirector {
         this.spawnProjectile(enemy.position, Math.atan2(enemy.attackDirection.z, enemy.attackDirection.x), 11.5, enemy.damage, 2.25, "violet", {
           kind: PROJECTILE_KINDS.HEX_BOLT,
           sourceType: enemy.type,
+          origin: enemy.origin,
           radius: 0.24,
         });
         break;
@@ -517,7 +553,7 @@ export class EnemyDirector {
         enemy.previousPosition.x = enemy.attackTarget.x;
         enemy.previousPosition.z = enemy.attackTarget.z;
         if (isInsideCircle(enemy.position, attack.radius, player.position, player.radius)) damagePlayer(enemy.damage, attackKind);
-        this.emit("enemyBlink", { enemyId: enemy.id, type: enemy.type, position: clonePosition(enemy.position) });
+        this.emit("enemyBlink", { enemyId: enemy.id, type: enemy.type, origin: enemy.origin, position: clonePosition(enemy.position) });
         break;
       case "lobbedBomb":
         this.spawnAreaProjectile(enemy, PROJECTILE_KINDS.CINDER_BOMB, "lob", attack.radius, attack.travelTime, "ember");
@@ -527,7 +563,7 @@ export class EnemyDirector {
         break;
       case "royalVolley":
         this.spawnQueenVolley(enemy);
-        this.emit("queenVolley", { position: clonePosition(enemy.position), phase: enemy.bossPhase });
+        this.emit("queenVolley", { origin: enemy.origin, position: clonePosition(enemy.position), phase: enemy.bossPhase });
         break;
       case "royalFan":
         this.spawnFan(enemy, enemy.bossPhase === 3 ? 11 : enemy.bossPhase === 2 ? 9 : 7, 0.88, 9.5, enemy.damage * 0.72, PROJECTILE_KINDS.QUEEN_ORB, "violet");
@@ -536,6 +572,7 @@ export class EnemyDirector {
         this.spawnProjectile(enemy.position, Math.atan2(enemy.attackDirection.z, enemy.attackDirection.x), 15, enemy.damage * 1.05, 1.35, "violet", {
           kind: PROJECTILE_KINDS.QUEEN_LANCE,
           sourceType: enemy.type,
+          origin: enemy.origin,
           radius: 0.34,
         });
         break;
@@ -551,6 +588,7 @@ export class EnemyDirector {
     this.emit("enemyAttack", {
       enemyId: enemy.id,
       type: enemy.type,
+      origin: enemy.origin,
       attack: attackKind,
       shape: attack.shape,
       position: clonePosition(enemy.position),
@@ -603,6 +641,7 @@ export class EnemyDirector {
       this.spawnProjectile(enemy.position, centerAngle + offset, speed, damage, 2.7, color, {
         kind,
         sourceType: enemy.type,
+        origin: enemy.origin,
         radius: kind === PROJECTILE_KINDS.QUEEN_ORB ? 0.32 : 0.23,
       });
     }
@@ -616,6 +655,7 @@ export class EnemyDirector {
       this.spawnProjectile(enemy.position, angle, enemy.bossPhase === 2 ? 9 : 7.5, enemy.damage * 0.68, 3.6, "violet", {
         kind: PROJECTILE_KINDS.QUEEN_ORB,
         sourceType: enemy.type,
+        origin: enemy.origin,
         radius: 0.32,
       });
     }
@@ -628,6 +668,7 @@ export class EnemyDirector {
       kind,
       mode,
       sourceType: enemy.type,
+      origin: enemy.origin,
       target: enemy.attackTarget,
       areaRadius,
       radius: mode === "lob" ? 0.38 : areaRadius,
@@ -638,6 +679,7 @@ export class EnemyDirector {
     const projectile = this.projectiles.find((entry) => !entry.active);
     if (!projectile) return null;
     projectile.active = true;
+    projectile.origin = options.origin ?? ENEMY_ORIGINS.WITCH;
     projectile.kind = options.kind ?? PROJECTILE_KINDS.HEX_BOLT;
     projectile.mode = options.mode ?? "direct";
     projectile.sourceType = options.sourceType ?? "projectile";
@@ -680,18 +722,18 @@ export class EnemyDirector {
 
       if (projectile.life <= 0) {
         if (projectile.mode === "lob" || projectile.mode === "rune") this.detonateProjectile(projectile, player, damagePlayer);
-        else projectile.active = false;
+        else this.deactivateProjectile(projectile);
         continue;
       }
 
       if (projectile.mode !== "direct") continue;
       if (Math.abs(projectile.position.x) > halfWidth || Math.abs(projectile.position.z) > halfDepth) {
-        projectile.active = false;
+        this.deactivateProjectile(projectile);
         continue;
       }
       const combinedRadius = projectile.radius + player.radius;
       if (segmentDistanceSquared(projectile.previousPosition, projectile.position, player.position) <= combinedRadius * combinedRadius) {
-        projectile.active = false;
+        this.deactivateProjectile(projectile);
         damagePlayer(projectile.damage, projectile.kind);
       }
     }
@@ -707,11 +749,12 @@ export class EnemyDirector {
     this.emit("projectileImpact", {
       kind: projectile.kind,
       sourceType: projectile.sourceType,
+      origin: projectile.origin,
       shape: "circle",
       position: clonePosition(projectile.position),
       radius: projectile.areaRadius,
     });
-    projectile.active = false;
+    this.deactivateProjectile(projectile);
   }
 
   findOpenPoint(point, radius) {
@@ -748,10 +791,11 @@ export class EnemyDirector {
       enemy.knockback.x += direction.x * appliedKnockback;
       enemy.knockback.z += direction.z * appliedKnockback;
     }
-    if (blocked) this.emit("enemyBlock", { id: enemy.id, type: enemy.type, position: clonePosition(enemy.position) });
+    if (blocked) this.emit("enemyBlock", { id: enemy.id, type: enemy.type, origin: enemy.origin, position: clonePosition(enemy.position) });
     this.emit("enemyHit", {
       id: enemy.id,
       type: enemy.type,
+      origin: enemy.origin,
       position: clonePosition(enemy.position),
       damage: appliedDamage,
       critical,
@@ -761,7 +805,7 @@ export class EnemyDirector {
     });
     if (enemy.health > 0) return false;
     enemy.active = false;
-    this.emit("enemyDefeated", { id: enemy.id, type: enemy.type, position: clonePosition(enemy.position) });
+    this.emit("enemyDefeated", { id: enemy.id, type: enemy.type, origin: enemy.origin, position: clonePosition(enemy.position) });
     return true;
   }
 
@@ -778,13 +822,48 @@ export class EnemyDirector {
   }
 
   deactivateProjectiles() {
-    for (const projectile of this.projectiles) projectile.active = false;
+    for (const projectile of this.projectiles) this.deactivateProjectile(projectile);
   }
 
   deactivateProjectilesFrom(sourceType) {
     for (const projectile of this.projectiles) {
-      if (projectile.active && projectile.sourceType === sourceType) projectile.active = false;
+      if (projectile.active && projectile.sourceType === sourceType) this.deactivateProjectile(projectile);
     }
+  }
+
+  deactivateProjectile(projectile) {
+    projectile.active = false;
+    projectile.origin = ENEMY_ORIGINS.WITCH;
+  }
+
+  dismissWitchOrigin() {
+    if (this.witchOriginDismissed) return null;
+    this.witchOriginDismissed = true;
+    const actors = [];
+    for (const enemy of this.enemies) {
+      if (!enemy.active || enemy.origin !== ENEMY_ORIGINS.WITCH) continue;
+      enemy.active = false;
+      enemy.dismissed = true;
+      actors.push({ id: enemy.id, type: enemy.type, position: clonePosition(enemy.position) });
+    }
+    let projectiles = 0;
+    for (const projectile of this.projectiles) {
+      if (!projectile.active || projectile.origin !== ENEMY_ORIGINS.WITCH) continue;
+      projectiles += 1;
+      this.deactivateProjectile(projectile);
+    }
+    let pendingEntries = 0;
+    this.pendingWaves = this.pendingWaves.flatMap((wave) => {
+      const entries = wave.entries.filter((entry) => {
+        if (entry.origin !== ENEMY_ORIGINS.WITCH) return true;
+        pendingEntries += 1;
+        return false;
+      });
+      return entries.length > 0 ? [{ ...wave, entries }] : [];
+    });
+    const detail = { origin: ENEMY_ORIGINS.WITCH, actors, projectiles, pendingEntries };
+    this.emit("witchOriginDismissed", detail);
+    return detail;
   }
 
   activeQueenHazardCount() {

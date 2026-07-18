@@ -155,10 +155,45 @@ export class AudioSystem {
       this.setBiome(biomeForArena(detail));
       this.setMusicState(detail.boss ? "boss" : "combat");
     }
+    if (type === "encounterWaveStarted") {
+      const princessCount = detail.originCounts?.princess ?? 0;
+      if (princessCount > 0) {
+        this.playNoise(0.18, 0.045, this.buses.sfx, now, 430);
+        this.playTone(164.81, 0.3, 0.055, this.buses.sfx, now, "sawtooth", 110);
+      } else {
+        this.playTone(220, 0.18, 0.04, this.buses.sfx, now, "triangle", 277.18);
+      }
+    }
+    if (type === "endingSequenceStarted") {
+      this.playTone(73.42, 1.1, 0.12, this.buses.sfx, now, "triangle", 36.71);
+      this.setMusicState("exploration");
+    }
+    if (type === "witchMagicCeased") {
+      this.playNoise(0.8, 0.1, this.buses.sfx, now, 310);
+      this.playTone(146.83, 0.9, 0.09, this.buses.voice, now, "sine", 55);
+    }
+    if (type === "princessHumanReturned") {
+      this.playTone(392, 0.5, 0.07, this.buses.voice, now, "sine", 523.25);
+    }
+    if (type === "endingDecisionStarted") {
+      this.playTone(98, 0.36, 0.08, this.buses.ui, now, "triangle", 82.41);
+    }
+    if (type === "endingChoiceResolved") {
+      if (detail.ending === "kill") {
+        this.playTone(261.63, 0.85, 0.12, this.buses.sfx, now, "triangle", 65.41);
+      } else {
+        this.playNoise(0.65, 0.13, this.buses.sfx, now, 240);
+        this.playTone(82.41, 0.9, 0.1, this.buses.sfx, now, "sawtooth", 41.2);
+      }
+    }
+    if (type === "glossaryUnlocked") {
+      this.playTone(523.25, 0.22, 0.07, this.buses.ui, now, "triangle", 783.99);
+      this.playTone(659.25, 0.35, 0.06, this.buses.ui, now + 0.1, "triangle", 1046.5);
+    }
     if (type === "runStarted") this.setMusicState("exploration");
     if (type === "runEnded") this.setMusicState("exploration");
     if (type === "dialogueStarted") this.setDialogueDucking(true);
-    if (type === "phaseChanged" && detail.phase !== "dialogue") this.setDialogueDucking(false);
+    if (type === "phaseChanged") this.setDialogueDucking(detail.phase === "dialogue");
     if (type === "blessingChosen") this.playTone(523.25, 0.42, 0.1, this.buses.ui, now, "triangle", 1046.5);
   }
 

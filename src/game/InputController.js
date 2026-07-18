@@ -8,6 +8,7 @@ export class InputController {
     this.settings = settings;
     this.down = new Set();
     this.pressed = new Set();
+    this.pressedAt = new Map();
     this.pointerNdc = { x: 0, y: 0 };
     this.touchMove = { x: 0, y: 0 };
     this.automationMove = { x: 0, y: 0 };
@@ -54,6 +55,7 @@ export class InputController {
     if (!this.enabled || event.repeat) return;
     this.down.add(event.code);
     this.pressed.add(event.code);
+    this.pressedAt.set(event.code, event.timeStamp);
 
     if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(event.code)) {
       event.preventDefault();
@@ -78,6 +80,7 @@ export class InputController {
     this.canvas.focus({ preventScroll: true });
     this.down.add(binding);
     this.pressed.add(binding);
+    this.pressedAt.set(binding, event.timeStamp);
   }
 
   onPointerUp(event) {
@@ -93,6 +96,7 @@ export class InputController {
   onBlur() {
     this.down.clear();
     this.pressed.clear();
+    this.pressedAt.clear();
   }
 
   actionBindings(action) {
@@ -108,16 +112,36 @@ export class InputController {
   }
 
   consume(action) {
-    if (this.automationPressed.delete(action)) return true;
-    for (const binding of this.actionBindings(action)) {
-      if (this.pressed.delete(binding)) return true;
+    return this.consumePressed(action) !== null;
+  }
+
+  consumePressed(action) {
+    if (this.automationPressed.delete(action)) {
+      return { action, binding: `Automation:${action}`, timeStamp: performance.now() };
     }
-    return false;
+    for (const binding of this.actionBindings(action)) {
+      if (!this.pressed.delete(binding)) continue;
+      const timeStamp = this.pressedAt.get(binding) ?? performance.now();
+      this.pressedAt.delete(binding);
+      return { action, binding, timeStamp };
+    }
+    return null;
+  }
+
+  flushActions(actions) {
+    for (const action of actions) {
+      this.automationPressed.delete(action);
+      for (const binding of this.actionBindings(action)) {
+        this.pressed.delete(binding);
+        this.pressedAt.delete(binding);
+      }
+    }
   }
 
   endFrame(fixedSteps = 1) {
     if (fixedSteps <= 0) return;
     this.pressed.clear();
+    this.pressedAt?.clear();
   }
 
   movement() {
@@ -144,13 +168,14 @@ export class InputController {
     resolve(null);
   }
 
-  setTouchAction(action, active) {
+  setTouchAction(action, active, timeStamp = performance.now()) {
     const binding = `Touch:${action}`;
     const bindings = this.settings.values.controls.bindings[action];
     if (!bindings.includes(binding)) bindings.push(binding);
     if (active) {
       this.down.add(binding);
       this.pressed.add(binding);
+      this.pressedAt.set(binding, timeStamp);
     } else {
       this.down.delete(binding);
     }

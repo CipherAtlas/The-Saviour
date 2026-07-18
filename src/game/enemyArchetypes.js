@@ -89,7 +89,7 @@ export const ENEMY_ARCHETYPES = Object.freeze({
     },
   }),
   queen: archetype({
-    name: "The Hollow Queen",
+    name: "The Witch",
     modelKey: "queen",
     behavior: "bossPhases",
     unlockFloor: 10,

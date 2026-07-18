@@ -25,8 +25,7 @@ function startGame(seed, options = {}) {
   const game = new Game(input, createSettings(), options);
   game.startRun(seed);
   if (options.requireRoomReady) game.acknowledgeRoomReady(game.roomLoadToken);
-  game.chooseDialogue(0);
-  game.continueDialogue();
+  while (game.phase === "dialogue") game.skipDialogue();
   return { game, input };
 }
 

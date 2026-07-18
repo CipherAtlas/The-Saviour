@@ -1,7 +1,9 @@
 import { BLESSINGS, chooseBlessings } from "./blessings.js";
 import { circleIntersectsArc, moveCircleDetailed, SpatialHash } from "./collision.js";
 import { DialogueSystem } from "./DialogueSystem.js";
+import { EndingSequence } from "./EndingSequence.js";
 import { EnemyDirector } from "./EnemyDirector.js";
+import { floorProjectionId, upgradeSequenceId } from "./dialogueContent.js";
 import { CAMERA_CONFIG, DIFFICULTY, PLAYER_CONFIG, PORTAL_CONFIG, RUN_CONFIG } from "./gameConfig.js";
 import { PlayerCombat } from "./PlayerCombat.js";
 import {
@@ -88,10 +90,16 @@ export class Game {
     this.pendingBlessings = [];
     this.pendingRoomRewards = [];
     this.roomRewardPending = false;
-    this.pendingDialogueCallback = null;
-    this.dialogueAwaitingResponse = false;
+    this.narrativeQueue = [];
+    this.activeNarrative = null;
+    this.seenRunSequences = new Set();
     this.bossModifiers = { health: 0, enrage: 0 };
-    this.ending = null;
+    this.ending = new EndingSequence();
+    this.endingPresentationStage = "inactive";
+    this.endingResolutionHandled = false;
+    this.endingCompletionHandled = false;
+    this.lastNarrativeTimestamp = 0;
+    this.pausedPhase = null;
     this.benchmarkMode = false;
     this.showcaseMode = null;
   }
@@ -117,7 +125,7 @@ export class Game {
     this.pendingRoomRewards = [];
     this.roomRewardPending = false;
     this.bossModifiers = { health: 0, enrage: 0 };
-    this.ending = null;
+    this.resetNarrativeState();
     this.benchmarkMode = false;
     this.showcaseMode = null;
     this.portalTraversal = null;
@@ -139,9 +147,8 @@ export class Game {
       deathDefiance: 0,
     };
     this.combat.reset();
-    this.loadRoom();
     this.emit("runStarted", { seed });
-    this.startDialogue("intro", () => this.requestRoomPlay());
+    this.loadRoom();
   }
 
   loadRoom() {
@@ -177,18 +184,7 @@ export class Game {
     });
     this.emitHud();
 
-    const scriptedDialogueEnabled = !this.benchmarkMode && !this.showcaseMode;
-    if (scriptedDialogueEnabled && this.floor === 4 && this.room === 1 && !this.flags.metFallenKnight) {
-      this.flags.metFallenKnight = true;
-      this.startDialogue("fallenKnight", () => this.requestRoomPlay());
-    } else if (scriptedDialogueEnabled && this.floor === 6 && this.room === 1 && !this.flags.sawPrincessVision) {
-      this.flags.sawPrincessVision = true;
-      this.startDialogue("princessVision", () => this.requestRoomPlay());
-    } else if (scriptedDialogueEnabled && boss) {
-      this.startDialogue("queenConfrontation", () => this.requestRoomPlay());
-    } else {
-      this.requestRoomPlay();
-    }
+    this.queueRoomOpeningNarrative(boss);
   }
 
   setAimPoint(point) {
@@ -279,7 +275,14 @@ export class Game {
         return;
       }
       this.setPhase("dead");
-      this.emit("runEnded", { victory: false, floor: this.floor, room: this.room, seed: this.seed });
+      this.emit("runEnded", {
+        completed: false,
+        victory: false,
+        ending: null,
+        floor: this.floor,
+        room: this.room,
+        seed: this.seed,
+      });
     }
   }
 
@@ -291,21 +294,15 @@ export class Game {
     if (type === "enemyHit" && detail.type === "queen") {
       this.emit("bossHealth", { health: detail.health, maxHealth: detail.maxHealth });
     }
+    if (type === "enemyDefeated" && detail.type === "queen" && !this.flags.queenDefeated) {
+      this.startEndingFlow();
+    }
   }
 
   checkRoomProgress(dt) {
+    if (this.flags.queenDefeated) return;
     if (this.director.hasCombatRemaining()) return;
-    if (this.arena.boss && !this.flags.queenDefeated) {
-      this.clearTimer += dt;
-      if (this.clearTimer >= RUN_CONFIG.roomClearDelay) {
-        this.flags.queenDefeated = true;
-        this.startDialogue("ending", () => {
-          this.setPhase("victory");
-          this.emit("runEnded", { victory: true, ending: this.ending, seed: this.seed });
-        });
-      }
-      return;
-    }
+    if (this.arena.boss) return;
 
     if (!this.roomClearResolved) {
       this.clearTimer += dt;
@@ -421,6 +418,7 @@ export class Game {
   }
 
   offerRoomReward() {
+    const dialogue = this.dialogue.readInline(upgradeSequenceId(this.floor, this.room));
     this.pendingRoomRewards = offerUpgradeChoices(
       this.rng.fork(`reward-${this.floor}-${this.room}`),
       this.upgradeRanks,
@@ -430,6 +428,7 @@ export class Game {
     this.emit("roomRewardOffered", {
       floor: this.floor,
       room: this.room,
+      dialogue,
       choices: this.pendingRoomRewards.map(publicUpgradeChoice),
     });
   }
@@ -457,7 +456,12 @@ export class Game {
     if (this.floor >= RUN_CONFIG.totalFloors) return;
     this.pendingBlessings = chooseBlessings(this.rng.fork(`blessing-${this.floor}`), this.upgradeRanks);
     this.setPhase("blessing");
-    this.emit("blessingOffered", { choices: this.pendingBlessings.map(publicUpgradeChoice) });
+    this.emit("blessingOffered", {
+      floor: this.floor,
+      room: this.room,
+      dialogue: this.dialogue.readInline(upgradeSequenceId(this.floor, this.room)),
+      choices: this.pendingBlessings.map(publicUpgradeChoice),
+    });
   }
 
   requestRoomPlay() {
@@ -499,64 +503,226 @@ export class Game {
     this.loadRoom();
   }
 
-  startDialogue(id, onComplete) {
-    this.pendingDialogueCallback = onComplete;
-    this.dialogueAwaitingResponse = false;
-    this.setPhase("dialogue");
-    this.emit("dialogueStarted", this.dialogue.start(id));
+  resetNarrativeState() {
+    this.dialogue.reset();
+    this.narrativeQueue.length = 0;
+    this.activeNarrative = null;
+    this.seenRunSequences.clear();
+    this.ending.reset();
+    this.endingPresentationStage = "inactive";
+    this.endingResolutionHandled = false;
+    this.endingCompletionHandled = false;
+    this.lastNarrativeTimestamp = 0;
+    this.pausedPhase = null;
   }
 
-  chooseDialogue(index) {
-    if (this.phase !== "dialogue" || this.dialogueAwaitingResponse) return;
-    const result = this.dialogue.choose(index);
-    this.applyDialogueEffects(result.effects);
-    this.dialogueAwaitingResponse = true;
-    this.emit("dialogueResponse", { response: result.response });
+  queueRoomOpeningNarrative(boss) {
+    if (this.benchmarkMode || this.showcaseMode) {
+      this.requestRoomPlay();
+      return;
+    }
+
+    const sequenceIds = [];
+    if (this.floor === 1 && this.room === 1) {
+      sequenceIds.push("opening.ring", "opening.threshold", floorProjectionId(1));
+    } else if (this.room === 1) {
+      sequenceIds.push(floorProjectionId(this.floor));
+    }
+    if (boss) sequenceIds.push("boss.confrontation");
+
+    if (sequenceIds.length === 0) {
+      this.requestRoomPlay();
+      return;
+    }
+    sequenceIds.forEach((id, index) => {
+      const final = index === sequenceIds.length - 1;
+      this.enqueueNarrative(id, final ? () => this.requestRoomPlay() : null);
+    });
+  }
+
+  enqueueNarrative(id, onComplete = null) {
+    const sequence = this.dialogue.sequence(id);
+    if (sequence.presentation !== "modal") throw new Error(`Narrative sequence is not modal: ${id}`);
+    if (sequence.repeat === "oncePerRun" && this.seenRunSequences.has(id)) {
+      onComplete?.();
+      return false;
+    }
+    if (sequence.repeat === "oncePerRun") this.seenRunSequences.add(id);
+    this.narrativeQueue.push({ id, onComplete });
+    this.drainNarrativeQueue();
+    return true;
+  }
+
+  drainNarrativeQueue() {
+    if (this.activeNarrative || this.narrativeQueue.length === 0) return;
+    this.activeNarrative = this.narrativeQueue.shift();
+    const beat = this.dialogue.start(this.activeNarrative.id);
+    this.setPhase("dialogue");
+    this.emit("dialogueStarted", beat);
   }
 
   continueDialogue() {
-    if (!this.dialogueAwaitingResponse) return;
-    this.dialogueAwaitingResponse = false;
-    const callback = this.pendingDialogueCallback;
-    this.pendingDialogueCallback = null;
-    callback?.();
-  }
-
-  applyDialogueEffects(effects) {
-    for (const effect of effects) {
-      if (effect.type === "setFlag") this.flags[effect.key] = effect.value;
-      if (effect.type === "heal") this.player.health = Math.min(this.player.maxHealth, this.player.health + effect.amount);
-      if (effect.type === "healMax") {
-        this.player.maxHealth += effect.amount;
-        this.player.health += effect.amount;
-      }
-      if (effect.type === "damage") this.player.damageMultiplier += effect.amount;
-      if (effect.type === "critical") this.player.criticalChance += effect.amount;
-      if (effect.type === "dashRecovery") this.player.dashCooldownMultiplier *= 1 - effect.amount;
-      if (effect.type === "bossHealth") {
-        this.bossModifiers.health += effect.amount;
-        const boss = this.director.activeBoss();
-        if (boss) {
-          boss.maxHealth = Math.max(1, Math.round(boss.maxHealth * (1 + effect.amount)));
-          boss.health = Math.min(boss.health, boss.maxHealth);
-        }
-      }
-      if (effect.type === "bossEnrage") {
-        this.bossModifiers.enrage += effect.amount;
-        const boss = this.director.activeBoss();
-        if (boss) boss.speed *= 1 + effect.amount;
-      }
-      if (effect.type === "ending") this.ending = effect.value;
+    if (this.phase !== "dialogue" || !this.activeNarrative) return false;
+    const result = this.dialogue.advance();
+    if (!result.completed) {
+      this.emit("dialogueAdvanced", result.view);
+      return true;
     }
-    this.emitHud();
+    this.completeActiveNarrative(result.completedId, false);
+    return true;
   }
 
-  togglePause() {
-    if (this.phase === "playing") {
-      this.setPhase("paused");
+  skipDialogue() {
+    if (this.phase !== "dialogue" || !this.activeNarrative) return false;
+    const completedId = this.activeNarrative.id;
+    this.dialogue.reset();
+    this.completeActiveNarrative(completedId, true);
+    return true;
+  }
+
+  completeActiveNarrative(completedId, skipped) {
+    const completed = this.activeNarrative;
+    this.activeNarrative = null;
+    this.emit("dialogueCompleted", { sequenceId: completedId, skipped });
+    completed?.onComplete?.();
+    this.drainNarrativeQueue();
+  }
+
+  startEndingFlow() {
+    if (this.flags.queenDefeated) return;
+    this.flags.queenDefeated = true;
+    this.portalActive = false;
+    this.roomClearResolved = true;
+    this.input.flushActions?.(["attack", "heavy", "dash", "interact"]);
+    this.endingPresentationStage = "witchDeath";
+    this.emit("endingSequenceStarted", { floor: this.floor, room: this.room });
+    this.enqueueNarrative("ending.witch-death", () => {
+      const dismissed = this.director.dismissWitchOrigin();
+      this.endingPresentationStage = "revealCorrupted";
+      this.emit("witchMagicCeased", { dismissed });
+      this.enqueueNarrative("ending.princess-reveal", () => {
+        this.endingPresentationStage = "revealHuman";
+        this.emit("princessHumanReturned");
+        this.enqueueNarrative("ending.princess-human", () => this.beginEndingDecision());
+      });
+    });
+  }
+
+  beginEndingDecision(nowMs = performance.now()) {
+    this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, nowMs);
+    this.ending.reset();
+    this.ending.startDecision(this.lastNarrativeTimestamp);
+    this.endingPresentationStage = "decision";
+    this.endingResolutionHandled = false;
+    this.input.flushActions?.(["attack", "heavy", "dash", "interact"]);
+    this.setPhase("endingChoice");
+    const snapshot = this.ending.snapshot();
+    this.emit("endingDecisionStarted", snapshot);
+    return snapshot;
+  }
+
+  tryKillPrincess(inputAtMs = performance.now()) {
+    if (this.phase !== "endingChoice") return false;
+    this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, inputAtMs);
+    const result = this.ending.tryKill(inputAtMs);
+    if (result.snapshot.result) this.handleEndingResolution(result.snapshot);
+    return result.accepted;
+  }
+
+  updateNarrativeClock(nowMs) {
+    if (!["endingChoice", "endingFade"].includes(this.phase)) return this.ending.snapshot();
+    this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, nowMs);
+    const snapshot = this.ending.update(this.lastNarrativeTimestamp);
+    if (this.phase === "endingChoice") {
+      this.emit("endingDecisionUpdated", snapshot);
+      if (snapshot.result) this.handleEndingResolution(snapshot);
+    } else if (this.phase === "endingFade") {
+      this.emit("endingFadeUpdated", snapshot);
+      if (snapshot.stage === "complete") this.completeEnding();
+    }
+    return snapshot;
+  }
+
+  handleEndingResolution(snapshot) {
+    if (this.endingResolutionHandled || !snapshot.result) return;
+    this.endingResolutionHandled = true;
+    const ending = snapshot.result.id;
+    this.endingPresentationStage = ending;
+    this.input.flushActions?.(["attack", "heavy", "dash", "interact"]);
+    this.emit("endingChoiceResolved", {
+      ending,
+      result: snapshot.result,
+      decision: snapshot.decision,
+    });
+    if (ending === "kill") {
+      this.emit("princessStruck", { ending });
+      this.enqueueNarrative("ending.kill", () => {
+        this.emit("princessKilled", { ending });
+        this.emit("corruptionDestroyed", { ending });
+        this.beginEndingFade();
+      });
       return;
     }
-    if (this.phase === "paused") this.setPhase("playing");
+
+    this.enqueueNarrative("ending.timeout", () => {
+      this.flags.princeKilledByPrincess = true;
+      this.player.health = 0;
+      this.emitHud();
+      this.emit("playerKilledByPrincess", { ending });
+      this.enqueueNarrative("ending.timeout-final", () => this.beginEndingFade());
+    });
+  }
+
+  beginEndingFade(nowMs = Math.max(performance.now(), this.lastNarrativeTimestamp)) {
+    this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, nowMs);
+    const snapshot = this.ending.startFade(this.lastNarrativeTimestamp);
+    this.endingPresentationStage = "fade";
+    this.setPhase("endingFade");
+    this.emit("endingFadeStarted", snapshot);
+    if (snapshot.stage === "complete") this.completeEnding();
+  }
+
+  completeEnding() {
+    if (this.endingCompletionHandled) return;
+    this.endingCompletionHandled = true;
+    this.endingPresentationStage = "complete";
+    const ending = this.ending.snapshot().result?.id;
+    this.setPhase("endingComplete");
+    this.emit("endingCompleted", { ending, seed: this.seed });
+    this.emit("runEnded", {
+      completed: true,
+      victory: ending === "kill",
+      ending,
+      seed: this.seed,
+    });
+  }
+
+  togglePause(nowMs = performance.now()) {
+    this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, nowMs);
+    if (["playing", "dialogue", "reward", "blessing", "endingChoice"].includes(this.phase)) {
+      this.pausedPhase = this.phase;
+      if (this.phase === "endingChoice") {
+        const snapshot = this.ending.pause(this.lastNarrativeTimestamp);
+        if (snapshot.result) {
+          this.pausedPhase = null;
+          this.handleEndingResolution(snapshot);
+          return true;
+        }
+      }
+      this.setPhase("paused");
+      return true;
+    }
+    if (this.phase !== "paused" || !this.pausedPhase) return false;
+    const resumePhase = this.pausedPhase;
+    this.pausedPhase = null;
+    if (resumePhase === "endingChoice") this.ending.resume(this.lastNarrativeTimestamp);
+    this.setPhase(resumePhase);
+    return true;
+  }
+
+  returnToTitle() {
+    this.resetNarrativeState();
+    this.setPhase("title");
   }
 
   setPhase(phase) {
@@ -603,9 +769,7 @@ export class Game {
     this.showcaseMode = "boss";
     this.floor = RUN_CONFIG.totalFloors;
     this.room = RUN_CONFIG.roomsPerFloor;
-    this.dialogue.current = null;
-    this.pendingDialogueCallback = null;
-    this.dialogueAwaitingResponse = false;
+    this.resetNarrativeState();
     this.loadRoom();
     this.player.invulnerable = Number.POSITIVE_INFINITY;
     this.emit("showcaseStarted", { mode: this.showcaseMode, seed });
@@ -614,13 +778,27 @@ export class Game {
   enterRewardShowcase(seed = "SHOWCASE-REWARD") {
     this.startRun(seed);
     this.showcaseMode = "reward";
-    this.dialogue.current = null;
-    this.pendingDialogueCallback = null;
-    this.dialogueAwaitingResponse = false;
+    this.resetNarrativeState();
     for (const enemy of this.director.enemies) enemy.active = false;
     this.director.pendingWaves.length = 0;
     this.roomClearResolved = true;
     this.offerRoomReward();
+    this.emit("showcaseStarted", { mode: this.showcaseMode, seed });
+  }
+
+  enterEndingShowcase(seed = "SHOWCASE-ENDING") {
+    this.startRun(seed);
+    this.showcaseMode = "ending";
+    this.floor = RUN_CONFIG.totalFloors;
+    this.room = RUN_CONFIG.roomsPerFloor;
+    this.resetNarrativeState();
+    this.loadRoom();
+    for (const enemy of this.director.enemies) enemy.active = false;
+    this.director.pendingWaves.length = 0;
+    this.flags.queenDefeated = true;
+    this.endingPresentationStage = "revealHuman";
+    this.player.invulnerable = Number.POSITIVE_INFINITY;
+    this.beginEndingDecision();
     this.emit("showcaseStarted", { mode: this.showcaseMode, seed });
   }
 
@@ -629,9 +807,7 @@ export class Game {
     this.benchmarkMode = true;
     this.floor = 9;
     this.room = 2;
-    this.dialogue.current = null;
-    this.pendingDialogueCallback = null;
-    this.dialogueAwaitingResponse = false;
+    this.resetNarrativeState();
     this.loadRoom();
     this.director.stressSpawn(enemyCount, 9);
     this.player.invulnerable = 9999;

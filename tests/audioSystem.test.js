@@ -159,6 +159,19 @@ test("mixer leaves headroom, compresses the master, and ducks only music", () =>
   assert.equal(audio.nodes.musicDuck.gain.value, 1);
 });
 
+test("dialogue ducking is restored after pausing and resuming a modal sequence", () => {
+  const context = new FakeAudioContext();
+  const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
+  audio.initialize();
+
+  audio.handleEvent({ type: "dialogueStarted", detail: {} });
+  assert.ok(audio.nodes.musicDuck.gain.value < 0.3);
+  audio.handleEvent({ type: "phaseChanged", detail: { phase: "paused" } });
+  assert.equal(audio.nodes.musicDuck.gain.value, 1);
+  audio.handleEvent({ type: "phaseChanged", detail: { phase: "dialogue" } });
+  assert.ok(audio.nodes.musicDuck.gain.value < 0.3);
+});
+
 test("music state and biome switches wait for a bar boundary", () => {
   const context = new FakeAudioContext();
   const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });

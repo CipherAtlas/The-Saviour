@@ -9,6 +9,7 @@ import {
   ENEMY_MODEL_KEYS,
   ENEMY_VISUAL_PROFILES,
   getEnemyAttackVisual,
+  getEnemyOriginVisualProfile,
   getEnemyVisualProfile,
 } from "./enemyVisualProfiles.js";
 
@@ -17,6 +18,7 @@ const SPAWN_START_SCALE_XZ = 0.94;
 const SPAWN_START_SCALE_Y = 0.86;
 const SPAWN_RISE_DEPTH = 0.16;
 const DEATH_DURATION = 0.82;
+const DISMISS_DURATION = 0.36;
 const HIT_DURATION = 0.12;
 const FLASH_COLOR = new THREE.Color(0xffffff);
 const FLASH_EMISSIVE = new THREE.Color(0xff3b55);
@@ -182,6 +184,8 @@ export class EnemyCharacterRenderer {
     this.proxyRotation = new THREE.Quaternion();
     this.proxyLeanRotation = new THREE.Quaternion();
     this.proxyColor = new THREE.Color();
+    this.originColor = new THREE.Color();
+    this.originEmissive = new THREE.Color();
     this.clockTime = 0;
     this.createdActors = 0;
   }
@@ -388,6 +392,7 @@ export class EnemyCharacterRenderer {
 
   syncProxyActor(record, enemy, alpha, dt) {
     const profile = getEnemyVisualProfile(enemy.type);
+    const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "witch");
     record.age += dt;
     if (!enemy.active) record.deathAge = record.deathAge < 0 ? 0 : record.deathAge + dt;
     const index = this.proxyCounts.get(enemy.type) ?? 0;
@@ -406,7 +411,8 @@ export class EnemyCharacterRenderer {
     let scaleY = 1 - Math.abs(stride) * (moving ? 0.055 : 0.02);
     let scaleZ = 1;
     let lean = 0;
-    let roll = stride * (moving ? 0.045 : 0.018);
+    const originPulse = Math.sin(this.clockTime * originProfile.pulseSpeed + (enemy.originPhase ?? 0));
+    let roll = stride * (moving ? 0.045 : 0.018) + originPulse * originProfile.sway;
     let y = (profile.floatHeight ?? 0) + (moving ? Math.abs(stride) * 0.055 : 0);
 
     if (record.age < SPAWN_DURATION) {
@@ -417,6 +423,7 @@ export class EnemyCharacterRenderer {
       scaleY *= SPAWN_START_SCALE_Y + spawnScale * (1 - SPAWN_START_SCALE_Y);
       scaleZ *= spawnScaleXZ;
       y -= (1 - progress) ** 2 * SPAWN_RISE_DEPTH;
+      roll += (1 - progress) * originProfile.spawnLean * Math.sign(Math.sin((enemy.originPhase ?? 0) + 0.5));
     }
     if (enemy.attackPending || record.releaseTime > 0) {
       const attack = getEnemyAttackVisual(enemy.type, enemy.attackKind ?? record.releaseKind);
@@ -437,10 +444,19 @@ export class EnemyCharacterRenderer {
       scaleY *= 1 - impact * 0.1;
     }
     if (!enemy.active) {
-      const progress = clamp01(record.deathAge / DEATH_DURATION);
-      scaleX *= 1 + Math.sin(progress * Math.PI) * 0.2;
-      scaleY *= Math.max(0.025, 1 - progress ** 2);
-      roll += progress * (enemy.id % 2 === 0 ? 0.5 : -0.5);
+      const duration = enemy.dismissed ? DISMISS_DURATION : DEATH_DURATION;
+      const progress = clamp01(record.deathAge / duration);
+      if (enemy.dismissed) {
+        const dismissalScale = Math.max(0.025, 1 - progress ** 2);
+        scaleX *= dismissalScale;
+        scaleY *= dismissalScale;
+        scaleZ *= dismissalScale;
+        y += progress * 0.3;
+      } else {
+        scaleX *= 1 + Math.sin(progress * Math.PI) * 0.2;
+        scaleY *= Math.max(0.025, 1 - progress ** 2);
+        roll += progress * (enemy.id % 2 === 0 ? 0.5 : -0.5);
+      }
     }
     if (enemy.type === "wraith") y += Math.sin(this.clockTime * 3.3 + enemy.id) * 0.08;
 
@@ -455,8 +471,16 @@ export class EnemyCharacterRenderer {
     this.proxyMatrix.compose(this.proxyPosition, this.proxyRotation, this.proxyScale);
     mesh.setMatrixAt(index, this.proxyMatrix);
     const flash = clamp01(enemy.hitFlash / HIT_DURATION);
-    this.proxyColor.copy(mesh.userData.baseColor).lerp(FLASH_COLOR, flash * 0.76);
-    if (!enemy.active) this.proxyColor.multiplyScalar(Math.max(0.18, 1 - record.deathAge / DEATH_DURATION));
+    this.originColor.set(originProfile.color);
+    this.proxyColor.copy(mesh.userData.baseColor)
+      .lerp(this.originColor, originProfile.colorMix)
+      .lerp(FLASH_COLOR, flash * 0.76);
+    const pulseBrightness = 1 + originProfile.pulseAmount * originPulse;
+    this.proxyColor.multiplyScalar(Math.max(0.78, pulseBrightness));
+    if (!enemy.active) {
+      const duration = enemy.dismissed ? DISMISS_DURATION : DEATH_DURATION;
+      this.proxyColor.multiplyScalar(Math.max(0.18, 1 - record.deathAge / duration));
+    }
     mesh.setColorAt(index, this.proxyColor);
     this.proxyCounts.set(enemy.type, index + 1);
 
@@ -509,6 +533,7 @@ export class EnemyCharacterRenderer {
 
   resolveAnimation(record, enemy, moving) {
     const profile = getEnemyVisualProfile(enemy.type);
+    if (!enemy.active && enemy.dismissed) return { clip: profile.idleClip, once: false, duration: null, key: "dismissed" };
     if (!enemy.active) return { clip: profile.deathClip, once: true, duration: DEATH_DURATION, key: "death" };
     if (record.age < SPAWN_DURATION) return { clip: profile.spawnClip, once: true, duration: SPAWN_DURATION, key: "spawn" };
     if (enemy.hitFlash > HIT_DURATION * 0.38) return { clip: profile.hitClip, once: true, duration: 0.24, key: `hit:${record.eventSerial}` };
@@ -547,6 +572,8 @@ export class EnemyCharacterRenderer {
   }
 
   syncPose(record, enemy) {
+    const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "witch");
+    const originPulse = Math.sin(this.clockTime * originProfile.pulseSpeed + (enemy.originPhase ?? 0));
     let scaleX = 1;
     let scaleY = 1;
     if (record.age < SPAWN_DURATION) {
@@ -556,13 +583,25 @@ export class EnemyCharacterRenderer {
       scaleY = SPAWN_START_SCALE_Y + scale * (1 - SPAWN_START_SCALE_Y);
     }
     if (!enemy.active) {
-      const progress = clamp01(record.deathAge / DEATH_DURATION);
-      scaleX = 1 + Math.sin(progress * Math.PI) * 0.18;
-      scaleY = Math.max(0.03, 1 - progress ** 2);
-      record.root.rotation.z = progress * (enemy.id % 2 === 0 ? 0.35 : -0.35);
-      if (record.deathAge >= DEATH_DURATION) record.root.visible = false;
+      const duration = enemy.dismissed ? DISMISS_DURATION : DEATH_DURATION;
+      const progress = clamp01(record.deathAge / duration);
+      if (enemy.dismissed) {
+        scaleX = Math.max(0.03, 1 - progress ** 2);
+        scaleY = scaleX;
+        record.root.position.y += progress * 0.3;
+        record.root.rotation.z = 0;
+      } else {
+        scaleX = 1 + Math.sin(progress * Math.PI) * 0.18;
+        scaleY = Math.max(0.03, 1 - progress ** 2);
+        record.root.rotation.z = progress * (enemy.id % 2 === 0 ? 0.35 : -0.35);
+      }
+      if (record.deathAge >= duration) record.root.visible = false;
     } else {
-      record.root.rotation.z = 0;
+      record.root.rotation.z = originPulse * originProfile.sway;
+      if (record.age < SPAWN_DURATION) {
+        const progress = clamp01(record.age / SPAWN_DURATION);
+        record.root.rotation.z += (1 - progress) * originProfile.spawnLean * Math.sign(Math.sin((enemy.originPhase ?? 0) + 0.5));
+      }
       if (enemy.hitFlash > 0) {
         const impact = clamp01(enemy.hitFlash / HIT_DURATION);
         scaleX *= 1 + impact * 0.08;
@@ -581,10 +620,19 @@ export class EnemyCharacterRenderer {
 
   syncMaterials(record, enemy) {
     const flash = clamp01(enemy.hitFlash / HIT_DURATION);
+    const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "witch");
+    const pulse = Math.sin(this.clockTime * originProfile.pulseSpeed + (enemy.originPhase ?? 0));
+    this.originColor.set(originProfile.color);
+    this.originEmissive.set(originProfile.emissive);
     for (const state of record.materialStates) {
-      if (state.color) state.material.color.copy(state.color).lerp(FLASH_COLOR, flash * 0.68);
-      if (state.emissive) state.material.emissive.copy(state.emissive).lerp(FLASH_EMISSIVE, flash * 0.7);
-      if ("emissiveIntensity" in state.material) state.material.emissiveIntensity = state.emissiveIntensity + flash * 2.4;
+      if (state.color) state.material.color.copy(state.color).lerp(this.originColor, originProfile.colorMix).lerp(FLASH_COLOR, flash * 0.68);
+      if (state.emissive) state.material.emissive.copy(state.emissive).lerp(this.originEmissive, originProfile.emissiveMix).lerp(FLASH_EMISSIVE, flash * 0.7);
+      if ("emissiveIntensity" in state.material) {
+        state.material.emissiveIntensity = state.emissiveIntensity
+          + originProfile.emissiveBoost
+          + originProfile.pulseAmount * (0.5 + pulse * 0.5)
+          + flash * 2.4;
+      }
       state.material.opacity = state.opacity;
     }
   }

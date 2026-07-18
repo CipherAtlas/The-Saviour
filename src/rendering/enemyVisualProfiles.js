@@ -9,6 +9,33 @@ const profile = (definition) => Object.freeze({
   ),
 });
 
+const originProfile = (definition) => Object.freeze({ ...definition });
+
+export const ENEMY_ORIGIN_VISUAL_PROFILES = Object.freeze({
+  witch: originProfile({
+    color: 0xc8bee0,
+    colorMix: 0.08,
+    emissive: 0x6f628d,
+    emissiveMix: 0.18,
+    emissiveBoost: 0.08,
+    pulseAmount: 0.025,
+    pulseSpeed: 2.4,
+    sway: 0,
+    spawnLean: 0,
+  }),
+  princess: originProfile({
+    color: 0x9b3f63,
+    colorMix: 0.2,
+    emissive: 0x7d173d,
+    emissiveMix: 0.42,
+    emissiveBoost: 0.18,
+    pulseAmount: 0.16,
+    pulseSpeed: 8.6,
+    sway: 0.075,
+    spawnLean: 0.12,
+  }),
+});
+
 export const ENEMY_VISUAL_PROFILES = Object.freeze({
   thrall: profile({
     modelKey: "minion",
@@ -160,6 +187,12 @@ export function detailedEnemyLimit(enemyCount) {
 export function getEnemyVisualProfile(type) {
   const result = ENEMY_VISUAL_PROFILES[type];
   if (!result) throw new RangeError(`Unknown enemy visual profile: ${type}`);
+  return result;
+}
+
+export function getEnemyOriginVisualProfile(origin = "witch") {
+  const result = ENEMY_ORIGIN_VISUAL_PROFILES[origin];
+  if (!result) throw new RangeError(`Unknown enemy visual origin: ${origin}`);
   return result;
 }
 

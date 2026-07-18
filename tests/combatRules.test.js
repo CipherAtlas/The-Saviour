@@ -24,6 +24,10 @@ function createGameSettings() {
   return { get: (path) => values[path] };
 }
 
+function finishOpening(game) {
+  while (game.phase === "dialogue") game.skipDialogue();
+}
+
 test("the scythe combo maintains long reach and grows through the chain", () => {
   assert.ok(SCYTHE_ATTACKS.every((attack) => attack.range >= 4));
   assert.ok(SCYTHE_ATTACKS[2].range > SCYTHE_ATTACKS[0].range);
@@ -111,8 +115,7 @@ test("player attacks use their committed facing rather than live mouse rotation"
 test("screen-up movement reaches the player through the complete simulation path", () => {
   const game = new Game(createGameInput({ x: 0, y: 1 }), createGameSettings());
   game.startRun("MOVEMENT-REGRESSION");
-  game.chooseDialogue(0);
-  game.continueDialogue();
+  finishOpening(game);
   const before = { ...game.player.position };
 
   game.updateFixed(1 / 60);
@@ -129,8 +132,7 @@ test("clearing a room grants bounded threshold recovery before the next encounte
   const recoveries = [];
   game.on((event) => { if (event.type === "roomRecovered") recoveries.push(event.detail); });
   game.startRun("RECOVERY-CHECK");
-  game.chooseDialogue(0);
-  game.continueDialogue();
+  finishOpening(game);
   game.player.health = 40;
   game.director.enemies.length = 0;
 
@@ -145,8 +147,7 @@ test("clearing a room grants bounded threshold recovery before the next encounte
 test("the Moonwell floor blessing increases percentage recovery on later chamber clears", () => {
   const game = new Game(createGameInput({ x: 0, y: 0 }), createGameSettings());
   game.startRun("RECOVERY-BLESSING");
-  game.chooseDialogue(0);
-  game.continueDialogue();
+  finishOpening(game);
   BLESSINGS.find((blessing) => blessing.id === "moonwell-renewal").apply(game.player);
   game.player.health = 40;
   game.director.enemies.length = 0;
@@ -161,8 +162,7 @@ test("Final Mercy converts one lethal hit into a bounded Death Defiance recovery
   const revivals = [];
   game.on((event) => { if (event.type === "playerRevived") revivals.push(event.detail); });
   game.startRun("FINAL-MERCY");
-  game.chooseDialogue(0);
-  game.continueDialogue();
+  finishOpening(game);
   BLESSINGS.find((blessing) => blessing.id === "final-mercy").apply(game.player);
   game.player.health = 5;
 
