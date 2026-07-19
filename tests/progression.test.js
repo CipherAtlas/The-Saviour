@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Game } from "../src/game/Game.js";
+import { BLESSINGS, BLESSING_FALLBACK } from "../src/game/blessings.js";
 import {
   applyRunUpgrade,
   CHAMBER_FALLBACK,
@@ -8,7 +9,8 @@ import {
   offerUpgradeChoices,
   RUN_UPGRADES,
 } from "../src/game/runUpgrades.js";
-import { RUN_CONFIG } from "../src/game/gameConfig.js";
+import { DEATH_DEFIANCE_GRANT_CAP, RUN_CONFIG } from "../src/game/gameConfig.js";
+import { defineProgressionCard } from "../src/game/progressionModel.js";
 import { SeededRandom } from "../src/generation/seededRandom.js";
 
 function createInput() {
@@ -32,8 +34,64 @@ function startGame(seed) {
   return game;
 }
 
+function completeNarrative(game) {
+  while (game.phase === "dialogue") game.skipDialogue();
+}
+
 function choiceSummary(choices) {
   return choices.map(({ id, path, rank, nextRank, maxRank }) => ({ id, path, rank, nextRank, maxRank }));
+}
+
+function assertCompleteCardSnapshot(card, tier) {
+  assert.deepEqual(Object.keys(card), [
+    "id", "name", "description", "path", "tier", "rank", "nextRank", "maxRank", "fallback",
+    "tags", "prerequisites", "excludes", "synergies", "effects", "transformation",
+    "deathDefianceGrant", "preview",
+  ]);
+  assert.equal(card.tier, tier);
+  assert.equal(Object.isFrozen(card), true);
+  for (const field of ["tags", "prerequisites", "excludes", "synergies", "effects"]) {
+    assert.equal(Object.isFrozen(card[field]), true, field);
+  }
+  assert.equal(Object.isFrozen(card.preview), true);
+  assert.equal(Object.isFrozen(card.preview.rows), true);
+  assert.ok(card.preview.rows.length > 0);
+  assert.ok(card.preview.rows.every((row) => Object.isFrozen(row)));
+}
+
+function previewPlayer() {
+  return {
+    health: 91,
+    maxHealth: 140,
+    damageMultiplier: 1,
+    reachMultiplier: 1,
+    dashCooldownMultiplier: 1,
+    criticalChance: 0.05,
+    healthOnKill: 0,
+    roomRecoveryBonus: 0,
+    deathDefiance: 0,
+    deathDefianceGranted: 0,
+    transformationRanks: {},
+  };
+}
+
+function syntheticDeathDefiance(id) {
+  return defineProgressionCard({
+    id,
+    path: "Grave",
+    tier: "blessing",
+    name: id,
+    description: "Test grant.",
+    maxRank: 1,
+    fallback: false,
+    prerequisites: [],
+    excludes: [],
+    tags: ["death-defiance"],
+    synergies: [],
+    effects: [{ stat: "deathDefiance", operation: "grant", value: 1, unit: "charge", perRank: false }],
+    transformation: null,
+    deathDefianceGrant: "activation",
+  });
 }
 
 test("chamber offers are deterministic, unique, and span all three paths", () => {
@@ -71,6 +129,37 @@ test("rank caps, mutual exclusions, and exhaustion fallback are enforced", () =>
   assert.deepEqual(choices.map((choice) => choice.id), [CHAMBER_FALLBACK.id]);
 });
 
+test("Game offer events expose complete frozen chamber and blessing card snapshots", () => {
+  const game = new Game(createInput(), createSettings());
+  const events = [];
+  game.on((event) => events.push(event));
+  game.rng = new SeededRandom("CARD-SNAPSHOT");
+  game.player = previewPlayer();
+  game.floor = 1;
+  game.room = 1;
+
+  game.offerRoomReward();
+  assert.equal(game.phase, "dialogue");
+  completeNarrative(game);
+  const chamberChoices = events.find((event) => event.type === "roomRewardOffered").detail.choices;
+  assert.equal(Object.isFrozen(chamberChoices), true);
+  const chamber = chamberChoices[0];
+  assertCompleteCardSnapshot(chamber, "chamber");
+  assert.deepEqual(chamber.preview, game.pendingRoomRewards[0].preview);
+
+  game.pendingRoomRewards = [];
+  game.roomRewardPending = false;
+  game.room = RUN_CONFIG.roomsPerFloor;
+  game.advanceRoom();
+  assert.equal(game.phase, "dialogue");
+  completeNarrative(game);
+  const blessingChoices = events.find((event) => event.type === "blessingOffered").detail.choices;
+  assert.equal(Object.isFrozen(blessingChoices), true);
+  const blessing = blessingChoices[0];
+  assertCompleteCardSnapshot(blessing, "blessing");
+  assert.deepEqual(blessing.preview, game.pendingBlessings[0].preview);
+});
+
 test("pending encounter waves prevent an early room clear and reward phase", () => {
   const game = startGame("NO-EARLY-CLEAR");
   for (const enemy of game.director.enemies) enemy.active = false;
@@ -84,6 +173,8 @@ test("pending encounter waves prevent an early room clear and reward phase", () 
   game.director.pendingWaves = [];
   game.checkRoomProgress(RUN_CONFIG.roomClearDelay);
   assert.equal(game.portalActive, false);
+  assert.equal(game.phase, "dialogue");
+  completeNarrative(game);
   assert.equal(game.phase, "reward");
   assert.equal(game.pendingRoomRewards.length, 3);
 });
@@ -96,9 +187,14 @@ test("chambers one and two grant a ranked reward before returning to the portal"
   game.director.pendingWaves.length = 0;
 
   game.checkRoomProgress(RUN_CONFIG.roomClearDelay);
+  assert.equal(game.phase, "dialogue");
+  completeNarrative(game);
   assert.equal(game.phase, "reward");
   assert.equal(game.portalActive, false);
   const choice = game.pendingRoomRewards[0];
+  const offeredCard = events.find((event) => event.type === "roomRewardOffered").detail.choices[0];
+  assertCompleteCardSnapshot(offeredCard, "chamber");
+  assert.deepEqual(offeredCard.preview, choice.preview);
   game.chooseRoomReward(choice.id);
 
   assert.equal(game.phase, "playing");
@@ -115,6 +211,8 @@ test("chambers one and two grant a ranked reward before returning to the portal"
 
 test("third chambers retain the major blessing transition before the next floor", () => {
   const game = startGame("MAJOR-BLESSING");
+  const events = [];
+  game.on((event) => events.push(event));
   game.room = RUN_CONFIG.roomsPerFloor;
   game.loadRoom();
   game.director.enemies.length = 0;
@@ -124,10 +222,15 @@ test("third chambers retain the major blessing transition before the next floor"
   assert.equal(game.phase, "playing");
   assert.equal(game.pendingRoomRewards.length, 0);
   game.advanceRoom();
+  assert.equal(game.phase, "dialogue");
+  completeNarrative(game);
   assert.equal(game.phase, "blessing");
   assert.equal(game.pendingBlessings.length, 3);
 
   const choice = game.pendingBlessings[0];
+  const offeredCard = events.find((event) => event.type === "blessingOffered").detail.choices[0];
+  assertCompleteCardSnapshot(offeredCard, "blessing");
+  assert.deepEqual(offeredCard.preview, choice.preview);
   game.chooseBlessing(choice.id);
   assert.equal(game.floor, 2);
   assert.equal(game.room, 1);
@@ -174,6 +277,118 @@ test("reward showcase exposes a deterministic real chamber offer without choosin
   assert.equal(first.pendingRoomRewards.length, 3);
   assert.deepEqual(new Set(first.pendingRoomRewards.map((choice) => choice.path)), new Set(["Reaper", "Shade", "Grave"]));
   assert.deepEqual(choiceSummary(first.pendingRoomRewards), choiceSummary(second.pendingRoomRewards));
+});
+
+test("one isolated deterministic reroll is shared by every offer on a floor", () => {
+  const first = new Game(createInput(), createSettings());
+  const second = new Game(createInput(), createSettings());
+  const events = [];
+  first.on((event) => events.push(event));
+  first.enterRewardShowcase("QA-REROLL");
+  second.enterRewardShowcase("QA-REROLL");
+  const firstInitial = first.pendingRoomRewards.map(({ id }) => id);
+  const secondInitial = second.pendingRoomRewards.map(({ id }) => id);
+  const rngState = first.rng.state;
+
+  assert.equal(first.rerollUpgradeOffer(), true);
+  assert.equal(second.rerollUpgradeOffer(), true);
+  assert.equal(first.rng.state, rngState);
+  assert.deepEqual(firstInitial, secondInitial);
+  assert.deepEqual(first.pendingRoomRewards.map(({ id }) => id), second.pendingRoomRewards.map(({ id }) => id));
+  assert.ok(first.pendingRoomRewards.some(({ id }) => !firstInitial.includes(id)));
+  assert.deepEqual(new Set(first.pendingRoomRewards.map(({ path }) => path)), new Set(["Reaper", "Shade", "Grave"]));
+  assert.equal(first.rerollsUsedByFloor[0], 1);
+  assert.equal(first.rerollUpgradeOffer(), false);
+
+  const rerolled = events.find((event) => event.type === "upgradeRerolled")?.detail;
+  assert.equal(Object.isFrozen(rerolled), true);
+  assert.equal(Object.isFrozen(rerolled.choices), true);
+  assert.equal(rerolled.tier, "chamber");
+  assert.equal(rerolled.rerollAvailable, false);
+
+  first.phase = "blessing";
+  first.pendingBlessings = [BLESSINGS[0], BLESSINGS[3], BLESSINGS[6]];
+  assert.equal(first.rerollUpgradeOffer(), false);
+  first.floor = 2;
+  assert.equal(first.rerollAvailableFor(first.pendingBlessings, BLESSINGS), true);
+});
+
+test("an unused floor reroll can be spent on blessings and identical fallback offers do not consume it", () => {
+  const game = new Game(createInput(), createSettings());
+  const events = [];
+  game.on((event) => events.push(event));
+  game.startRun("BLESSING-REROLL");
+  completeNarrative(game);
+  game.phase = "blessing";
+  game.pendingBlessings = [BLESSINGS[0], BLESSINGS[3], BLESSINGS[6]]
+    .map((choice) => ({ ...choice, rank: 0, nextRank: 1, preview: null }));
+  assert.equal(game.rerollUpgradeOffer(), true);
+  assert.equal(game.rerollsUsedByFloor[0], 1);
+  assert.equal(events.filter((event) => event.type === "upgradeRerolled").length, 1);
+
+  const fallbackGame = new Game(createInput(), createSettings());
+  fallbackGame.startRun("FALLBACK-REROLL");
+  completeNarrative(fallbackGame);
+  fallbackGame.phase = "blessing";
+  fallbackGame.pendingBlessings = [BLESSING_FALLBACK];
+  assert.equal(fallbackGame.rerollUpgradeOffer(), false);
+  assert.equal(fallbackGame.rerollsUsedByFloor[0], 0);
+});
+
+test("Death Defiance lifetime grants are atomic and capped separately from remaining charges", () => {
+  const player = previewPlayer();
+  const ranks = new Map();
+  const first = syntheticDeathDefiance("test-mercy-one");
+  const second = syntheticDeathDefiance("test-mercy-two");
+  const third = syntheticDeathDefiance("test-mercy-three");
+
+  assert.equal(DEATH_DEFIANCE_GRANT_CAP, 2);
+  assert.equal(applyRunUpgrade(first, player, ranks).deathDefianceGrantedTotal, 1);
+  assert.deepEqual({ granted: player.deathDefianceGranted, remaining: player.deathDefiance }, { granted: 1, remaining: 1 });
+  player.deathDefiance = 0;
+  assert.equal(applyRunUpgrade(second, player, ranks).deathDefianceGrantedTotal, 2);
+  assert.deepEqual({ granted: player.deathDefianceGranted, remaining: player.deathDefiance }, { granted: 2, remaining: 1 });
+  player.deathDefiance = 0;
+
+  const before = structuredClone(player);
+  assert.equal(isUpgradeEligible(third, ranks, player), false);
+  assert.equal(applyRunUpgrade(third, player, ranks), null);
+  assert.deepEqual(player, before);
+  assert.equal(ranks.has(third.id), false);
+  assert.deepEqual(
+    offerUpgradeChoices(new SeededRandom("DD-CAP"), ranks, [third], 1, BLESSING_FALLBACK, player).map(({ id }) => id),
+    [BLESSING_FALLBACK.id],
+  );
+});
+
+test("accepted Death Defiance grants and revivals publish separate immutable lifetime totals", () => {
+  const game = startGame("DD-EVENTS");
+  const events = [];
+  game.on((event) => events.push(event));
+  const finalMercy = BLESSINGS.find(({ id }) => id === "final-mercy");
+  game.phase = "blessing";
+  game.room = RUN_CONFIG.roomsPerFloor;
+  game.pendingBlessings = [finalMercy];
+  game.chooseBlessing(finalMercy.id);
+
+  const granted = events.find((event) => event.type === "deathDefianceGranted")?.detail;
+  assert.deepEqual(
+    { amount: granted.amount, grantedTotal: granted.grantedTotal, chargesRemaining: granted.chargesRemaining, upgradeId: granted.upgradeId },
+    { amount: 1, grantedTotal: 1, chargesRemaining: 1, upgradeId: "final-mercy" },
+  );
+  assert.equal(Object.isFrozen(granted), true);
+
+  completeNarrative(game);
+  game.phase = "playing";
+  game.player.health = 1;
+  game.player.invulnerable = 0;
+  game.damagePlayer(10, "dd-event-test");
+  const revived = events.find((event) => event.type === "playerRevived")?.detail;
+  assert.equal(game.player.deathDefianceGranted, 1);
+  assert.equal(game.player.deathDefiance, 0);
+  assert.equal(revived.grantedTotal, 1);
+  assert.equal(revived.chargesRemaining, 0);
+  assert.equal(Object.isFrozen(revived), true);
 });
 
 test("the fixed update resolves player movement exactly once", () => {

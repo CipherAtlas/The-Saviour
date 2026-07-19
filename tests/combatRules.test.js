@@ -87,29 +87,42 @@ test("circle movement stays inside walls and cannot pass through obstacles", () 
 });
 
 test("player attacks use their committed facing rather than live mouse rotation", () => {
-  const game = new Game(createGameInput({ x: 0, y: 0 }), createGameSettings());
-  game.player = {
-    position: { x: 0, z: 0 },
-    aimAngle: Math.PI / 2,
-    reachMultiplier: 1,
-    damageMultiplier: 1,
-    criticalChance: 0,
-    healthOnKill: 0,
-  };
-  game.rng = { chance: () => false };
-  game.director.enemies = [
-    { id: 1, active: true, position: { x: 3, z: 0 }, radius: 0.4 },
-    { id: 2, active: true, position: { x: 0, z: 3 }, radius: 0.4 },
-  ];
-  const hits = [];
-  game.director.damageEnemy = (enemy) => {
-    hits.push(enemy.id);
-    return false;
-  };
+  const pressed = new Set();
+  const input = createGameInput({ x: 0, y: 0 });
+  input.consume = (action) => pressed.delete(action);
+  const game = new Game(input, createGameSettings());
+  game.startRun("COMMITTED-FACING");
+  finishOpening(game);
+  for (const actor of game.director.enemies) actor.active = false;
+  game.director.pendingWaves.length = 0;
+  game.player.position = { x: 0, z: 0 };
+  game.player.previousPosition = { x: 0, z: 0 };
+  game.player.criticalChance = 0;
+  const committedTarget = game.director.spawnEnemy("thrall", { x: 3, z: 0 }, 1);
+  const liveAimTarget = game.director.spawnEnemy("thrall", { x: 0, z: 3 }, 1);
+  committedTarget.speed = 0;
+  liveAimTarget.speed = 0;
+  committedTarget.attackCooldown = 999;
+  liveAimTarget.attackCooldown = 999;
+  const events = [];
+  game.on((event) => events.push(event));
 
-  game.resolvePlayerAttack(SCYTHE_ATTACKS[0], new Set(), 0);
+  game.setAimPoint({ x: 10, z: 0 });
+  pressed.add("attack");
+  game.updateFixed(RUN_CONFIG.fixedStep);
+  const action = events.find((event) => event.type === "attack");
+  game.setAimPoint({ x: 0, z: 10 });
+  for (let step = 0; step < 20 && events.every((event) => event.type !== "enemyHit"); step += 1) {
+    game.updateFixed(RUN_CONFIG.fixedStep);
+  }
 
-  assert.deepEqual(hits, [1]);
+  const hits = events.filter((event) => event.type === "enemyHit");
+  assert.deepEqual(hits.map((event) => event.detail.id), [committedTarget.id]);
+  assert.equal(hits[0].detail.actionId, action.detail.actionId);
+  assert.equal(hits[0].detail.hit.actionId, action.detail.actionId);
+  assert.equal(Object.isFrozen(hits[0].detail), true);
+  assert.equal(Object.isFrozen(hits[0].detail.hit), true);
+  assert.equal(liveAimTarget.health, liveAimTarget.maxHealth);
 });
 
 test("screen-up movement reaches the player through the complete simulation path", () => {
@@ -140,6 +153,8 @@ test("clearing a room grants bounded threshold recovery before the next encounte
 
   assert.equal(game.player.health, 61);
   assert.equal(game.portalActive, false);
+  assert.equal(game.phase, "dialogue");
+  finishOpening(game);
   assert.equal(game.phase, "reward");
   assert.equal(recoveries[0].amount, 21);
 });
@@ -177,4 +192,23 @@ test("Final Mercy converts one lethal hit into a bounded Death Defiance recovery
   game.player.invulnerable = 0;
   game.damagePlayer(80, "testSecondLethalHit");
   assert.equal(game.phase, "dead");
+});
+
+test("direct system damage remains a normal seam and cannot infer a perfect dash", () => {
+  const game = new Game(createGameInput({ x: 0, y: 0 }), createGameSettings());
+  const events = [];
+  game.on((event) => events.push(event));
+  game.startRun("DIRECT-DAMAGE-NO-PERFECT-DASH");
+  finishOpening(game);
+  game.combat.startDash(game.player, { x: 1, y: 0 }, { timeStamp: 50 });
+  game.player.invulnerable = 0;
+  const beforeHealth = game.player.health;
+  const beforeHarvest = game.combat.harvest.snapshot().units;
+
+  game.damagePlayer(10, "systemTest");
+
+  assert.equal(game.player.health, beforeHealth - 10);
+  assert.equal(game.combat.harvest.snapshot().units, beforeHarvest);
+  assert.equal(events.some((event) => event.type === "perfectDash"), false);
+  assert.equal(events.filter((event) => event.type === "playerHit").at(-1).detail.source, "systemTest");
 });

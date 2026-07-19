@@ -20,6 +20,27 @@ const SPAWN_RISE_DEPTH = 0.16;
 const DEATH_DURATION = 0.82;
 const DISMISS_DURATION = 0.36;
 const HIT_DURATION = 0.12;
+const DEFAULT_STAGGER_DURATION = 0.4;
+const QUEEN_PHASE_TRANSITION_CLIPS = Object.freeze({
+  2: "Spellcast_Long",
+  3: "Spellcast_Summon",
+});
+const QUEEN_SPECIAL_PRESENTATION = Object.freeze({
+  teleport: Object.freeze({
+    anticipationClip: "Spellcast_Long",
+    releaseClip: "Dodge_Forward",
+    recoveryClip: "Idle_Combat",
+    releaseDuration: 0.1,
+    recoveryDuration: 0.14,
+  }),
+  summon: Object.freeze({
+    anticipationClip: "Spellcast_Long",
+    releaseClip: "Spellcast_Summon",
+    recoveryClip: "Idle_Combat",
+    releaseDuration: 0.16,
+    recoveryDuration: 0.26,
+  }),
+});
 const FLASH_COLOR = new THREE.Color(0xffffff);
 const FLASH_EMISSIVE = new THREE.Color(0xff3b55);
 const PROXY_CAPACITY_PER_TYPE = 64;
@@ -93,6 +114,191 @@ export function createEnemyProxyGeometry(type) {
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
+}
+
+function normalizedPresentationProgress(state) {
+  if (!state || state.duration <= 0) return 1;
+  return clamp01(1 - state.remaining / state.duration);
+}
+
+function smoothStep(value) {
+  const bounded = clamp01(value);
+  return bounded * bounded * (3 - 2 * bounded);
+}
+
+export function queenSpecialPresentationContract(action, stage, duration = null) {
+  const definition = QUEEN_SPECIAL_PRESENTATION[action];
+  if (!definition || !["anticipation", "release", "recovery"].includes(stage)) return null;
+  const stageDuration = stage === "anticipation"
+    ? Math.max(0.08, Number.isFinite(duration) ? duration : action === "summon" ? 0.68 : 0.48)
+    : definition[`${stage}Duration`];
+  return Object.freeze({
+    action,
+    stage,
+    clip: definition[`${stage}Clip`],
+    duration: stageDuration,
+  });
+}
+
+export function sampleQueenActorPresentation(state) {
+  if (!state) return Object.freeze({
+    scaleX: 1,
+    scaleY: 1,
+    scaleZ: 1,
+    pitch: 0,
+    roll: 0,
+    yOffset: 0,
+    auraScale: 1,
+    auraOpacity: 0,
+  });
+  const progress = normalizedPresentationProgress(state);
+  const eased = smoothStep(progress);
+  const remaining = 1 - eased;
+  if (state.kind === "phase") {
+    const intensity = state.phase >= 3 ? 1 : 0.72;
+    const gather = Math.sin(progress * Math.PI);
+    return Object.freeze({
+      scaleX: 1 + gather * 0.1 * intensity,
+      scaleY: 1 - gather * 0.08 * intensity,
+      scaleZ: 1 + gather * 0.12 * intensity,
+      pitch: -gather * 0.11 * intensity,
+      roll: Math.sin(progress * Math.PI * 2) * 0.035 * intensity,
+      yOffset: gather * 0.16 * intensity,
+      auraScale: 1 + gather * 0.34 * intensity,
+      auraOpacity: gather * 0.2 * intensity,
+    });
+  }
+  if (state.action === "teleport") {
+    if (state.stage === "anticipation") {
+      return Object.freeze({
+        scaleX: 1 + eased * 0.12,
+        scaleY: 1 - eased * 0.16,
+        scaleZ: 1 + eased * 0.08,
+        pitch: eased * 0.14,
+        roll: Math.sin(progress * Math.PI) * 0.025,
+        yOffset: -eased * 0.11,
+        auraScale: 1 + eased * 0.28,
+        auraOpacity: eased * 0.16,
+      });
+    }
+    if (state.stage === "release") {
+      return Object.freeze({
+        scaleX: 1 - remaining * 0.16,
+        scaleY: 1 + remaining * 0.2,
+        scaleZ: 1 - remaining * 0.1,
+        pitch: -remaining * 0.18,
+        roll: 0,
+        yOffset: remaining * 0.14,
+        auraScale: 1 + remaining * 0.44,
+        auraOpacity: remaining * 0.28,
+      });
+    }
+    return Object.freeze({
+      scaleX: 1 - remaining * 0.07,
+      scaleY: 1 + remaining * 0.09,
+      scaleZ: 1 - remaining * 0.04,
+      pitch: -remaining * 0.08,
+      roll: 0,
+      yOffset: remaining * 0.07,
+      auraScale: 1 + remaining * 0.18,
+      auraOpacity: remaining * 0.1,
+    });
+  }
+  if (state.stage === "anticipation") {
+    return Object.freeze({
+      scaleX: 1 - eased * 0.06,
+      scaleY: 1 + eased * 0.09,
+      scaleZ: 1 - eased * 0.04,
+      pitch: -eased * 0.1,
+      roll: Math.sin(progress * Math.PI * 2) * 0.025,
+      yOffset: eased * 0.09,
+      auraScale: 1 + eased * 0.36,
+      auraOpacity: eased * 0.22,
+    });
+  }
+  if (state.stage === "release") {
+    return Object.freeze({
+      scaleX: 1 + remaining * 0.17,
+      scaleY: 1 - remaining * 0.13,
+      scaleZ: 1 + remaining * 0.13,
+      pitch: remaining * 0.12,
+      roll: 0,
+      yOffset: remaining * 0.05,
+      auraScale: 1 + remaining * 0.5,
+      auraOpacity: remaining * 0.34,
+    });
+  }
+  return Object.freeze({
+    scaleX: 1 + remaining * 0.08,
+    scaleY: 1 - remaining * 0.05,
+    scaleZ: 1 + remaining * 0.06,
+    pitch: remaining * 0.06,
+    roll: 0,
+    yOffset: remaining * 0.03,
+    auraScale: 1 + remaining * 0.2,
+    auraOpacity: remaining * 0.1,
+  });
+}
+
+export function enemyResponseContract(type, detail = {}) {
+  const safeDetail = detail ?? {};
+  const resistanceClass = safeDetail.resistanceClass ?? "medium";
+  if (type === "claimPulled") {
+    const applied = Number.isFinite(safeDetail.applied) ? Math.max(0, safeDetail.applied) : 0;
+    const braced = resistanceClass === "heavy" || resistanceClass === "boss" || applied <= 0.001;
+    if (braced) {
+      const boss = resistanceClass === "boss";
+      return Object.freeze({
+        kind: "brace",
+        clipRole: "brace",
+        duration: boss ? 0.38 : 0.32,
+        lean: boss ? 0.07 : 0.1,
+        squash: boss ? 0.08 : 0.11,
+        resistanceClass,
+      });
+    }
+    const resistanceScale = resistanceClass === "light" ? 1 : 0.78;
+    return Object.freeze({
+      kind: "pull",
+      clipRole: "hit",
+      duration: 0.24 + clamp01(applied / 3.2) * 0.16,
+      lean: 0.22 * resistanceScale,
+      squash: 0.13 * resistanceScale,
+      resistanceClass,
+    });
+  }
+  if (type === "enemyStaggered") {
+    const duration = Number.isFinite(safeDetail.duration) && safeDetail.duration > 0
+      ? safeDetail.duration
+      : DEFAULT_STAGGER_DURATION;
+    return Object.freeze({
+      kind: "stagger",
+      clipRole: "hit",
+      duration,
+      lean: resistanceClass === "boss" ? 0.1 : 0.17,
+      squash: resistanceClass === "boss" ? 0.12 : 0.18,
+      resistanceClass,
+    });
+  }
+  return null;
+}
+
+function responseWeight(record) {
+  if (!record.response || record.responseDuration <= 0 || record.responseTime <= 0) return 0;
+  const progress = clamp01(1 - record.responseTime / record.responseDuration);
+  const recoveryStart = record.response.kind === "stagger" ? 0.68 : 0.44;
+  if (progress <= recoveryStart) return 1;
+  const recovery = clamp01((progress - recoveryStart) / (1 - recoveryStart));
+  return 1 - recovery * recovery * (3 - 2 * recovery);
+}
+
+function canPresentResponse(record, enemy) {
+  return Boolean(
+    record.response
+    && record.responseTime > 0
+    && enemy.active
+    && enemy.state !== "phaseTransition",
+  );
 }
 
 function easeOutBack(value) {
@@ -276,6 +482,13 @@ export class EnemyCharacterRenderer {
       releaseTime: 0,
       forcedClip: null,
       forcedTime: 0,
+      response: null,
+      responseTime: 0,
+      responseDuration: 0,
+      queenSpecial: null,
+      phaseTransition: null,
+      dismissalTime: 0,
+      dismissalDuration: 0,
       eventSerial: 0,
       idlePhase: Math.random(),
     };
@@ -294,6 +507,13 @@ export class EnemyCharacterRenderer {
     record.releaseTime = 0;
     record.forcedClip = null;
     record.forcedTime = 0;
+    record.response = null;
+    record.responseTime = 0;
+    record.responseDuration = 0;
+    record.queenSpecial = null;
+    record.phaseTransition = null;
+    record.dismissalTime = 0;
+    record.dismissalDuration = 0;
     record.stateKey = null;
     record.currentAction = null;
     record.detailed = false;
@@ -438,6 +658,38 @@ export class EnemyCharacterRenderer {
       scaleY *= 0.82;
       scaleZ *= 1.3;
     }
+    if (canPresentResponse(record, enemy)) {
+      const weight = responseWeight(record);
+      const response = record.response;
+      if (response.kind === "pull") {
+        const motionX = enemy.position.x - enemy.previousPosition.x;
+        const motionZ = enemy.position.z - enemy.previousPosition.z;
+        const motionLength = Math.hypot(motionX, motionZ);
+        if (motionLength > 0.001) {
+          const directionX = motionX / motionLength;
+          const directionZ = motionZ / motionLength;
+          const facingX = enemy.facing?.x ?? 0;
+          const facingZ = enemy.facing?.z ?? 1;
+          lean += -(directionX * facingX + directionZ * facingZ) * response.lean * weight;
+          roll += (directionX * facingZ - directionZ * facingX) * response.lean * 0.72 * weight;
+        } else {
+          lean -= response.lean * 0.55 * weight;
+        }
+        scaleY *= 1 - response.squash * weight;
+        scaleZ *= 1 + response.squash * 0.85 * weight;
+      } else if (response.kind === "brace") {
+        lean += response.lean * weight;
+        scaleX *= 1 + response.squash * 0.8 * weight;
+        scaleY *= 1 - response.squash * weight;
+        scaleZ *= 1 + response.squash * 0.5 * weight;
+      } else if (response.kind === "stagger") {
+        lean -= response.lean * weight;
+        roll += (enemy.id % 2 === 0 ? 1 : -1) * response.lean * 0.58 * weight;
+        scaleX *= 1 + response.squash * 0.72 * weight;
+        scaleY *= 1 - response.squash * weight;
+        scaleZ *= 1 + response.squash * 0.45 * weight;
+      }
+    }
     if (enemy.hitFlash > 0) {
       const impact = clamp01(enemy.hitFlash / HIT_DURATION);
       scaleX *= 1 + impact * 0.13;
@@ -529,12 +781,89 @@ export class EnemyCharacterRenderer {
     if (record.releaseTime <= 0) record.releaseKind = null;
     record.forcedTime = Math.max(0, record.forcedTime - dt);
     if (record.forcedTime <= 0) record.forcedClip = null;
+    record.responseTime = Math.max(0, record.responseTime - dt);
+    if (record.responseTime <= 0) record.response = null;
+    record.dismissalTime = Math.max(0, record.dismissalTime - dt);
+    if (record.phaseTransition) {
+      record.phaseTransition.remaining = Math.max(0, record.phaseTransition.remaining - dt);
+      if (record.phaseTransition.remaining <= 0) record.phaseTransition = null;
+    }
+    if (!record.queenSpecial) return;
+    const previousRemaining = record.queenSpecial.remaining;
+    record.queenSpecial.remaining = Math.max(0, previousRemaining - dt);
+    if (record.queenSpecial.remaining > 0) return;
+    if (record.queenSpecial.stage === "release") {
+      const recovery = queenSpecialPresentationContract(record.queenSpecial.action, "recovery");
+      const overflow = Math.max(0, dt - previousRemaining);
+      const recoveryRemaining = Math.max(0, recovery.duration - overflow);
+      record.queenSpecial = {
+        ...record.queenSpecial,
+        stage: "recovery",
+        duration: recovery.duration,
+        remaining: recoveryRemaining,
+      };
+      record.eventSerial += 1;
+      record.stateKey = null;
+      if (recoveryRemaining <= 0) record.queenSpecial = null;
+      return;
+    }
+    if (record.queenSpecial.stage === "recovery") record.queenSpecial = null;
+  }
+
+  resolveResponseClip(profile, response) {
+    const preferred = response.clipRole === "brace" ? profile.blockClip : profile.hitClip;
+    if (preferred && this.clips.has(preferred)) return preferred;
+    const fallback = response.clipRole === "brace" ? profile.hitClip : profile.blockClip;
+    if (fallback && this.clips.has(fallback)) return fallback;
+    return this.clips.has(profile.idleClip) ? profile.idleClip : null;
   }
 
   resolveAnimation(record, enemy, moving) {
     const profile = getEnemyVisualProfile(enemy.type);
+    if (!enemy.active && enemy.dismissed && record.dismissalTime > 0) {
+      return {
+        clip: profile.hitClip,
+        once: true,
+        duration: Math.max(0.08, record.dismissalTime),
+        key: `queen-dismissal:${record.eventSerial}`,
+      };
+    }
     if (!enemy.active && enemy.dismissed) return { clip: profile.idleClip, once: false, duration: null, key: "dismissed" };
     if (!enemy.active) return { clip: profile.deathClip, once: true, duration: DEATH_DURATION, key: "death" };
+    if (record.phaseTransition?.remaining > 0) {
+      return {
+        clip: QUEEN_PHASE_TRANSITION_CLIPS[record.phaseTransition.phase] ?? profile.hitClip,
+        once: true,
+        duration: Math.max(0.08, record.phaseTransition.remaining),
+        key: `queen-phase:${record.phaseTransition.phase}:${record.eventSerial}`,
+      };
+    }
+    if (record.queenSpecial?.remaining > 0) {
+      const special = queenSpecialPresentationContract(
+        record.queenSpecial.action,
+        record.queenSpecial.stage,
+        record.queenSpecial.duration,
+      );
+      if (special) {
+        return {
+          clip: special.clip,
+          once: true,
+          duration: Math.max(0.05, record.queenSpecial.remaining),
+          key: `queen-special:${record.queenSpecial.action}:${record.queenSpecial.stage}:${record.queenSpecial.actionId}`,
+        };
+      }
+    }
+    if (canPresentResponse(record, enemy)) {
+      const clip = this.resolveResponseClip(profile, record.response);
+      if (clip) {
+        return {
+          clip,
+          once: true,
+          duration: Math.max(0.05, record.responseTime),
+          key: `response:${record.response.kind}:${record.eventSerial}`,
+        };
+      }
+    }
     if (record.age < SPAWN_DURATION) return { clip: profile.spawnClip, once: true, duration: SPAWN_DURATION, key: "spawn" };
     if (enemy.hitFlash > HIT_DURATION * 0.38) return { clip: profile.hitClip, once: true, duration: 0.24, key: `hit:${record.eventSerial}` };
     if (record.forcedClip) return { clip: record.forcedClip, once: true, duration: Math.max(0.2, record.forcedTime), key: `forced:${record.eventSerial}` };
@@ -576,6 +905,9 @@ export class EnemyCharacterRenderer {
     const originPulse = Math.sin(this.clockTime * originProfile.pulseSpeed + (enemy.originPhase ?? 0));
     let scaleX = 1;
     let scaleY = 1;
+    let scaleZ = 1;
+    let queenPose = null;
+    record.root.rotation.x = 0;
     if (record.age < SPAWN_DURATION) {
       const progress = clamp01(record.age / SPAWN_DURATION);
       const scale = easeOutBack(progress);
@@ -607,13 +939,58 @@ export class EnemyCharacterRenderer {
         scaleX *= 1 + impact * 0.08;
         scaleY *= 1 - impact * 0.055;
       }
+      if (canPresentResponse(record, enemy)) {
+        const weight = responseWeight(record);
+        const response = record.response;
+        if (response.kind === "pull") {
+          const motionX = enemy.position.x - enemy.previousPosition.x;
+          const motionZ = enemy.position.z - enemy.previousPosition.z;
+          const motionLength = Math.hypot(motionX, motionZ);
+          if (motionLength > 0.001) {
+            const directionX = motionX / motionLength;
+            const directionZ = motionZ / motionLength;
+            const facingX = enemy.facing?.x ?? 0;
+            const facingZ = enemy.facing?.z ?? 1;
+            record.root.rotation.x = -(directionX * facingX + directionZ * facingZ) * response.lean * weight;
+            record.root.rotation.z += (directionX * facingZ - directionZ * facingX) * response.lean * 0.72 * weight;
+          } else {
+            record.root.rotation.x = -response.lean * 0.55 * weight;
+          }
+          scaleY *= 1 - response.squash * weight;
+          scaleX *= 1 + response.squash * 0.35 * weight;
+        } else if (response.kind === "brace") {
+          record.root.rotation.x = response.lean * weight;
+          scaleX *= 1 + response.squash * 0.8 * weight;
+          scaleY *= 1 - response.squash * weight;
+        } else if (response.kind === "stagger") {
+          record.root.rotation.x = -response.lean * weight;
+          record.root.rotation.z += (enemy.id % 2 === 0 ? 1 : -1) * response.lean * 0.58 * weight;
+          scaleX *= 1 + response.squash * 0.72 * weight;
+          scaleY *= 1 - response.squash * weight;
+        }
+      }
+      const queenState = record.phaseTransition?.remaining > 0
+        ? { ...record.phaseTransition, kind: "phase" }
+        : record.queenSpecial;
+      if (enemy.type === "queen" && queenState) {
+        queenPose = sampleQueenActorPresentation(queenState);
+        scaleX *= queenPose.scaleX;
+        scaleY *= queenPose.scaleY;
+        scaleZ *= queenPose.scaleZ;
+        record.root.rotation.x += queenPose.pitch;
+        record.root.rotation.z += queenPose.roll;
+        record.root.position.y += queenPose.yOffset;
+      }
     }
-    record.root.scale.set(scaleX, scaleY, scaleX);
+    record.root.scale.set(scaleX, scaleY, scaleZ);
     if (record.aura) {
-      const phaseScale = enemy.bossPhase === 2 ? 1.24 : 1;
+      const phaseScale = enemy.bossPhase >= 3 ? 1.38 : enemy.bossPhase === 2 ? 1.24 : 1;
       const pulse = 1 + Math.sin(this.clockTime * 4.5) * 0.055;
-      record.aura.scale.setScalar(1.55 * phaseScale * pulse);
-      record.aura.material.opacity = (enemy.bossPhase === 2 ? 0.43 : 0.25) + Math.sin(this.clockTime * 5.2) * 0.05;
+      record.aura.scale.setScalar(1.55 * phaseScale * pulse * (queenPose?.auraScale ?? 1));
+      const phaseOpacity = enemy.bossPhase >= 3 ? 0.52 : enemy.bossPhase === 2 ? 0.43 : 0.25;
+      record.aura.material.opacity = phaseOpacity
+        + Math.sin(this.clockTime * 5.2) * 0.05
+        + (queenPose?.auraOpacity ?? 0);
       record.aura.rotation.z += 0.01;
     }
   }
@@ -638,22 +1015,50 @@ export class EnemyCharacterRenderer {
   }
 
   handleEvent(event) {
-    const { type, detail = {} } = event;
-    const id = detail.enemyId ?? detail.id;
+    const { type } = event ?? {};
+    const detail = event?.detail ?? {};
+    const id = detail.enemyId ?? detail.targetId ?? detail.id;
+    const response = enemyResponseContract(type, detail);
+    if (response && id != null) {
+      const record = this.actors.get(id);
+      const payload = { type: "response", response };
+      if (record) this.applyEvent(record, payload);
+      else this.queuePendingEvent(id, payload);
+    }
     if (type === "enemyAttack" && id != null) {
       const record = this.actors.get(id);
       const payload = { type: "release", kind: detail.attack };
       if (record) this.applyEvent(record, payload);
-      else this.pendingEvents.set(id, payload);
+      else this.queuePendingEvent(id, payload);
     }
     if (type === "enemyBlock" && id != null) {
       const record = this.actors.get(id);
       const payload = { type: "forced", clip: "Block", duration: 0.32 };
       if (record) this.applyEvent(record, payload);
-      else this.pendingEvents.set(id, payload);
+      else this.queuePendingEvent(id, payload);
     }
-    if (type === "queenSummon") this.forceQueen("Spellcast_Summon", 0.82);
-    if (type === "queenTeleport") this.forceQueen("Dodge_Forward", 0.36);
+    if (["queenSpecialAnticipated", "queenSpecialReleased", "queenSpecialRecovered", "queenSpecialCancelled"].includes(type) && id != null) {
+      const record = this.actors.get(id);
+      const payload = { type: "queenSpecial", event: type, detail };
+      if (record) this.applyEvent(record, payload);
+      else this.queuePendingEvent(id, payload);
+    }
+    if (type === "bossPhaseChanged" && id != null) {
+      const record = this.actors.get(id);
+      const payload = { type: "queenPhase", detail };
+      if (record) this.applyEvent(record, payload);
+      else this.queuePendingEvent(id, payload);
+    }
+    if (type === "queenGuardsDismissed") {
+      for (const actor of detail.actors ?? []) {
+        const record = this.actors.get(actor.id);
+        const payload = { type: "queenDismissal", duration: DISMISS_DURATION };
+        if (record) this.applyEvent(record, payload);
+        else this.queuePendingEvent(actor.id, payload);
+      }
+    }
+    if (type === "queenSummon" && detail.actionId == null) this.forceQueen("Spellcast_Summon", 0.82);
+    if (type === "queenTeleport" && detail.actionId == null) this.forceQueen("Dodge_Forward", 0.36);
   }
 
   forceQueen(clip, duration) {
@@ -661,7 +1066,23 @@ export class EnemyCharacterRenderer {
     if (queen) this.applyEvent(queen, { type: "forced", clip, duration });
   }
 
+  queuePendingEvent(id, payload) {
+    const current = this.pendingEvents.get(id);
+    if (current?.type === "response" && current.response.kind === "stagger") {
+      if (payload.type !== "response" || payload.response.kind !== "stagger") return;
+    } else if (current?.type === "response" && payload.type !== "response") {
+      return;
+    }
+    this.pendingEvents.set(id, payload);
+  }
+
   applyEvent(record, payload) {
+    if (
+      payload.type === "response"
+      && record.response?.kind === "stagger"
+      && record.responseTime > 0
+      && payload.response.kind !== "stagger"
+    ) return;
     record.eventSerial += 1;
     if (payload.type === "release") {
       const visual = getEnemyAttackVisual(record.type, payload.kind);
@@ -671,6 +1092,77 @@ export class EnemyCharacterRenderer {
     if (payload.type === "forced") {
       record.forcedClip = payload.clip;
       record.forcedTime = payload.duration;
+    }
+    if (payload.type === "response") {
+      record.response = payload.response;
+      record.responseTime = payload.response.duration;
+      record.responseDuration = payload.response.duration;
+      record.stateKey = null;
+      if (payload.response.kind === "stagger") {
+        record.releaseKind = null;
+        record.releaseTime = 0;
+        record.forcedClip = null;
+        record.forcedTime = 0;
+      }
+    }
+    if (payload.type === "queenSpecial") {
+      const { detail, event } = payload;
+      if (event === "queenSpecialAnticipated") {
+        if (detail.actionId == null || !QUEEN_SPECIAL_PRESENTATION[detail.action]) return;
+        const anticipation = queenSpecialPresentationContract(detail.action, "anticipation", detail.duration);
+        record.queenSpecial = {
+          actionId: detail.actionId,
+          action: detail.action,
+          stage: "anticipation",
+          duration: anticipation.duration,
+          remaining: anticipation.duration,
+          target: detail.target ?? null,
+          phase: detail.phase ?? 1,
+        };
+        record.forcedClip = null;
+        record.forcedTime = 0;
+        record.stateKey = null;
+      } else if (record.queenSpecial?.actionId === detail.actionId) {
+        if (event === "queenSpecialReleased") {
+          const release = queenSpecialPresentationContract(record.queenSpecial.action, "release");
+          record.queenSpecial = {
+            ...record.queenSpecial,
+            stage: "release",
+            duration: release.duration,
+            remaining: release.duration,
+            target: detail.target ?? record.queenSpecial.target,
+          };
+          record.stateKey = null;
+        } else {
+          record.queenSpecial = null;
+          record.stateKey = null;
+        }
+      }
+    }
+    if (payload.type === "queenPhase") {
+      const duration = Math.max(0.08, Number.isFinite(payload.detail.duration) ? payload.detail.duration : 0.82);
+      record.queenSpecial = null;
+      record.phaseTransition = {
+        kind: "phase",
+        phase: payload.detail.phase,
+        duration,
+        remaining: duration,
+      };
+      record.response = null;
+      record.responseTime = 0;
+      record.forcedClip = null;
+      record.forcedTime = 0;
+      record.stateKey = null;
+    }
+    if (payload.type === "queenDismissal") {
+      record.dismissalDuration = payload.duration;
+      record.dismissalTime = payload.duration;
+      record.deathAge = 0;
+      record.response = null;
+      record.responseTime = 0;
+      record.releaseKind = null;
+      record.releaseTime = 0;
+      record.stateKey = null;
     }
   }
 

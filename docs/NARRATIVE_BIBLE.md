@@ -2,18 +2,30 @@
 
 ## Canon hierarchy
 
-This document and the structured content in `src/game/dialogueContent.js` define the current narrative canon. The following legacy material is superseded and must not be restored without a recorded canon change:
+`DIRECTIONS.md` is authoritative. This bible records its approved narrative
+contract. The integrated `src/game/dialogueContent.js` and editor-facing
+`DIALOGUE.md` implement this contract; neither may override it. The following
+superseded material must not be restored without a recorded canon change:
 
 - The Fallen Knight encounter.
 - The royal-blood gate and ancient court-war explanation.
 - The Hollow Queen identity and title for the antagonist; she is displayed as **The Witch**.
 - The `homecoming`, `sealed`, and `wardens` endings.
 
-The Princess is **Princess Elowen**. The Prince remains unnamed.
+The Princess is **Princess Elowen**. The Prince is canonically **Zephyr**. The
+runtime may retain `prince` as his internal character key, but story text and
+nameplates identify him as Zephyr. Elowen uses his name intimately; the Witch
+usually calls him “Prince” or omits direct address.
 
 ## Story spine
 
-The Prince follows the magical bond between paired wedding rings into a ten-floor prison, believing the Witch abducted his wife. Elowen uses the bond to guide and strengthen him. The Witch warns that the bond, the creatures, and Elowen's changing voice are not what he assumes. After the Prince kills the Witch, Elowen briefly regains human control and identifies her own incurable necromancy. The Prince has five seconds to kill her or allow the corruption to return.
+After one warm domestic memory, Zephyr follows the magical bond between paired
+wedding rings into a ten-floor prison, believing the Witch abducted his wife.
+Elowen uses the bond to guide and strengthen him. The Witch warns that the bond,
+the creatures, and Elowen's changing voice are not what he assumes. After
+Zephyr kills the Witch, Elowen briefly regains human control and identifies her
+own incurable necromancy. Zephyr has five seconds to kill her or allow the
+corruption to return.
 
 The core theme is that devotion is not understanding. Rescuing Elowen means opening the prison; saving her means honoring her final request to die.
 
@@ -22,16 +34,21 @@ The core theme is that devotion is not understanding. Rescuing Elowen means open
 - Magic is ordinary enough for wedding rings to form a recognized bond between spouses.
 - The rings can carry presence, emotion, speech, power, and influence. Connection does not authenticate which part of a damaged mind is speaking.
 - Necromancy progressively corrupts identity, emotion, restraint, logic, and the natural order. It is absolutely forbidden.
-- Elowen is the only known living necromancer. No cause for her original practice is established.
+- Elowen is the only known living necromancer. She began by secretly studying
+  how to preserve consciousness at the moment of death because she could not
+  accept that an openly magical society still treated death as untouchable. An
+  apparent early success convinced her that continuing was a moral duty. Her
+  compassion hardened into certainty, and “no one should be lost” decayed into
+  “nothing is permitted to leave me.” This explains but does not excuse her.
 - Elowen cannot be cured. Her death is the only way to destroy the current root.
 - Genuine fragments of Elowen's human consciousness remain, but they become shorter and increasingly filtered or hijacked.
 - The Witch's forces arrive in stable ranks with clean summoning effects and controlled visual motion.
-- Elowen's forces use irregular placement, necromantic color, stronger pulse and sway, and increasingly frequent representation across later floors. Both origins retain the existing enemy behavior roster and target the Prince.
+- Elowen's forces use irregular placement, necromantic color, stronger pulse and sway, and increasingly frequent representation across later floors. Both origins retain the existing enemy behavior roster and target Zephyr.
 - Elowen's power always supplies the upgrades. The shifting dialogue reflects changing agency; upgrades do not mechanically corrupt or punish the player.
 
 ## Character objectives and voices
 
-### Prince
+### Zephyr
 
 **Objective:** Reach and rescue his wife.
 
@@ -39,13 +56,17 @@ The core theme is that devotion is not understanding. Rescuing Elowen means open
 
 **Voice:** Direct, grounded, and emotionally contained. He uses short declarative sentences and concrete demands. He does not posture like a storybook hero, joke through danger, or articulate the theme. His denial must remain emotionally credible: he attributes Elowen's changes to pain, magical interference, or the Witch's treatment.
 
-**Ending arc:** Killing Elowen means he finally listens to her rather than the corrupted desire carried through the ring. Hesitation means he continues demanding an answer compatible with rescue and is destroyed by that refusal.
+**Ending arc:** Killing Elowen means he finally listens to her rather than the
+corrupted desire carried through the ring. Hesitation means he continues
+demanding an answer compatible with rescue and is destroyed by that refusal.
+The kill branch completes a positive change arc; the timeout branch is the
+failed form of that same arc, not a knowledge failure.
 
 ### Princess Elowen
 
-**Human objective:** Bring the Prince close enough to end the Witch's containment and, in a final lucid interval, kill her.
+**Human objective:** Bring Zephyr close enough to end the Witch's containment and, in a final lucid interval, kill her.
 
-**Corrupted objective:** Escape, kill the Witch, possess or use the Prince, and spread. Corruption prevents these impulses from remaining logically consistent.
+**Corrupted objective:** Escape, kill the Witch, possess or use Zephyr, and spread. Corruption prevents these impulses from remaining logically consistent.
 
 **Voice progression:**
 
@@ -71,12 +92,12 @@ Her language moves from warnings about compromised judgment to observable eviden
 
 ## Character voice reference
 
-### Prince
+### Zephyr
 
 - **Sentence length and rhythm:** Usually one short sentence or a two-part demand. He answers evidence directly and leaves emotion compressed between words.
 - **Vocabulary and formality:** Plain, concrete, and lightly formal. He names actions—leave, release, hurt, reach—rather than abstract ideas.
 - **Emotional strategy:** Turn fear into commitment. When challenged, he narrows the conversation to the next thing he can do.
-- **Humor and imagery:** No jokes under pressure and almost no figurative language. The ring, Elowen's voice, and physical distance are his recurring concrete anchors.
+- **Humor and imagery:** Dry familiarity may surface sparingly in the domestic opening and early low-pressure ring exchanges; never as combat banter or once the corruption turns openly coercive. Figurative language remains rare. The ring, Elowen's voice, and physical distance are his recurring concrete anchors.
 - **Under pressure:** Becomes shorter and more absolute, never grander. Doubt appears as a question before he forces it back into the rescue explanation.
 - **Avoid:** Heroic proclamations, speeches about destiny or darkness, self-analysis, contempt for Elowen, and statements that solve the mystery early.
 - **Knowledge limit:** Until the reveal, he knows only that Elowen is missing, alive through the ring, apparently imprisoned, and able to lend him power.
@@ -86,8 +107,8 @@ Her language moves from warnings about compromised judgment to observable eviden
 
 - **Sentence length and rhythm:** Brief, intimate phrases with room for breath. Requests sound chosen rather than imposed.
 - **Vocabulary and formality:** Familiar domestic words—breathe, hand, hurt, love—without pet-name excess or courtly language.
-- **Emotional strategy:** Protect the Prince, reduce his fear, and preserve enough agency to make one final request.
-- **Humor and imagery:** Gentle understatement is possible before the dungeon, but no jokes once danger begins. Imagery stays tactile: breath, hands, distance, and the thread of the ring.
+- **Emotional strategy:** Protect Zephyr, reduce his fear, and preserve enough agency to make one final request.
+- **Humor and imagery:** Gentle understatement is possible in the domestic opening and a few early low-pressure ring exchanges, then disappears as danger and coercion intensify. Imagery stays tactile: breath, hands, distance, and the thread of the ring.
 - **Under pressure:** Stops softening the truth. At the reveal she uses clipped facts, accepts responsibility, and gives an imperative because time is gone.
 - **Avoid:** Saintly self-erasure, elaborate apologies, cure language, lore exposition, and treating corruption as a separate innocent person.
 - **Knowledge limit:** She knows what she practiced and what the Witch contained, but the ring transmits only fragments until the ending.
@@ -108,11 +129,11 @@ Her language moves from warnings about compromised judgment to observable eviden
 
 - **Sentence length and rhythm:** Clean, cruel statements followed by abrupt imperatives. Her calm certainty is more threatening than shouting.
 - **Vocabulary and formality:** Ownership, appetite, convenience, steering, and release. She reuses the language of love only to expose how she weaponized it.
-- **Emotional strategy:** Treat the Prince's devotion as a tool, then punish hesitation as proof that he still wants the lie.
+- **Emotional strategy:** Treat Zephyr's devotion as a tool, then punish hesitation as proof that he still wants the lie.
 - **Humor and imagery:** Amusement is dry and personal, never comic. The paired ring becomes an image of control and, in the final line, the removal of all separation.
 - **Under pressure:** Drops concern for his body, delights in obedience, and turns human interruptions into commands.
 - **Avoid:** A long villain speech, universal conquest claims, generic hunger metaphors, sexualized possession, and explanations of the Witch's history.
-- **Knowledge limit:** She knows she manipulated the bond and that the Witch contained her. She reveals only what the Prince must understand at the ending.
+- **Knowledge limit:** She knows she manipulated the bond and that the Witch contained her. She reveals only what Zephyr must understand at the ending.
 - **Reference line:** “And you named every pull love.”
 
 ### The Witch
@@ -133,14 +154,17 @@ Her language moves from warnings about compromised judgment to observable eviden
 - Reserve “love” for the bond explanation, meaningful reassurance, and ending recontextualization. Reserve “hurry” for late-stage loss of control.
 - Vary openings among observations, questions, imperatives, sensory contact, and direct rebuttals. Avoid successive lines beginning with character names or “You must.”
 - Do not use generic fantasy abstractions such as darkness, destiny, evil, taint, chosen blood, ancient prophecy, or power beyond imagining.
-- Do not repeat an emotional beat in the same exchange. If the Prince denies evidence, his next line must act, question, or reframe rather than deny again.
-- Inline upgrade dialogue remains readable during repeat runs: one or two beats by default, no lore dependency, and no second decision beyond the mechanical upgrade.
+- Do not repeat an emotional beat in the same exchange. If Zephyr denies evidence, his next line must act, question, or reframe rather than deny again.
+- Full-screen upgrade scenes remain readable during repeat runs: each performs a
+  distinct narrative function, introduces no second choice, and hands off to the
+  mechanical selection only after the scene completes.
 
 ## Knowledge-state chart
 
-| Stage | Prince believes | Player can infer | Elowen can express | Witch may disclose |
+| Stage | Zephyr believes | Player can infer | Elowen can express | Witch may disclose |
 |---|---|---|---|---|
-| Opening | Elowen was abducted and the ring proves she needs rescue. | The ring carries genuine contact but not necessarily complete truth. | One authentic sign of life and fear. | She took Elowen, release is unsafe, and the Prince lacks understanding. |
+| Domestic opening | His marriage is loving and secure. | Elowen's warmth is genuine, while her unease around loss and unfinished obligations is concealed. | Lived-in affection, dry familiarity, and one unforced ring beat. | Not present. |
+| Absence and threshold | Elowen was abducted and the ring proves she needs rescue. | The ring carries genuine contact but not necessarily complete truth. | One authentic sign of life and fear. | She took Elowen, release is unsafe, and Zephyr lacks understanding. |
 | Floors 1–2 | The Witch controls the dungeon and Elowen is helping him survive it. | Some hostile responses may not belong to the Witch. | Warm concern and the plausible bond explanation. | Emotional compromise and incomplete control. |
 | Floors 3–4 | The Witch is attacking the credibility of his marriage. | The signal and creature patterns are unreliable evidence. | Urgency, seal-breaking, and proximity. | Signal risk, inconsistent responses, and ambiguous ownership. |
 | Floor 5 | The Witch is staging another trick. | Ordered and unstable arrivals imply two sources. | Possessive concern and preference for power over cost. | Observable differences only. |
@@ -154,15 +178,33 @@ Her language moves from warnings about compromised judgment to observable eviden
 
 ## Event and progression rules
 
-- `opening.ring` establishes the marriage bond and a genuine human fragment.
-- `opening.threshold` establishes the Witch as apparent captor and the Prince's commitment.
+- `opening.domestic` establishes the lived-in marriage, a shared memory, the
+  paired rings, and Elowen's concealed unease without exposing its cause.
+- `opening.ring` covers Elowen's disappearance, the ring contact, and Zephyr's
+  pursuit to the Witch's domain.
+- `opening.threshold` establishes the Witch as apparent captor and Zephyr's commitment.
 - Every floor begins with one Witch projection. Projection order is deterministic.
-- Rooms 1 and 2 on every floor include an inline Elowen upgrade exchange.
-- Room 3 on floors 1–9 maps to the threshold upgrade exchange.
+- Rooms 1 and 2 on every floor trigger a separate full-screen Elowen upgrade
+  scene before the offer is shown.
+- Room 3 on floors 1–9 maps to a separate full-screen threshold-upgrade scene.
 - Floor 10 room 3 is the Witch encounter and has no upgrade exchange.
 - Dialogue before the ending never branches. Gameplay choice remains in the upgrade selection.
 - The only narrative branch is the five-second physical decision: kill Elowen or hesitate.
 - Dialogue state resets on a new run. Clue order never randomizes.
+
+## Corpus and scene registry
+
+The final corpus contains 49 dialogue sequences: three opening sequences, ten
+Witch projections, 29 upgrade scenes, and seven boss/reveal/ending sequences.
+`ending.decision` is a stable non-dialogue controller state and is not counted as
+a dialogue sequence. The revised corpus contains 4,353 unique displayed words;
+the complete kill route contains 4,237 and the complete timeout route 4,266.
+Only displayed story dialogue counts, not identifiers, metadata, controls,
+upgrade cards, or glossary entries.
+
+Every dialogue sequence and beat has a stable identifier. Each beat also carries
+an expression, pose, stage position, and background key. The presentation layer
+may change those visual values without changing the beat's identity or text.
 
 ## Floor progression and purpose
 
@@ -203,13 +245,27 @@ Before `ending.princess-human`, no dialogue, UI label, enemy label, or narration
 - That Elowen is the current root of necromancy.
 - Why Elowen began practicing necromancy.
 
-The Prince may notice contradictions but cannot solve the truth early. The Witch may describe evidence and prognosis but cannot provide a lore explanation. The glossary remains locked until either ending completes.
+Pre-reveal motivation hints may show her aversion to loss or certainty through
+ordinary behavior. They may not mention her research, preserving consciousness,
+an experimental success, or a moral duty connected to death.
+
+Zephyr may notice contradictions but cannot solve the truth early. The Witch may describe evidence and prognosis but cannot provide a lore explanation. The glossary remains locked until either ending completes.
 
 ## Ending canon
 
 The Witch dies. Her controlled magic ceases while necromantic instability remains. Corrupted Elowen initially celebrates; human Elowen then returns briefly and says: “It was necromancy. Mine. She was containing me. There is no cure—kill me. Now.”
 
-- **Kill ending:** The Prince strikes within five seconds. Elowen remains lucid as she dies, owns the choice, thanks him, and takes the corruption with her. The Prince survives.
-- **Timeout ending:** The Prince hesitates. Corruption returns and confirms the ring manipulation, then kills him. His final realization and Elowen's “nothing between us” cruelty follow the fatal strike.
+- **Kill ending:** Zephyr strikes within five seconds. Elowen remains lucid as she dies, owns the choice, thanks him, and takes the corruption with her. Zephyr survives.
+- **Timeout ending:** Zephyr hesitates. Corruption returns and confirms the ring manipulation, then kills him. His final realization and Elowen's “nothing between us” cruelty follow the fatal strike.
 
 Both endings fade to black and unlock the glossary. Ordinary run death does not.
+
+## Recorded canon changes
+
+- `DIRECTIONS.md`: the Prince is named Zephyr.
+- `DIRECTIONS.md`: Elowen's original motivation is compassion corrupted by
+  certainty, with preservation becoming ownership.
+- `DIRECTIONS.md`: all 29 upgrade encounters use separate full-screen VN scenes.
+- `DIRECTIONS.md`: the first-completed-run corpus target is 4,000–6,000 words.
+
+No other `Instructions.md` canon is superseded by this revision.

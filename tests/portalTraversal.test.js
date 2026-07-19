@@ -47,6 +47,8 @@ test("a mandatory reward precedes the center portal and walking into it starts t
   clearEncounter(game);
 
   assert.deepEqual(game.arena.portal, { x: 0, z: 0 });
+  assert.equal(game.phase, "dialogue");
+  while (game.phase === "dialogue") game.skipDialogue();
   assert.equal(game.phase, "reward");
   assert.equal(game.portalActive, false);
   assert.equal(game.beginPortalTraversal(), false);
@@ -103,6 +105,8 @@ test("the third chamber portal completes once and opens the floor blessing", () 
 
   assert.equal(game.floor, 1);
   assert.equal(game.room, RUN_CONFIG.roomsPerFloor);
+  assert.equal(game.phase, "dialogue");
+  while (game.phase === "dialogue") game.skipDialogue();
   assert.equal(game.phase, "blessing");
   assert.equal(game.pendingBlessings.length, 3);
   assert.equal(game.portalTraversal.completed, true);

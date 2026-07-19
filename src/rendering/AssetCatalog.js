@@ -2,13 +2,14 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { getBiome } from "../generation/biomes.js";
+import { publicAssetUrl } from "../publicAssetUrl.js";
 
 const CHARACTER_FILES = Object.freeze({
-  knight: "/assets/models/characters/knight.glb",
-  minion: "/assets/models/characters/skeleton-minion.glb",
-  rogue: "/assets/models/characters/skeleton-rogue.glb",
-  warrior: "/assets/models/characters/skeleton-warrior.glb",
-  mage: "/assets/models/characters/skeleton-mage.glb",
+  knight: publicAssetUrl("assets/models/characters/knight.glb"),
+  minion: publicAssetUrl("assets/models/characters/skeleton-minion.glb"),
+  rogue: publicAssetUrl("assets/models/characters/skeleton-rogue.glb"),
+  warrior: publicAssetUrl("assets/models/characters/skeleton-warrior.glb"),
+  mage: publicAssetUrl("assets/models/characters/skeleton-mage.glb"),
 });
 
 const CRITICAL_CHARACTERS = Object.freeze(["knight", "minion", "rogue", "warrior", "mage"]);
@@ -41,7 +42,7 @@ export class AssetCatalog {
     const tasks = [
       ...CRITICAL_CHARACTERS.map((key) => ({ label: key, load: () => this.loadCharacter(key) })),
       ...CRITICAL_ENVIRONMENT.map((key) => ({ label: key, load: () => this.loadEnvironment(key) })),
-      { label: "Princess Elowen", load: () => this.loadTexture("/assets/sprites/princess-world.webp") },
+      { label: "Princess Elowen", load: () => this.loadTexture(publicAssetUrl("assets/vn/characters/elowen-a-human.png")) },
     ];
     this.progress = { loaded: 0, total: tasks.length, ratio: 0, label: "Preparing the descent" };
     this.listener?.(this.progress);
@@ -66,14 +67,13 @@ export class AssetCatalog {
   }
 
   loadEnvironment(key) {
-    return this.loadGltf(`/assets/models/environment/${key}.glb`);
+    return this.loadGltf(publicAssetUrl(`assets/models/environment/${key}.glb`));
   }
 
   async preloadBiome(id) {
     const biome = getBiome(id);
     const keys = new Set([biome.floorModel, biome.wallModel, ...biome.obstacleModels, ...biome.propModels]);
     await Promise.all([...keys].map((key) => this.loadEnvironment(key)));
-    await this.loadTexture(biome.decalTexture);
   }
 
   loadGltf(path) {

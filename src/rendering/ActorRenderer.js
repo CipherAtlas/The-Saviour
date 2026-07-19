@@ -1,21 +1,31 @@
 import * as THREE from "three";
 import { clone as cloneSkeleton } from "three/addons/utils/SkeletonUtils.js";
 import { CAMERA_CONFIG, HEAVY_ATTACK } from "../game/gameConfig.js";
+import { publicAssetUrl } from "../publicAssetUrl.js";
 import { createScytheModel } from "./createScytheModel.js";
 import { EnemyCharacterRenderer } from "./EnemyCharacterRenderer.js";
 import { getEnemyVisualProfile } from "./enemyVisualProfiles.js";
-import { samplePlayerScytheAnimation } from "./playerScytheAnimation.js";
+import { PlayerActorPresentation } from "./playerActorPresentation.js";
+import { samplePlayerScytheAnimation, sampleReapersClaimAnimation } from "./playerScytheAnimation.js";
 
 const MAX_HEALTH_BARS = 385;
 const BLADE_TRAIL_SAMPLES = 9;
 const PLAYER_FORWARD_OFFSET = Math.PI / 2;
 const PLAYER_WEAPON_SCALE = 0.86;
-const LIGHT_ATTACK_CLIPS = Object.freeze({
-  "Crescent Cut": "2H_Melee_Attack_Spinning",
-  "Grave Return": "2H_Melee_Attack_Spinning",
-  "Harvest Moon": "2H_Melee_Attack_Spinning",
-  "Reaping Passage": "2H_Melee_Attack_Spinning",
-});
+const PLAYER_POSE_BONES = Object.freeze([
+  "hips",
+  "spine",
+  "chest",
+  "head",
+  "upperarm.l",
+  "lowerarm.l",
+  "upperarm.r",
+  "lowerarm.r",
+  "upperleg.l",
+  "lowerleg.l",
+  "upperleg.r",
+  "lowerleg.r",
+]);
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
@@ -30,12 +40,8 @@ function configureAction(action, once) {
   action.clampWhenFinished = once;
 }
 
-function spriteFromSheet(texture, scale) {
-  const sheet = texture.clone();
-  sheet.repeat.set(1 / 3, 1);
-  sheet.offset.set(0, 0);
-  sheet.needsUpdate = true;
-  const material = new THREE.SpriteMaterial({ map: sheet, transparent: true, alphaTest: 0.035, depthWrite: false });
+function spriteFromCutout(texture, scale) {
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, alphaTest: 0.035, depthWrite: false });
   const sprite = new THREE.Sprite(material);
   sprite.scale.set(scale.x, scale.y, 1);
   sprite.visible = false;
@@ -61,18 +67,24 @@ export class ActorRenderer {
     this.matrix = new THREE.Matrix4();
     this.position = new THREE.Vector3();
     this.scale = new THREE.Vector3();
+    this.playerPresentation = new PlayerActorPresentation();
+    this.playerPose = null;
+    this.playerPoseBones = new Map();
+    this.playerPoseEuler = new THREE.Euler();
+    this.playerPoseQuaternion = new THREE.Quaternion();
+    this.playerPoseApplied = false;
   }
 
   async initialize() {
     const [knight, princessTexture] = await Promise.all([
       this.catalog.loadCharacter("knight"),
-      this.catalog.loadTexture("/assets/sprites/princess-world.webp"),
+      this.catalog.loadTexture(publicAssetUrl("assets/vn/characters/elowen-a-human.png")),
     ]);
     this.createPlayer(knight);
     this.enemyRenderer = new EnemyCharacterRenderer(this.scene, this.catalog);
     await this.enemyRenderer.initialize();
     this.createHealthBars();
-    this.princess = spriteFromSheet(princessTexture, { x: 4.3, y: 5.5 });
+    this.princess = spriteFromCutout(princessTexture, { x: 3.8, y: 5.7 });
     this.scene.add(this.princess);
   }
 
@@ -111,6 +123,29 @@ export class ActorRenderer {
       this.weaponParent = this.playerGroup;
     }
     this.weaponBaseQuaternion = this.weaponGrip.quaternion.clone();
+    this.weaponHomeParent = this.weaponParent;
+    this.weaponHomePosition = this.weaponGrip.position.clone();
+    this.weaponHomeQuaternion = this.weaponGrip.quaternion.clone();
+    this.weaponHomeScale = this.weaponGrip.scale.clone();
+    this.playerModelHomeQuaternion = this.playerModel.quaternion.clone();
+    for (const boneName of PLAYER_POSE_BONES) {
+      const object = this.playerModel.getObjectByName(boneName);
+      if (!object) continue;
+      this.playerPoseBones.set(boneName, {
+        object,
+        baseQuaternion: new THREE.Quaternion(),
+        captured: false,
+      });
+    }
+    this.claimBodyLeanAxis = new THREE.Vector3(1, 0, 0);
+    this.claimBodyLeanQuaternion = new THREE.Quaternion();
+    this.claimWeaponEuler = new THREE.Euler();
+    this.claimWeaponQuaternion = new THREE.Quaternion();
+    this.claimPose = null;
+    this.claimSnapshotCurrent = null;
+    this.claimPresentationActive = false;
+    this.claimBodyLeanApplied = false;
+    this.claimSampleOptions = { reducedMotion: false, spinningClip: "2H_Melee_Attack_Spinning" };
     this.bladeHeel = this.scythe.getObjectByName("ScytheBladeHeel");
     this.bladeTip = this.scythe.getObjectByName("ScytheBladeTip");
     this.weaponSourceDirection = this.bladeTip.position.clone().normalize();
@@ -174,6 +209,8 @@ export class ActorRenderer {
     }));
     this.bladeTrailCount = 0;
     this.bladeTrailAttackKey = null;
+    this.bladeTrailClaimActionId = null;
+    this.bladeTrailClaimPhase = null;
     this.lastBladeTrailAttackTime = 0;
     this.bladeHeelWorld = new THREE.Vector3();
     this.bladeTipWorld = new THREE.Vector3();
@@ -182,7 +219,7 @@ export class ActorRenderer {
   createChargeAura() {
     this.chargeAura = new THREE.Group();
     const fillMaterial = new THREE.MeshBasicMaterial({
-      color: 0x914ed3,
+      color: 0x78d7f4,
       transparent: true,
       opacity: 0,
       depthWrite: false,
@@ -190,7 +227,7 @@ export class ActorRenderer {
       side: THREE.DoubleSide,
     });
     const rimMaterial = fillMaterial.clone();
-    rimMaterial.color.set(0xf0c8ff);
+    rimMaterial.color.set(0xf3d58a);
     const fillGeometry = new THREE.RingGeometry(0.16, 1, 72);
     const rimGeometry = new THREE.RingGeometry(0.95, 1, 72);
     fillGeometry.rotateX(-Math.PI / 2);
@@ -235,12 +272,21 @@ export class ActorRenderer {
   }
 
   sync(game, alpha, dt) {
-    if (!this.playerGroup || !game.player) return;
+    if (!this.playerGroup) return;
+    if (!game.player) {
+      this.clearClaimPresentation();
+      return;
+    }
     this.clockTime += dt;
+    this.restorePlayerActorPose();
     const playerX = interpolated(game.player.previousPosition.x, game.player.position.x, alpha);
     const playerZ = interpolated(game.player.previousPosition.z, game.player.position.z, alpha);
     this.playerGroup.position.set(playerX, 0, playerZ);
-    const facing = game.combat.attack && Number.isFinite(game.combat.attackFacing)
+    this.sampleClaimPresentation(game, alpha);
+    this.playerPose = this.claimPose ? null : this.playerPresentation.sample(game, dt);
+    const facing = this.claimPose
+      ? this.claimPose.bodyYaw
+      : game.combat.attack && Number.isFinite(game.combat.attackFacing)
       ? game.combat.attackFacing
       : game.player.aimAngle;
     this.playerGroup.rotation.y = PLAYER_FORWARD_OFFSET - facing;
@@ -254,54 +300,113 @@ export class ActorRenderer {
     this.syncStorySprite(game);
   }
 
+  sampleClaimPresentation(game, alpha) {
+    const snapshots = game.claimSnapshots;
+    const fallback = snapshots?.current ? null : game.combat?.claim?.snapshot?.();
+    const current = snapshots?.current ?? fallback;
+    const previous = snapshots?.previous ?? current;
+    const endingActive = game.endingPresentationStage && game.endingPresentationStage !== "inactive";
+    const phase = String(game.phase ?? "");
+    const forcedRestore = phase === "dead"
+      || phase === "portalTraversal"
+      || phase === "roomTransition"
+      || phase === "roomLoading"
+      || phase.startsWith("ending")
+      || endingActive;
+    if (!current || current.phase === "idle" || current.actionId == null || forcedRestore) {
+      this.clearClaimPresentation();
+      return;
+    }
+    this.claimSampleOptions.reducedMotion = game.settings?.get?.("camera.reducedMotion") === true;
+    this.claimSampleOptions.spinningClip = this.actions.has("2H_Melee_Attack_Spinning") ? "2H_Melee_Attack_Spinning" : "Spin";
+    this.claimPose = sampleReapersClaimAnimation(previous, current, alpha, this.claimSampleOptions);
+    this.claimSnapshotCurrent = current;
+    this.claimPresentationActive = true;
+  }
+
+  clearClaimPresentation() {
+    const wasActive = this.claimPresentationActive;
+    this.claimPresentationActive = false;
+    this.claimPose = null;
+    this.claimSnapshotCurrent = null;
+    if (!wasActive) return;
+    this.restoreClaimWeapon();
+    this.resetClaimBodyLean();
+    if (this.currentAction?.paused) this.currentAction.paused = false;
+    this.resetBladeTrail();
+  }
+
   syncPlayerAnimation(game, dt) {
     let clip = "Idle";
     let once = false;
     let desiredDuration = null;
     let stateKey = "idle";
     let direction = 1;
-    if (game.phase === "dead" || game.flags.princeKilledByPrincess) {
-      clip = "Death_A";
-      once = true;
-      desiredDuration = 0.9;
-      stateKey = "dead";
-    } else if (game.phase === "portalTraversal") {
+    if (!this.claimPose && this.currentAction?.paused) this.currentAction.paused = false;
+    let clipProgress = null;
+    if (game.phase === "portalTraversal") {
       clip = "Dodge_Forward";
       once = true;
       desiredDuration = game.portalTraversal?.duration ?? 0.82;
       stateKey = "portalTraversal";
-    } else if (game.player.hitFlash > 0.08) {
-      clip = "Hit_A";
-      once = true;
-      desiredDuration = 0.24;
-      stateKey = "hit";
-    } else if (game.combat.isDashing) {
-      clip = "Dodge_Forward";
-      once = true;
-      desiredDuration = 0.2;
-      stateKey = "dash";
-    } else if (game.combat.attack) {
-      clip = game.combat.attack.name === "Death's Orbit"
-        ? "2H_Melee_Attack_Spinning"
-        : LIGHT_ATTACK_CLIPS[game.combat.attack.name] ?? "2H_Melee_Attack_Spin";
-      once = true;
-      desiredDuration = game.combat.attack.duration;
-      stateKey = `attack:${game.combat.attack.name}`;
-      direction = Math.sign(game.combat.attack.swing ?? 1) || 1;
-    } else if (game.combat.chargingHeavy) {
-      clip = "2H_Melee_Attack_Spinning";
-      desiredDuration = 2.4;
-      stateKey = "charge";
-    } else if (Math.hypot(
-      game.player.position.x - game.player.previousPosition.x,
-      game.player.position.z - game.player.previousPosition.z,
-    ) > 0.005) {
-      clip = "Running_A";
-      desiredDuration = 0.78;
-      stateKey = "run";
+    } else if (this.claimPose) {
+      clip = this.claimPose.bodyClip;
+      once = !this.claimPose.bodyClipLoop;
+      stateKey = `claim:${this.claimPose.actionId}:${this.claimPose.phase}`;
+    } else if (this.playerPose) {
+      clip = this.playerPose.clip;
+      once = this.playerPose.once;
+      desiredDuration = this.playerPose.duration;
+      stateKey = this.playerPose.stateKey;
+      clipProgress = this.playerPose.clipProgress;
+      direction = game.combat.attack && game.combat.attackKind === "light"
+        ? Math.sign(game.combat.attack.swing ?? 1) || 1
+        : 1;
     }
     this.playAnimation(clip, once, 0.055, desiredDuration, stateKey, direction);
-    this.mixer.update(dt);
+    if (this.claimPose && this.currentAction) {
+      const clipDuration = this.currentAction.getClip().duration;
+      this.currentAction.paused = true;
+      this.currentAction.time = clipDuration * this.claimPose.bodyClipProgress;
+      this.mixer.update(dt);
+    } else if (Number.isFinite(clipProgress) && this.currentAction) {
+      const clipDuration = this.currentAction.getClip().duration;
+      this.currentAction.paused = true;
+      this.currentAction.time = clipDuration * clipProgress;
+      this.mixer.update(0);
+    } else {
+      if (this.currentAction?.paused) this.currentAction.paused = false;
+      this.mixer.update(dt);
+    }
+    if (!this.claimPose && this.playerPose) this.applyPlayerActorPose(this.playerPose);
+  }
+
+  restorePlayerActorPose() {
+    if (!this.playerPoseApplied) return;
+    for (const record of this.playerPoseBones.values()) {
+      if (!record.captured) continue;
+      record.object.quaternion.copy(record.baseQuaternion);
+      record.captured = false;
+    }
+    this.playerModel.quaternion.copy(this.playerModelHomeQuaternion);
+    this.playerPoseApplied = false;
+  }
+
+  applyPlayerActorPose(pose) {
+    const model = pose.model;
+    this.playerPoseEuler.set(model.x, model.y, model.z);
+    this.playerPoseQuaternion.setFromEuler(this.playerPoseEuler);
+    this.playerModel.quaternion.copy(this.playerModelHomeQuaternion).multiply(this.playerPoseQuaternion);
+    for (const [boneName, rotation] of Object.entries(pose.bones)) {
+      const record = this.playerPoseBones.get(boneName);
+      if (!record) continue;
+      record.baseQuaternion.copy(record.object.quaternion);
+      record.captured = true;
+      this.playerPoseEuler.set(rotation.x, rotation.y, rotation.z);
+      this.playerPoseQuaternion.setFromEuler(this.playerPoseEuler);
+      record.object.quaternion.multiply(this.playerPoseQuaternion);
+    }
+    this.playerPoseApplied = true;
   }
 
   playAnimation(name, once, fade = 0.08, desiredDuration = null, stateKey = name, direction = 1) {
@@ -320,6 +425,14 @@ export class ActorRenderer {
   }
 
   syncWeaponPose(game) {
+    if (this.claimPose) {
+      this.syncClaimWeapon();
+      this.playerGroup.updateMatrixWorld(true);
+      this.syncBladeTrail(game, null, this.claimPose);
+      return;
+    }
+    this.restoreClaimWeapon();
+    this.resetClaimBodyLean();
     const attack = game.combat.attack;
     let scale = PLAYER_WEAPON_SCALE;
     let pose = null;
@@ -341,7 +454,48 @@ export class ActorRenderer {
     }
     this.weaponGrip.scale.setScalar(scale);
     this.playerGroup.updateMatrixWorld(true);
-    this.syncBladeTrail(game, pose);
+    this.syncBladeTrail(game, pose, null);
+  }
+
+  setClaimWeaponDetached(detached) {
+    if (detached) {
+      if (this.weaponGrip.parent !== this.scene) this.scene.attach(this.weaponGrip);
+      return;
+    }
+    this.restoreClaimWeapon();
+  }
+
+  restoreClaimWeapon() {
+    if (!this.weaponGrip || !this.weaponHomeParent) return;
+    if (this.weaponGrip.parent !== this.weaponHomeParent) this.weaponHomeParent.attach(this.weaponGrip);
+    this.weaponGrip.position.copy(this.weaponHomePosition);
+    this.weaponGrip.quaternion.copy(this.weaponHomeQuaternion);
+    this.weaponGrip.scale.copy(this.weaponHomeScale);
+  }
+
+  syncClaimWeapon() {
+    const pose = this.claimPose;
+    this.setClaimWeaponDetached(pose.weaponDetached);
+    this.claimBodyLeanQuaternion.setFromAxisAngle(this.claimBodyLeanAxis, pose.bodyLean);
+    this.playerModel.quaternion.copy(this.playerModelHomeQuaternion).multiply(this.claimBodyLeanQuaternion);
+    this.claimBodyLeanApplied = true;
+    if (pose.weaponDetached) {
+      this.weaponGrip.position.set(pose.weaponPosition.x, pose.weaponHeight, pose.weaponPosition.z);
+      this.claimWeaponEuler.set(0, PLAYER_FORWARD_OFFSET - pose.bodyYaw, pose.weaponSpin);
+      this.weaponGrip.quaternion.setFromEuler(this.claimWeaponEuler);
+    } else {
+      this.weaponGrip.position.y += pose.weaponHeight - 1.16;
+      this.claimWeaponEuler.set(0, 0, pose.weaponSpin);
+      this.claimWeaponQuaternion.setFromEuler(this.claimWeaponEuler);
+      this.weaponGrip.quaternion.multiply(this.claimWeaponQuaternion);
+    }
+    this.weaponGrip.updateMatrixWorld(true);
+  }
+
+  resetClaimBodyLean() {
+    if (!this.claimBodyLeanApplied) return;
+    this.playerModel.quaternion.copy(this.playerModelHomeQuaternion);
+    this.claimBodyLeanApplied = false;
   }
 
   applyScytheSlicePose(game, pose) {
@@ -364,7 +518,31 @@ export class ActorRenderer {
     this.weaponGrip.quaternion.copy(this.weaponBaseQuaternion).slerp(this.weaponTargetLocalQuaternion, pose.poseWeight);
   }
 
-  syncBladeTrail(game, pose) {
+  syncBladeTrail(game, pose, claimPose = null) {
+    if (claimPose) {
+      const snapshot = this.claimSnapshotCurrent;
+      if (snapshot.actionId !== this.bladeTrailClaimActionId || snapshot.phase !== this.bladeTrailClaimPhase || snapshot.elapsed < this.lastBladeTrailAttackTime) {
+        this.resetBladeTrail();
+        this.bladeTrailClaimActionId = snapshot.actionId;
+        this.bladeTrailClaimPhase = snapshot.phase;
+      }
+      this.lastBladeTrailAttackTime = snapshot.elapsed;
+      if (claimPose.trailStrength <= 0) {
+        this.bladeTrail.visible = false;
+        return;
+      }
+      this.bladeHeel.getWorldPosition(this.bladeHeelWorld);
+      this.bladeTip.getWorldPosition(this.bladeTipWorld);
+      const newest = this.bladeTrailCount > 0 ? this.bladeTrailSamples[this.bladeTrailCount - 1] : null;
+      if (!newest || newest.tip.distanceToSquared(this.bladeTipWorld) > 0.0009) {
+        this.appendBladeTrailSample(this.bladeHeelWorld, this.bladeTipWorld);
+      } else {
+        newest.heel.copy(this.bladeHeelWorld);
+        newest.tip.copy(this.bladeTipWorld);
+      }
+      this.writeBladeTrail(claimPose.trailStrength, claimPose.phase === "empoweredCleave");
+      return;
+    }
     const attack = game.combat.attack;
     if (!attack || !pose || pose.trailStrength <= 0) {
       this.bladeTrail.visible = false;
@@ -426,6 +604,8 @@ export class ActorRenderer {
   resetBladeTrail() {
     this.bladeTrailCount = 0;
     this.bladeTrailAttackKey = null;
+    this.bladeTrailClaimActionId = null;
+    this.bladeTrailClaimPhase = null;
     this.lastBladeTrailAttackTime = 0;
     if (this.bladeTrail) {
       this.bladeTrail.visible = false;
@@ -510,14 +690,13 @@ export class ActorRenderer {
     const corrupt = stage === "revealCorrupted" || stage === "timeout" || (
       stage === "fade" && game.ending.snapshot().result?.id === "timeout"
     );
-    const pleading = stage === "revealHuman" || stage === "decision";
-    this.princess.material.map.offset.x = corrupt ? 2 / 3 : pleading ? 1 / 3 : 0;
     this.princess.material.color.set(corrupt ? 0xd17491 : 0xffffff);
     const fadeProgress = game.ending.snapshot().fade?.progress ?? 0;
     this.princess.material.opacity = 1 - fadeProgress;
   }
 
   handleEvent(event) {
+    this.playerPresentation.handleEvent(event);
     this.enemyRenderer?.handleEvent(event);
   }
 

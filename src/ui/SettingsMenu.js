@@ -25,10 +25,10 @@ const TABS = Object.freeze({
     ["audio.muteUnfocused", "Mute while unfocused", "Silence the game when switching windows.", "toggle"],
   ],
   gameplay: [
-    ["gameplay.difficulty", "Difficulty", "Locks when a run begins.", "select", ["story", "standard", "ruthless"]],
+    ["gameplay.lastDifficultyId", "Difficulty", "Used as the next run's initial selection.", "select", ["story", "standard", "ruthless"]],
     ["gameplay.aimAssist", "Aim assist", "Bias attacks toward nearby enemies.", "range", 0, 1, 0.05],
     ["gameplay.autoTarget", "Auto target", "Strength of soft target selection.", "range", 0, 1, 0.05],
-    ["gameplay.damageNumbers", "Damage numbers", "Show dealt damage in the interface.", "toggle"],
+    ["gameplay.damageNumbers", "Spatial combat numbers", "Show spatial damage, mitigation, and healing meaning above combatants.", "toggle"],
     ["gameplay.chargeMode", "Heavy charge input", "Hold or toggle the charged reap.", "select", ["hold", "toggle"]],
   ],
   accessibility: [
@@ -36,7 +36,6 @@ const TABS = Object.freeze({
     ["accessibility.highContrast", "High contrast", "Increase panel and combat contrast.", "toggle"],
     ["accessibility.colorPalette", "Color palette", "Alternative combat color mapping.", "select", ["default", "deuteranopia", "tritanopia"]],
     ["accessibility.screenFlashes", "Screen flashes", "Enable bright impact feedback.", "toggle"],
-    ["accessibility.subtitles", "Subtitles", "Always display dialogue text.", "toggle"],
     ["accessibility.reducedParticles", "Reduced particles", "Lower visual effect density further.", "toggle"],
   ],
   controls: [
@@ -48,6 +47,7 @@ const TABS = Object.freeze({
     ["attack", "Scythe attack", "Primary binding.", "binding"],
     ["heavy", "Charged reap", "Primary binding.", "binding"],
     ["dash", "Dash", "Primary binding.", "binding"],
+    ["claim", "Reaper's Claim", "Primary binding.", "binding"],
     ["interact", "Interact", "Primary binding.", "binding"],
   ],
 });
@@ -63,13 +63,15 @@ export class SettingsMenu {
     this.input = input;
     this.activeTab = "graphics";
     this.onClose = null;
+    this.previousFocus = null;
     this.element = document.createElement("div");
-    this.element.className = "modal hidden";
+    this.element.className = "modal settings-modal hidden";
     this.element.innerHTML = `
       <section class="panel settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <div><p class="eyebrow">Configure your journey</p><h2 id="settings-title">Settings</h2></div>
-        <nav class="settings-tabs" aria-label="Settings categories"></nav>
-        <div class="settings-content"></div>
+        <div class="settings-heading"><p class="eyebrow">Configure your journey</p><h2 id="settings-title">Settings</h2></div>
+        <nav class="settings-tabs" role="tablist" aria-label="Settings categories"></nav>
+        <div class="settings-content" role="tabpanel"></div>
+        <p class="settings-status" role="status" aria-live="polite"></p>
         <div class="settings-actions">
           <button class="button danger" data-action="reset-settings">Reset defaults</button>
           <button class="button primary" data-action="close-settings">Done</button>
@@ -78,16 +80,43 @@ export class SettingsMenu {
     root.append(this.element);
     this.tabsElement = this.element.querySelector(".settings-tabs");
     this.contentElement = this.element.querySelector(".settings-content");
+    this.statusElement = this.element.querySelector(".settings-status");
     this.element.querySelector("[data-action='close-settings']").addEventListener("click", () => this.close());
     this.element.querySelector("[data-action='reset-settings']").addEventListener("click", () => {
       this.settings.reset();
       this.renderTab();
     });
+    this.element.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        this.close();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const controls = [...this.element.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled)")]
+        .filter((control) => !control.closest(".hidden"));
+      if (controls.length === 0) return;
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (!this.element.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
+      }
+    });
     this.renderTabs();
   }
 
-  open(onClose) {
+  open(onClose, trigger = document.activeElement) {
     this.onClose = onClose;
+    this.previousFocus = trigger;
+    this.statusElement.textContent = "";
     this.element.classList.remove("hidden");
     this.renderTab();
     this.element.querySelector("button, input, select")?.focus();
@@ -97,8 +126,11 @@ export class SettingsMenu {
     this.input.cancelCapture();
     this.element.classList.add("hidden");
     const callback = this.onClose;
+    const previousFocus = this.previousFocus;
     this.onClose = null;
+    this.previousFocus = null;
     callback?.();
+    previousFocus?.focus?.();
   }
 
   get isOpen() {
@@ -110,19 +142,59 @@ export class SettingsMenu {
     for (const tab of Object.keys(TABS)) {
       const button = document.createElement("button");
       button.className = `settings-tab ${tab === this.activeTab ? "active" : ""}`;
+      button.id = `settings-tab-${tab}`;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-controls", `settings-panel-${tab}`);
+      button.setAttribute("aria-selected", String(tab === this.activeTab));
+      button.tabIndex = tab === this.activeTab ? 0 : -1;
       button.textContent = titleCase(tab);
-      button.addEventListener("click", () => {
-        this.activeTab = tab;
-        this.renderTabs();
-        this.renderTab();
+      button.addEventListener("click", () => this.selectTab(tab));
+      button.addEventListener("keydown", (event) => {
+        const direction = {
+          ArrowUp: -1,
+          ArrowLeft: -1,
+          ArrowDown: 1,
+          ArrowRight: 1,
+          Home: "first",
+          End: "last",
+        }[event.key];
+        if (direction === undefined) return;
+        event.preventDefault();
+        event.stopPropagation();
+        this.moveTab(direction);
       });
       this.tabsElement.append(button);
     }
   }
 
+  selectTab(tab, focus = false) {
+    if (!(tab in TABS)) return;
+    this.activeTab = tab;
+    this.renderTabs();
+    this.renderTab();
+    if (focus) this.tabsElement.querySelector(`#settings-tab-${tab}`)?.focus();
+  }
+
+  moveTab(direction) {
+    const tabs = Object.keys(TABS);
+    const currentIndex = Math.max(0, tabs.indexOf(this.activeTab));
+    const nextIndex = direction === "first"
+      ? 0
+      : direction === "last"
+        ? tabs.length - 1
+        : (currentIndex + direction + tabs.length) % tabs.length;
+    this.selectTab(tabs[nextIndex], true);
+  }
+
   renderTab() {
     this.contentElement.replaceChildren();
+    this.contentElement.id = `settings-panel-${this.activeTab}`;
+    this.contentElement.setAttribute("aria-labelledby", `settings-tab-${this.activeTab}`);
     for (const field of TABS[this.activeTab]) this.contentElement.append(this.createRow(field));
+  }
+
+  setStatus(message) {
+    this.statusElement.textContent = message;
   }
 
   createRow([path, label, description, type, ...options]) {
@@ -153,8 +225,14 @@ export class SettingsMenu {
       input.addEventListener("change", async () => {
         this.settings.set(path, input.checked);
         if (path === "graphics.fullscreen") {
-          if (input.checked && !document.fullscreenElement) await document.documentElement.requestFullscreen?.();
-          if (!input.checked && document.fullscreenElement) await document.exitFullscreen?.();
+          try {
+            if (input.checked && !document.fullscreenElement) await document.documentElement.requestFullscreen?.();
+            if (!input.checked && document.fullscreenElement) await document.exitFullscreen?.();
+          } catch {
+            input.checked = Boolean(document.fullscreenElement);
+            this.settings.set(path, input.checked);
+            this.setStatus("Fullscreen could not be changed. Browser permission may be required.");
+          }
         }
       });
       control.append(input);
@@ -177,13 +255,15 @@ export class SettingsMenu {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "binding-button";
-      button.textContent = this.settings.get(`controls.bindings.${path}`)[0];
+      const bindings = this.settings.get(`controls.bindings.${path}`);
+      button.textContent = bindings.join(" / ");
       button.addEventListener("click", async () => {
-        button.textContent = "Press a key…";
+        button.textContent = "Press a key or button…";
         const binding = await this.input.captureNextBinding();
         if (!binding) return this.renderTab();
+        const conflict = this.settings.bindingConflict(path, binding);
         const accepted = this.settings.setBinding(path, binding);
-        button.textContent = accepted ? binding : "Already in use";
+        button.textContent = accepted ? this.settings.get(`controls.bindings.${path}`).join(" / ") : `In use: ${titleCase(conflict)}`;
         if (!accepted) setTimeout(() => this.renderTab(), 900);
       });
       control.append(button);

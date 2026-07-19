@@ -52,9 +52,9 @@ function createSettings() {
 
 function createHarness() {
   const input = createInput();
-  const game = new Game(input, createSettings());
   const storage = new MemoryStorage();
   const progress = new NarrativeProgressStore(storage);
+  const game = new Game(input, createSettings(), { narrativeProgress: progress });
   const events = [];
 
   game.on((event) => {
@@ -65,6 +65,20 @@ function createHarness() {
   });
 
   return { game, input, events, progress, storage };
+}
+
+function combatHit(actionId, damage, sourcePosition) {
+  return Object.freeze({
+    actionId,
+    damage,
+    critical: false,
+    direction: Object.freeze({ x: 1, z: 0 }),
+    knockback: 0,
+    poiseDamage: 0,
+    pullStrength: 0,
+    sourcePosition: Object.freeze({ ...sourcePosition }),
+    origin: "player",
+  });
 }
 
 function completeActiveSequence(game) {
@@ -78,7 +92,7 @@ function completeActiveSequence(game) {
     assert.equal(beat?.sequenceId, sequenceId);
     assert.equal(game.continueDialogue(), true);
     advances += 1;
-    assert.ok(advances < 32, `dialogue sequence did not complete: ${sequenceId}`);
+    assert.ok(advances < 64, `dialogue sequence did not complete: ${sequenceId}`);
   }
 
   return sequenceId;
@@ -90,7 +104,7 @@ function completeQueuedDialogue(game) {
   while (game.phase === "dialogue") {
     sequenceIds.push(completeActiveSequence(game));
     sequences += 1;
-    assert.ok(sequences < 16, "modal narrative queue did not drain");
+    assert.ok(sequences < 16, "VN narrative queue did not drain");
   }
   return sequenceIds;
 }
@@ -132,19 +146,22 @@ function prepareDeterministicDecision(game, events, startAtMs, fadeAtMs) {
   assert.equal(game.ending.snapshot().decision.startedAtMs, startAtMs);
 }
 
-test("opening modal sequences drain in strict FIFO order before room play", () => {
+test("opening VN sequences drain in strict FIFO order before room play", () => {
   const { game, events } = createHarness();
   game.startRun("NARRATIVE-OPENING-FIFO");
 
   assert.equal(game.phase, "dialogue");
-  assert.equal(game.activeNarrative.id, "opening.ring");
+  assert.equal(game.activeNarrative.id, "opening.domestic");
   assert.deepEqual(game.narrativeQueue.map(({ id }) => id), [
+    "opening.ring",
     "opening.threshold",
     floorProjectionId(1),
   ]);
 
   const completed = completeQueuedDialogue(game);
-  assert.deepEqual(completed, ["opening.ring", "opening.threshold", floorProjectionId(1)]);
+  assert.deepEqual(completed, ["opening.domestic", "opening.ring", "opening.threshold", floorProjectionId(1)]);
+  assert.equal(completed[0], "opening.domestic");
+  assert.equal(completed.filter((sequenceId) => sequenceId === "opening.domestic").length, 1);
   assert.equal(game.phase, "playing");
   assert.equal(game.activeNarrative, null);
   assert.deepEqual(game.narrativeQueue, []);
@@ -157,14 +174,19 @@ test("opening modal sequences drain in strict FIFO order before room play", () =
     events.filter(({ type }) => type === "dialogueCompleted").map(({ detail }) => detail.sequenceId),
     completed,
   );
+  assert.equal(
+    events.filter(({ type, detail }) => type === "dialogueCompleted" && detail.sequenceId === "opening.domestic").length,
+    1,
+  );
 });
 
-test("the complete ten-floor route places every projection and all 29 inline upgrade sequences", () => {
+test("the complete ten-floor route presents every projection and all 29 full-screen upgrade sequences", () => {
   const { game, events } = createHarness();
   const placements = [];
   game.startRun("NARRATIVE-TEN-FLOORS");
 
   assert.deepEqual(completeQueuedDialogue(game), [
+    "opening.domestic",
     "opening.ring",
     "opening.threshold",
     floorProjectionId(1),
@@ -183,6 +205,8 @@ test("the complete ten-floor route places every projection and all 29 inline upg
     for (let room = 1; room <= 2; room += 1) {
       assert.equal(game.room, room);
       clearEncounter(game);
+      assert.equal(game.phase, "dialogue");
+      assert.deepEqual(completeQueuedDialogue(game), [upgradeSequenceId(floor, room)]);
       assert.equal(game.phase, "reward");
       assert.ok(game.pendingRoomRewards.length > 0, `missing reward choices at floor ${floor}, room ${room}`);
 
@@ -190,8 +214,7 @@ test("the complete ten-floor route places every projection and all 29 inline upg
       const sequenceId = upgradeSequenceId(floor, room);
       assert.equal(offer.detail.floor, floor);
       assert.equal(offer.detail.room, room);
-      assert.ok(offer.detail.dialogue.length > 0);
-      assert.ok(offer.detail.dialogue.every((beat) => beat.sequenceId === sequenceId));
+      assert.equal(offer.detail.sequenceId, sequenceId);
       placements.push({ floor, room, sequenceId });
 
       game.chooseRoomReward(game.pendingRoomRewards[0].id);
@@ -213,6 +236,8 @@ test("the complete ten-floor route places every projection and all 29 inline upg
     assert.equal(game.phase, "playing");
     assert.equal(game.portalActive, true);
     traversePortal(game);
+    assert.equal(game.phase, "dialogue");
+    assert.deepEqual(completeQueuedDialogue(game), [upgradeSequenceId(floor, RUN_CONFIG.roomsPerFloor)]);
     assert.equal(game.phase, "blessing");
     assert.ok(game.pendingBlessings.length > 0, `missing floor blessing choices after floor ${floor}`);
 
@@ -220,8 +245,7 @@ test("the complete ten-floor route places every projection and all 29 inline upg
     const sequenceId = upgradeSequenceId(floor, RUN_CONFIG.roomsPerFloor);
     assert.equal(offer.detail.floor, floor);
     assert.equal(offer.detail.room, RUN_CONFIG.roomsPerFloor);
-    assert.ok(offer.detail.dialogue.length > 0);
-    assert.ok(offer.detail.dialogue.every((beat) => beat.sequenceId === sequenceId));
+    assert.equal(offer.detail.sequenceId, sequenceId);
     placements.push({ floor, room: RUN_CONFIG.roomsPerFloor, sequenceId });
 
     game.chooseBlessing(game.pendingBlessings[0].id);
@@ -246,6 +270,7 @@ test("starting a new run resets active dialogue, seen IDs, and queued callbacks"
   game.startRun("NARRATIVE-STALE-FIRST");
 
   assert.equal(game.continueDialogue(), true);
+  assert.equal(game.continueDialogue(), true);
   assert.equal(game.dialogue.view().position, 2);
   assert.equal(game.enqueueNarrative("ending.kill"), true);
   assert.ok(game.narrativeQueue.some(({ id }) => id === "ending.kill"));
@@ -253,13 +278,15 @@ test("starting a new run resets active dialogue, seen IDs, and queued callbacks"
   const restartEventIndex = events.length;
   game.startRun("NARRATIVE-STALE-SECOND");
 
-  assert.equal(game.activeNarrative.id, "opening.ring");
+  assert.equal(game.activeNarrative.id, "opening.domestic");
   assert.equal(game.dialogue.view().position, 1);
   assert.deepEqual(game.narrativeQueue.map(({ id }) => id), [
+    "opening.ring",
     "opening.threshold",
     floorProjectionId(1),
   ]);
   assert.deepEqual([...game.seenRunSequences], [
+    "opening.domestic",
     "opening.ring",
     "opening.threshold",
     floorProjectionId(1),
@@ -267,6 +294,7 @@ test("starting a new run resets active dialogue, seen IDs, and queued callbacks"
   assert.equal(game.ending.snapshot().stage, "inactive");
 
   assert.deepEqual(completeQueuedDialogue(game), [
+    "opening.domestic",
     "opening.ring",
     "opening.threshold",
     floorProjectionId(1),
@@ -327,16 +355,30 @@ test("boss defeat completes the Witch's final dialogue before dismissing Witch-o
   const boss = game.director.activeBoss();
   const bossDefeatEventIndex = events.length;
 
-  assert.equal(game.director.damageEnemy(boss, boss.maxHealth, { x: 1, z: 0 }, 0), true);
-  assert.equal(game.director.damageEnemy(boss, 1, { x: 1, z: 0 }, 0), false);
+  const bossDefeat = game.director.resolveCombatHit(
+    boss,
+    combatHit("narrative-boss-defeat", boss.maxHealth, game.player.position),
+  );
+  const duplicateDefeat = game.director.resolveCombatHit(
+    boss,
+    combatHit("narrative-boss-repeat", 1, game.player.position),
+  );
+  assert.equal(bossDefeat.accepted, true);
+  assert.equal(bossDefeat.defeated, true);
+  assert.equal(duplicateDefeat.accepted, false);
+  assert.equal(duplicateDefeat.reason, "inactive");
   assert.equal(game.activeNarrative.id, "ending.witch-death");
   assert.equal(witchGuard.active, true);
+  const finalWitchBeatId = game.dialogue.sequence("ending.witch-death").beats.at(-1).id;
 
   while (game.dialogue.view().position < game.dialogue.view().total) {
     assert.equal(game.continueDialogue(), true);
+    assert.equal(game.continueDialogue(), true);
     assert.equal(witchGuard.active, true);
   }
-  assert.equal(game.dialogue.view().beatId, "ending.witch-death.b03");
+  assert.equal(game.dialogue.view().beatId, finalWitchBeatId);
+  assert.equal(game.continueDialogue(), true);
+  assert.equal(witchGuard.active, true);
   assert.equal(game.continueDialogue(), true);
 
   assert.equal(witchGuard.active, false);
@@ -346,7 +388,7 @@ test("boss defeat completes the Witch's final dialogue before dismissing Witch-o
 
   const endingEvents = events.slice(bossDefeatEventIndex);
   const finalLineIndex = endingEvents.findIndex(({ type, detail }) => (
-    type === "dialogueAdvanced" && detail.beatId === "ending.witch-death.b03"
+    type === "dialogueAdvanced" && detail.beatId === finalWitchBeatId
   ));
   const completedIndex = endingEvents.findIndex(({ type, detail }) => (
     type === "dialogueCompleted" && detail.sequenceId === "ending.witch-death"
@@ -380,17 +422,27 @@ test("the kill ending resolves once, fades once, ends the run once, and persists
   assert.equal(game.tryKillPrincess(10_000), false);
   assert.equal(game.tryKillPrincess(11_000), true);
   assert.equal(game.tryKillPrincess(11_001), false);
+  assert.equal(game.phase, "endingStrike");
+  assert.equal(game.activeNarrative, null);
+  assert.equal(eventCount(events, "endingChoiceResolved"), 1);
+  assert.equal(eventCount(events, "endingStrikeStarted"), 1);
+  assert.equal(eventCount(events, "princessStruck"), 0);
+  game.updateFixed(NARRATIVE_TIMING.endingStrike.R);
   assert.equal(game.phase, "dialogue");
   assert.equal(game.activeNarrative.id, "ending.kill");
-  assert.equal(eventCount(events, "endingChoiceResolved"), 1);
   assert.equal(eventCount(events, "princessStruck"), 1);
+  assert.equal(eventCount(events, "endingStrikeCompleted"), 1);
   const decisionIndex = events.findIndex(({ type }) => type === "endingChoiceResolved");
+  const startedIndex = events.findIndex(({ type }) => type === "endingStrikeStarted");
   const strikeIndex = events.findIndex(({ type }) => type === "princessStruck");
+  const completedIndex = events.findIndex(({ type }) => type === "endingStrikeCompleted");
   const killDialogueIndex = events.findIndex(({ type, detail }) => (
     type === "dialogueStarted" && detail.sequenceId === "ending.kill"
   ));
-  assert.ok(decisionIndex < strikeIndex);
-  assert.ok(strikeIndex < killDialogueIndex);
+  assert.ok(decisionIndex < startedIndex);
+  assert.ok(startedIndex < strikeIndex);
+  assert.ok(strikeIndex < completedIndex);
+  assert.ok(completedIndex < killDialogueIndex);
 
   assert.equal(completeActiveSequence(game), "ending.kill");
   assert.equal(game.phase, "endingFade");
@@ -416,8 +468,10 @@ test("the kill ending resolves once, fades once, ends the run once, and persists
     seed: "ENDING-10000",
   });
   assert.equal(progress.isGlossaryUnlocked(), true);
-  assert.equal(storage.writeCount, 1);
-  assert.equal(new NarrativeProgressStore(storage).isGlossaryUnlocked(), true);
+  assert.equal(storage.writeCount, game.dialogue.sequence("ending.kill").beats.length + 2);
+  const reloaded = new NarrativeProgressStore(storage);
+  assert.equal(reloaded.isGlossaryUnlocked(), true);
+  assert.equal(reloaded.isSequenceCompleted("ending.kill"), true);
 });
 
 test("the timeout ending resolves once at the deadline and cannot soft-lock or accept a late kill", () => {
@@ -471,5 +525,13 @@ test("the timeout ending resolves once at the deadline and cannot soft-lock or a
     seed: "ENDING-30000",
   });
   assert.equal(progress.isGlossaryUnlocked(), true);
-  assert.equal(storage.writeCount, 1);
+  assert.equal(
+    storage.writeCount,
+    game.dialogue.sequence("ending.timeout").beats.length
+      + game.dialogue.sequence("ending.timeout-final").beats.length
+      + 3,
+  );
+  const reloaded = new NarrativeProgressStore(storage);
+  assert.equal(reloaded.isSequenceCompleted("ending.timeout"), true);
+  assert.equal(reloaded.isSequenceCompleted("ending.timeout-final"), true);
 });

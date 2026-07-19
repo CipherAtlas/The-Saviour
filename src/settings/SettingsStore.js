@@ -1,5 +1,5 @@
 const SETTINGS_KEY = "hollow-crown-settings";
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 4;
 
 export const DEFAULT_SETTINGS = Object.freeze({
   version: SETTINGS_VERSION,
@@ -30,6 +30,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   }),
   gameplay: Object.freeze({
     difficulty: "standard",
+    lastDifficultyId: "standard",
     aimAssist: 0.35,
     autoTarget: 0.25,
     damageNumbers: true,
@@ -40,21 +41,21 @@ export const DEFAULT_SETTINGS = Object.freeze({
     highContrast: false,
     colorPalette: "default",
     screenFlashes: true,
-    subtitles: true,
     reducedParticles: false,
   }),
   controls: Object.freeze({
     touchControls: "auto",
     bindings: Object.freeze({
-      moveUp: Object.freeze(["KeyW", "ArrowUp"]),
-      moveDown: Object.freeze(["KeyS", "ArrowDown"]),
-      moveLeft: Object.freeze(["KeyA", "ArrowLeft"]),
-      moveRight: Object.freeze(["KeyD", "ArrowRight"]),
-      attack: Object.freeze(["Mouse0"]),
-      heavy: Object.freeze(["KeyQ", "Mouse1"]),
-      dash: Object.freeze(["ShiftLeft", "Space", "Mouse2"]),
-      interact: Object.freeze(["KeyE"]),
-      pause: Object.freeze(["Escape"]),
+      moveUp: Object.freeze(["KeyW", "ArrowUp", "Gamepad:DPadUp"]),
+      moveDown: Object.freeze(["KeyS", "ArrowDown", "Gamepad:DPadDown"]),
+      moveLeft: Object.freeze(["KeyA", "ArrowLeft", "Gamepad:DPadLeft"]),
+      moveRight: Object.freeze(["KeyD", "ArrowRight", "Gamepad:DPadRight"]),
+      attack: Object.freeze(["Mouse0", "Gamepad:X"]),
+      heavy: Object.freeze(["KeyQ", "Mouse1", "Gamepad:Y"]),
+      dash: Object.freeze(["ShiftLeft", "Space", "Mouse2", "Gamepad:A"]),
+      claim: Object.freeze(["KeyR", "Gamepad:RB"]),
+      interact: Object.freeze(["KeyE", "Gamepad:B"]),
+      pause: Object.freeze(["Escape", "Gamepad:Menu"]),
     }),
   }),
 });
@@ -63,6 +64,7 @@ const ENUMS = Object.freeze({
   "graphics.shadows": ["off", "low", "medium", "high"],
   "graphics.fpsLimit": ["60", "90", "120", "unlimited"],
   "gameplay.difficulty": ["story", "standard", "ruthless"],
+  "gameplay.lastDifficultyId": ["story", "standard", "ruthless"],
   "gameplay.chargeMode": ["hold", "toggle"],
   "accessibility.colorPalette": ["default", "deuteranopia", "tritanopia"],
   "controls.touchControls": ["auto", "on", "off"],
@@ -95,7 +97,6 @@ const BOOLEAN_PATHS = new Set([
   "gameplay.damageNumbers",
   "accessibility.highContrast",
   "accessibility.screenFlashes",
-  "accessibility.subtitles",
   "accessibility.reducedParticles",
 ]);
 
@@ -134,6 +135,7 @@ function normalizeValue(path, value) {
 
 function normalizeSettings(candidate = {}) {
   const result = clone(DEFAULT_SETTINGS);
+  const needsControllerDefaults = candidate.version !== SETTINGS_VERSION;
 
   for (const path of [...Object.keys(RANGES), ...Object.keys(ENUMS), ...BOOLEAN_PATHS]) {
     const value = readPath(candidate, path);
@@ -147,9 +149,19 @@ function normalizeSettings(candidate = {}) {
     for (const action of Object.keys(result.controls.bindings)) {
       const bindings = candidateBindings[action];
       if (Array.isArray(bindings) && bindings.length > 0 && bindings.every((binding) => typeof binding === "string")) {
-        result.controls.bindings[action] = [...new Set(bindings)].slice(0, 3);
+        const persistentBindings = bindings.filter((binding) => !binding.startsWith("Touch:"));
+        if (persistentBindings.length > 0) {
+          const gamepadDefaults = needsControllerDefaults
+            ? DEFAULT_SETTINGS.controls.bindings[action].filter((binding) => binding.startsWith("Gamepad:"))
+            : [];
+          result.controls.bindings[action] = [...new Set([...persistentBindings, ...gamepadDefaults])].slice(0, 6);
+        }
       }
     }
+  }
+
+  if (candidate.gameplay?.lastDifficultyId === undefined && candidate.gameplay?.difficulty !== undefined) {
+    result.gameplay.lastDifficultyId = result.gameplay.difficulty;
   }
 
   result.version = SETTINGS_VERSION;
@@ -183,19 +195,31 @@ export class SettingsStore {
   }
 
   set(path, value) {
-    writePath(this.values, path, normalizeValue(path, value));
+    const normalized = normalizeValue(path, value);
+    writePath(this.values, path, normalized);
+    if (path === "gameplay.difficulty") this.values.gameplay.lastDifficultyId = normalized;
+    if (path === "gameplay.lastDifficultyId") this.values.gameplay.difficulty = normalized;
     this.persist();
     this.notify(path);
   }
 
-  setBinding(action, binding) {
-    if (!this.values.controls.bindings[action]) return false;
-
+  bindingConflict(action, binding) {
     for (const [otherAction, bindings] of Object.entries(this.values.controls.bindings)) {
-      if (otherAction !== action && bindings.includes(binding)) return false;
+      if (otherAction !== action && bindings.includes(binding)) return otherAction;
     }
+    return null;
+  }
 
-    this.values.controls.bindings[action] = [binding];
+  setBinding(action, binding) {
+    if (!this.values.controls.bindings[action] || typeof binding !== "string" || binding.startsWith("Touch:")) return false;
+    if (this.bindingConflict(action, binding)) return false;
+
+    const device = binding.startsWith("Gamepad:") ? "gamepad" : "keyboardMouse";
+    const retained = this.values.controls.bindings[action].filter((current) => {
+      const currentDevice = current.startsWith("Gamepad:") ? "gamepad" : "keyboardMouse";
+      return currentDevice !== device;
+    });
+    this.values.controls.bindings[action] = [binding, ...retained];
     this.persist();
     this.notify(`controls.bindings.${action}`);
     return true;

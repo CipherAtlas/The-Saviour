@@ -24,15 +24,107 @@ function collectMeshes(scene) {
   return result;
 }
 
-function atlasPlane(index, size) {
-  const geometry = new THREE.PlaneGeometry(size, size);
-  geometry.rotateX(-Math.PI / 2);
-  const uv = geometry.attributes.uv;
-  const column = index % 4;
-  const row = Math.floor(index / 4);
-  for (let vertex = 0; vertex < uv.count; vertex += 1) {
-    uv.setXY(vertex, column / 4 + uv.getX(vertex) / 4, (1 - row) / 2 + uv.getY(vertex) / 2);
+const MAX_DECALS_PER_ROOM = 7;
+
+function appendRibbon(positions, indices, start, end, width) {
+  const dx = end.x - start.x;
+  const dz = end.z - start.z;
+  const length = Math.hypot(dx, dz) || 1;
+  const sideX = (-dz / length) * width * 0.5;
+  const sideZ = (dx / length) * width * 0.5;
+  const first = positions.length / 3;
+  positions.push(
+    start.x + sideX, 0, start.z + sideZ,
+    start.x - sideX, 0, start.z - sideZ,
+    end.x - sideX, 0, end.z - sideZ,
+    end.x + sideX, 0, end.z + sideZ,
+  );
+  indices.push(first, first + 1, first + 2, first, first + 2, first + 3);
+}
+
+function appendRing(positions, indices, radius, width, segments = 20, startAngle = 0, arc = Math.PI * 2) {
+  for (let segment = 0; segment < segments; segment += 1) {
+    const angleA = startAngle + (segment / segments) * arc;
+    const angleB = startAngle + ((segment + 1) / segments) * arc;
+    const outer = radius + width * 0.5;
+    const inner = Math.max(0, radius - width * 0.5);
+    const first = positions.length / 3;
+    positions.push(
+      Math.cos(angleA) * outer, 0, Math.sin(angleA) * outer,
+      Math.cos(angleA) * inner, 0, Math.sin(angleA) * inner,
+      Math.cos(angleB) * inner, 0, Math.sin(angleB) * inner,
+      Math.cos(angleB) * outer, 0, Math.sin(angleB) * outer,
+    );
+    indices.push(first, first + 1, first + 2, first, first + 2, first + 3);
   }
+}
+
+function appendPolygon(positions, indices, radius, sides, width, rotation = 0) {
+  for (let side = 0; side < sides; side += 1) {
+    const angleA = rotation + (side / sides) * Math.PI * 2;
+    const angleB = rotation + ((side + 1) / sides) * Math.PI * 2;
+    appendRibbon(
+      positions,
+      indices,
+      { x: Math.cos(angleA) * radius, z: Math.sin(angleA) * radius },
+      { x: Math.cos(angleB) * radius, z: Math.sin(angleB) * radius },
+      width,
+    );
+  }
+}
+
+export function createProceduralDecalGeometry(style, variant, size) {
+  const positions = [];
+  const indices = [];
+  const radius = size * 0.38;
+  const stroke = Math.max(0.045, size * 0.035);
+  const phase = (Math.abs(variant) % 8) * Math.PI / 8;
+
+  if (style === "keep-ward") {
+    appendPolygon(positions, indices, radius, 4, stroke, Math.PI / 4);
+    appendRibbon(positions, indices, { x: -radius * 0.72, z: 0 }, { x: radius * 0.72, z: 0 }, stroke);
+    appendRibbon(positions, indices, { x: 0, z: -radius * 0.72 }, { x: 0, z: radius * 0.72 }, stroke);
+    appendPolygon(positions, indices, radius * 0.38, 4, stroke * 0.8, phase);
+  } else if (style === "ossuary-reliquary") {
+    appendRing(positions, indices, radius * 0.48, stroke, 18);
+    appendRibbon(positions, indices, { x: -radius * 0.86, z: -radius * 0.55 }, { x: radius * 0.86, z: radius * 0.55 }, stroke * 1.2);
+    appendRibbon(positions, indices, { x: -radius * 0.86, z: radius * 0.55 }, { x: radius * 0.86, z: -radius * 0.55 }, stroke * 1.2);
+    for (const angle of [phase, phase + Math.PI]) {
+      const x = Math.cos(angle) * radius * 0.48;
+      const z = Math.sin(angle) * radius * 0.48;
+      appendRing(positions, indices, stroke * 1.5, stroke, 10, 0, Math.PI * 2);
+      const vertexStart = positions.length - 10 * 4 * 3;
+      for (let index = vertexStart; index < positions.length; index += 3) {
+        positions[index] += x;
+        positions[index + 2] += z;
+      }
+    }
+  } else if (style === "foundry-vent") {
+    appendRing(positions, indices, radius * 0.72, stroke * 1.25, 18, phase, Math.PI * 1.7);
+    appendRing(positions, indices, radius * 0.36, stroke, 14, -phase, Math.PI * 1.55);
+    for (let spoke = 0; spoke < 4; spoke += 1) {
+      const angle = phase + spoke * Math.PI / 2;
+      appendRibbon(
+        positions,
+        indices,
+        { x: Math.cos(angle) * radius * 0.12, z: Math.sin(angle) * radius * 0.12 },
+        { x: Math.cos(angle) * radius * 0.9, z: Math.sin(angle) * radius * 0.9 },
+        stroke * 1.15,
+      );
+    }
+  } else if (style === "void-rune") {
+    appendPolygon(positions, indices, radius * 0.9, 3, stroke, phase);
+    appendPolygon(positions, indices, radius * 0.56, 3, stroke * 0.85, -phase - Math.PI / 3);
+    appendRing(positions, indices, radius * 0.24, stroke, 12, phase, Math.PI * 1.5);
+    appendRibbon(positions, indices, { x: -radius * 0.12, z: -radius * 0.94 }, { x: radius * 0.12, z: radius * 0.94 }, stroke * 0.8);
+  } else {
+    throw new RangeError(`Unknown procedural decal style: ${style}`);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeBoundingSphere();
   return geometry;
 }
 
@@ -67,7 +159,7 @@ export class BiomeRenderer {
     this.addWalls(arena, biome);
     this.addObstacles(arena);
     this.addProps(arena.props ?? []);
-    await this.addDecals(arena.props ?? [], biome.decalTexture);
+    this.addDecals(arena.props ?? [], biome.decal);
     if (token === this.buildToken) this.group.visible = true;
   }
 
@@ -78,7 +170,7 @@ export class BiomeRenderer {
     const tileDepth = Math.max(1, template.size.z);
     for (let x = -arena.width / 2 + tileWidth / 2; x < arena.width / 2; x += tileWidth) {
       for (let z = -arena.depth / 2 + tileDepth / 2; z < arena.depth / 2; z += tileDepth) {
-        transforms.push({ x, y: -template.minY, z, rotation: 0, scaleX: 1, scaleY: 1, scaleZ: 1 });
+        transforms.push({ x, y: -template.maxY, z, rotation: 0, scaleX: 1, scaleY: 1, scaleZ: 1 });
       }
     }
     this.addInstancedModel(template, transforms, { castShadow: false, receiveShadow: true });
@@ -136,24 +228,28 @@ export class BiomeRenderer {
     }
   }
 
-  async addDecals(props, texturePath) {
-    const texture = await this.catalog.loadTexture(texturePath);
+  addDecals(props, decalStyle) {
     const material = new THREE.MeshBasicMaterial({
-      map: texture,
-      color: 0xffffff,
+      color: decalStyle.color,
       transparent: true,
-      opacity: 0.34,
+      opacity: 0.38,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
     });
     this.roomMaterials.add(material);
-    for (const prop of props.slice(0, 7)) {
+    for (const prop of props.slice(0, MAX_DECALS_PER_ROOM)) {
       const size = 2.2 + (prop.decalIndex % 3) * 0.55;
-      const geometry = atlasPlane(prop.decalIndex, size);
+      const geometry = createProceduralDecalGeometry(decalStyle.style, prop.decalIndex, size);
       this.roomGeometries.add(geometry);
       const decal = new THREE.Mesh(geometry, material);
+      decal.name = `procedural-decal:${decalStyle.style}`;
       decal.position.set(prop.x, 0.035, prop.z);
       decal.rotation.y = prop.rotation;
+      decal.renderOrder = 2;
       this.group.add(decal);
     }
   }
@@ -176,6 +272,7 @@ export class BiomeRenderer {
         parts,
         size: box.getSize(new THREE.Vector3()),
         minY: box.min.y,
+        maxY: box.max.y,
       };
       this.templates.set(modelKey, template);
     }));

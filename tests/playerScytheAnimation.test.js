@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SCYTHE_ATTACKS } from "../src/game/gameConfig.js";
-import { samplePlayerScytheAnimation } from "../src/rendering/playerScytheAnimation.js";
+import { CLAIM_CONFIG, SCYTHE_ATTACKS } from "../src/game/gameConfig.js";
+import { samplePlayerScytheAnimation, sampleReapersClaimAnimation } from "../src/rendering/playerScytheAnimation.js";
 
 function closeTo(actual, expected, tolerance = 0.000001) {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} should be within ${tolerance} of ${expected}`);
@@ -21,6 +21,25 @@ function peakAngularSpeed(attack, comboIndex, start, end) {
     previous = angle;
   }
   return peak;
+}
+
+function claimSnapshot(phase, elapsed = 0, overrides = {}) {
+  const weaponDetached = phase === "outbound" || phase === "recalling";
+  return Object.freeze({
+    actionId: phase === "idle" ? null : "claim-1",
+    phase,
+    elapsed,
+    origin: Object.freeze({ x: 1, z: 2 }),
+    direction: Object.freeze({ x: 1, z: 0 }),
+    scythePosition: Object.freeze({ x: 4, z: 6 }),
+    weaponDetached,
+    ...overrides,
+  });
+}
+
+function sampleClaim(phase, elapsed = 0, overrides = {}, options = {}) {
+  const current = claimSnapshot(phase, elapsed, overrides);
+  return sampleReapersClaimAnimation(current, current, 1, options);
 }
 
 test("the physical scythe traverses the exact combat arc in the authored swing direction", () => {
@@ -107,4 +126,103 @@ test("an assisted ground arc uses the same sampler without changing combat data"
   closeTo(start.sweepAngle, -assistedArc / 2);
   closeTo(end.sweepAngle, assistedArc / 2);
   closeTo(attack.arc, originalArc);
+});
+
+test("Claim phase boundaries and midpoints seek distinct synchronized body contracts", () => {
+  const phases = [
+    ["outbound", CLAIM_CONFIG.outbound.duration, "emptyHandFollowThrough", "2H_Melee_Attack_Spinning"],
+    ["recalling", CLAIM_CONFIG.recall.duration, "recallTracking", "Idle"],
+    ["empoweredWindow", CLAIM_CONFIG.empoweredWindow, "bracedCatch", "Dodge_Forward"],
+    ["empoweredCleave", CLAIM_CONFIG.empoweredCleave.duration, "committedCleave", "2H_Melee_Attack_Spinning"],
+    ["recovery", CLAIM_CONFIG.recoveryDuration, "settledRecovery", "Idle"],
+  ];
+
+  const idle = sampleClaim("idle");
+  assert.equal(idle.bodyPose, "idle");
+  assert.equal(idle.bodyClip, "Idle");
+  assert.equal(idle.phaseProgress, 0);
+  assert.equal(idle.weaponState, "held");
+
+  for (const [phase, duration, midpointPose, clip] of phases) {
+    const start = sampleClaim(phase, 0);
+    const midpoint = sampleClaim(phase, duration / 2);
+    const end = sampleClaim(phase, duration);
+    closeTo(start.phaseProgress, 0);
+    closeTo(midpoint.phaseProgress, 0.5);
+    closeTo(end.phaseProgress, 1);
+    assert.equal(midpoint.bodyPose, midpointPose);
+    assert.equal(midpoint.bodyClip, clip);
+    assert.ok(midpoint.bodyClipProgress >= 0 && midpoint.bodyClipProgress <= 1);
+  }
+
+  assert.equal(sampleClaim("outbound", 0).bodyPose, "throwAnticipation");
+  assert.equal(sampleClaim("outbound", CLAIM_CONFIG.outbound.duration * 0.32).bodyPose, "throwRelease");
+  assert.equal(sampleClaim("outbound", CLAIM_CONFIG.outbound.duration * 0.8).bodyPose, "emptyHandFollowThrough");
+});
+
+test("Claim weapon ownership follows the authoritative snapshot through recall and catch", () => {
+  const outbound = sampleClaim("outbound", CLAIM_CONFIG.outbound.duration / 2);
+  const recalling = sampleClaim("recalling", CLAIM_CONFIG.recall.duration / 2);
+  const catchStart = sampleClaim("empoweredWindow", 0);
+  const catchSettled = sampleClaim("empoweredWindow", CLAIM_CONFIG.empoweredWindow / 2);
+  const cleave = sampleClaim("empoweredCleave", CLAIM_CONFIG.empoweredCleave.duration / 2);
+
+  assert.equal(outbound.weaponDetached, true);
+  assert.equal(outbound.weaponState, "detached");
+  assert.equal(recalling.weaponDetached, true);
+  assert.equal(catchStart.weaponDetached, false);
+  assert.equal(catchStart.weaponState, "reattaching");
+  assert.equal(catchSettled.weaponState, "held");
+  assert.equal(cleave.weaponState, "held");
+});
+
+test("Claim scythe X/Z interpolates only across matching action and phase continuity", () => {
+  const previous = claimSnapshot("outbound", 0.08, { scythePosition: Object.freeze({ x: 2, z: 4 }) });
+  const current = claimSnapshot("outbound", 0.16, { scythePosition: Object.freeze({ x: 10, z: 12 }) });
+  const interpolated = sampleReapersClaimAnimation(previous, current, 0.25);
+  assert.deepEqual(interpolated.weaponPosition, { x: 4, z: 6 });
+  assert.equal(interpolated.interpolatedPosition, true);
+  closeTo(interpolated.phaseProgress, 0.16 / CLAIM_CONFIG.outbound.duration);
+
+  const differentAction = claimSnapshot("outbound", 0.16, { actionId: "claim-2", scythePosition: Object.freeze({ x: 10, z: 12 }) });
+  assert.deepEqual(sampleReapersClaimAnimation(previous, differentAction, 0.25).weaponPosition, { x: 10, z: 12 });
+  const differentPhase = claimSnapshot("recalling", 0.04, { scythePosition: Object.freeze({ x: 8, z: 9 }) });
+  assert.deepEqual(sampleReapersClaimAnimation(previous, differentPhase, 0.25).weaponPosition, { x: 8, z: 9 });
+  assert.deepEqual(sampleReapersClaimAnimation(previous, current, Number.NaN).weaponPosition, { x: 10, z: 12 });
+  const invalidPrevious = claimSnapshot("outbound", 0.08, { scythePosition: Object.freeze({ x: Number.NaN, z: 4 }) });
+  assert.deepEqual(sampleReapersClaimAnimation(invalidPrevious, current, 0.25).weaponPosition, { x: 10, z: 12 });
+});
+
+test("reduced motion scales only secondary weapon motion and preserves body synchronization", () => {
+  const elapsed = CLAIM_CONFIG.empoweredCleave.duration / 2;
+  const normal = sampleClaim("empoweredCleave", elapsed);
+  const reduced = sampleClaim("empoweredCleave", elapsed, {}, { reducedMotion: true, spinningClip: "Spin" });
+
+  assert.equal(reduced.bodyPose, normal.bodyPose);
+  assert.equal(reduced.bodyClipProgress, normal.bodyClipProgress);
+  assert.equal(reduced.phaseProgress, normal.phaseProgress);
+  assert.equal(reduced.bodyYaw, normal.bodyYaw);
+  assert.equal(reduced.bodyLean, normal.bodyLean);
+  assert.equal(reduced.weaponDetached, normal.weaponDetached);
+  assert.deepEqual(reduced.weaponPosition, normal.weaponPosition);
+  assert.equal(reduced.bodyClip, "Spin");
+  assert.ok(Math.abs(reduced.weaponSpin) < Math.abs(normal.weaponSpin));
+  assert.ok(reduced.trailStrength < normal.trailStrength);
+});
+
+test("Claim sampling is deterministic, frozen, and never mutates frozen snapshots", () => {
+  const previous = claimSnapshot("recalling", 0.1, { scythePosition: Object.freeze({ x: 5, z: 7 }) });
+  const current = claimSnapshot("recalling", 0.2, { scythePosition: Object.freeze({ x: 3, z: 2 }) });
+  const beforePrevious = structuredClone(previous);
+  const beforeCurrent = structuredClone(current);
+  const first = sampleReapersClaimAnimation(previous, current, 0.4);
+  const second = sampleReapersClaimAnimation(previous, current, 0.4);
+
+  assert.deepEqual(first, second);
+  assert.deepEqual(previous, beforePrevious);
+  assert.deepEqual(current, beforeCurrent);
+  assert.equal(Object.isFrozen(previous), true);
+  assert.equal(Object.isFrozen(current), true);
+  assert.equal(Object.isFrozen(first), true);
+  assert.equal(Object.isFrozen(first.weaponPosition), true);
 });

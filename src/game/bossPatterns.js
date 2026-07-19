@@ -22,7 +22,7 @@ const PHASE_PATTERNS = Object.freeze({
   ]),
   3: Object.freeze([
     Object.freeze(["royalDash", "royalFan", "royalSlam", "voidWell", "royalVolley", "teleport"]),
-    Object.freeze(["royalLance", "royalDash", "voidWell", "royalSlam", "royalVolley", "summon"]),
+    Object.freeze(["royalLance", "royalDash", "voidWell", "royalSlam", "royalVolley", "teleport"]),
     Object.freeze(["teleport", "royalSlam", "royalFan", "royalDash", "royalLance", "voidWell"]),
   ]),
 });
@@ -30,6 +30,13 @@ const PHASE_PATTERNS = Object.freeze({
 export const QUEEN_PHASE_THRESHOLDS = Object.freeze([0.7, 0.35]);
 export const QUEEN_SUMMON_CAP = 5;
 export const QUEEN_HAZARD_CAP = 2;
+export const QUEEN_MIN_WINDUP_SECONDS = 0.34;
+
+const QUEEN_PHASE_TIMING = Object.freeze({
+  1: Object.freeze({ windupMultiplier: 1, cooldownMultiplier: 1, comboGapMultiplier: 1 }),
+  2: Object.freeze({ windupMultiplier: 1, cooldownMultiplier: 1, comboGapMultiplier: 1 }),
+  3: Object.freeze({ windupMultiplier: 0.78, cooldownMultiplier: 0.72, comboGapMultiplier: 0.28 }),
+});
 
 export function queenPhaseForHealth(health, maxHealth) {
   const ratio = maxHealth > 0 ? health / maxHealth : 0;
@@ -45,23 +52,63 @@ export function createQueenPatternState(rng) {
     queue: [],
     lastAction: null,
     lastFamily: null,
+    lastActionMeta: null,
+    comboSerial: 0,
+    comboStep: 0,
   };
 }
 
 function refillQueue(state, phase) {
+  const phaseChanged = state.phase !== phase;
   const patterns = PHASE_PATTERNS[phase];
   const pattern = [...state.rng.pick(patterns)];
-  while (pattern.length > 1 && ACTION_FAMILY[pattern[0]] === state.lastFamily) {
-    pattern.push(pattern.shift());
+  const rotationSize = phase === 3 ? 2 : 1;
+  const maxRotations = Math.floor(pattern.length / rotationSize);
+  for (
+    let rotations = 0;
+    rotations < maxRotations && ACTION_FAMILY[pattern[0]] === state.lastFamily;
+    rotations += 1
+  ) {
+    pattern.push(...pattern.splice(0, rotationSize));
   }
   state.phase = phase;
   state.queue = pattern;
+  if (phaseChanged) state.comboStep = 0;
 }
 
-function isAvailable(action, context) {
+function isAvailable(action, phase, context) {
+  if (phase === 3 && action === "summon") return false;
   if (action === "summon") return context.guardCount < QUEEN_SUMMON_CAP;
   if (action === "voidWell") return context.hazardCount < QUEEN_HAZARD_CAP;
   return true;
+}
+
+function recordActionMeta(state, phase) {
+  if (phase !== 3) {
+    state.lastActionMeta = Object.freeze({
+      phase,
+      comboId: null,
+      comboStep: 0,
+      comboLength: 0,
+      continuesCombo: false,
+    });
+    return;
+  }
+
+  if (state.comboStep === 0) {
+    state.comboSerial += 1;
+    state.comboStep = 1;
+  } else {
+    state.comboStep = 0;
+  }
+  const comboStep = state.comboStep === 1 ? 1 : 2;
+  state.lastActionMeta = Object.freeze({
+    phase,
+    comboId: `queen-combo-${state.comboSerial}`,
+    comboStep,
+    comboLength: 2,
+    continuesCombo: comboStep === 1,
+  });
 }
 
 export function nextQueenAction(state, phase, context = {}) {
@@ -75,7 +122,7 @@ export function nextQueenAction(state, phase, context = {}) {
   for (let attempts = 0; attempts < state.queue.length; attempts += 1) {
     const candidate = state.queue.shift();
     const family = ACTION_FAMILY[candidate];
-    if (isAvailable(candidate, safeContext) && family !== state.lastFamily) {
+    if (isAvailable(candidate, phase, safeContext) && family !== state.lastFamily) {
       action = candidate;
       break;
     }
@@ -89,11 +136,16 @@ export function nextQueenAction(state, phase, context = {}) {
 
   state.lastAction = action;
   state.lastFamily = ACTION_FAMILY[action];
+  recordActionMeta(state, phase);
   return action;
 }
 
 export function queenActionFamily(action) {
   return ACTION_FAMILY[action] ?? "unknown";
+}
+
+export function queenPhaseTiming(phase) {
+  return QUEEN_PHASE_TIMING[phase] ?? QUEEN_PHASE_TIMING[1];
 }
 
 export { PHASE_PATTERNS };

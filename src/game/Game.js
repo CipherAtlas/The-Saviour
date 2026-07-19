@@ -1,36 +1,68 @@
-import { BLESSINGS, chooseBlessings } from "./blessings.js";
+import { BLESSINGS, BLESSING_FALLBACK, chooseBlessings } from "./blessings.js";
 import { circleIntersectsArc, moveCircleDetailed, SpatialHash } from "./collision.js";
 import { DialogueSystem } from "./DialogueSystem.js";
 import { EndingSequence } from "./EndingSequence.js";
 import { EnemyDirector } from "./EnemyDirector.js";
-import { floorProjectionId, upgradeSequenceId } from "./dialogueContent.js";
-import { CAMERA_CONFIG, DIFFICULTY, PLAYER_CONFIG, PORTAL_CONFIG, RUN_CONFIG } from "./gameConfig.js";
+import { floorProjectionId, UPGRADE_SEQUENCE_IDS, upgradeSequenceId } from "./dialogueContent.js";
+import {
+  CAMERA_CONFIG,
+  DASH_ATTACK,
+  DIFFICULTY,
+  HARVEST_CONFIG,
+  HIT_STOP_CONFIG,
+  NARRATIVE_TIMING,
+  PLAYER_CONFIG,
+  PORTAL_CONFIG,
+  PROGRESSION_TRANSFORMATION_CONFIG,
+  RUN_CONFIG,
+  SCYTHE_ATTACKS,
+} from "./gameConfig.js";
+import { HitStopClock } from "./HitStopClock.js";
 import { PlayerCombat } from "./PlayerCombat.js";
 import {
   applyRunUpgrade,
+  CHAMBER_FALLBACK,
+  isUpgradeEligible,
   offerUpgradeChoices,
   RUN_UPGRADES,
   summarizeUpgradePaths,
 } from "./runUpgrades.js";
+import { progressionCardSnapshot } from "./progressionModel.js";
 import { generateArena } from "../generation/arenaGenerator.js";
 import { createRunSeed, SeededRandom } from "../generation/seededRandom.js";
+
+const NORMAL_ATTACK_POISE = Object.freeze({ damageScale: 0.55, minimum: 12, maximum: 40 });
+const ACTION_CLEAR_PHASES = new Set([
+  "dead",
+  "victory",
+  "title",
+  "portalTraversal",
+  "endingChoice",
+  "endingStrike",
+  "endingFade",
+  "endingComplete",
+]);
 
 function clonePosition(position) {
   return { x: position.x, z: position.z };
 }
 
+function immutableValue(value) {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return Object.freeze(value.map(immutableValue));
+  return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, immutableValue(entry)])));
+}
+
+function normalizedDirection(from, to, fallback = { x: 0, z: 0 }) {
+  const x = to.x - from.x;
+  const z = to.z - from.z;
+  const length = Math.hypot(x, z);
+  if (length <= 0.0001) return Object.freeze({ ...fallback });
+  return Object.freeze({ x: x / length, z: z / length });
+}
+
 function publicUpgradeChoice(choice) {
-  return {
-    id: choice.id,
-    name: choice.name,
-    description: choice.description,
-    path: choice.path,
-    tier: choice.tier,
-    rank: choice.rank,
-    nextRank: choice.nextRank,
-    maxRank: Number.isFinite(choice.maxRank) ? choice.maxRank : null,
-    fallback: choice.fallback === true,
-  };
+  return progressionCardSnapshot(choice);
 }
 
 function cameraRelativeMovement(movement) {
@@ -59,13 +91,27 @@ function portalVisualHeight(progress) {
 }
 
 export class Game {
-  constructor(input, settings, { requireRoomReady = false } = {}) {
+  constructor(input, settings, { requireRoomReady = false, narrativeProgress = null } = {}) {
     this.input = input;
     this.settings = settings;
     this.listeners = new Set();
-    this.dialogue = new DialogueSystem();
-    this.combat = new PlayerCombat((type, detail) => this.emit(type, detail));
+    this.dialogue = new DialogueSystem(undefined, undefined, narrativeProgress);
+    this.combat = new PlayerCombat((type, detail) => this.handleCombatEvent(type, detail));
+    this.hitStop = new HitStopClock();
     this.director = new EnemyDirector((type, detail) => this.handleDirectorEvent(type, detail));
+    const initialClaimSnapshot = this.combat.claim.snapshot();
+    this.claimSnapshots = Object.freeze({ previous: initialClaimSnapshot, current: initialClaimSnapshot });
+    this.claimOwnershipVersion = 0;
+    this.claimCollisionAdapter = Object.freeze({
+      querySweep: (query) => this.director.querySweep(this.transformedClaimQuery(query)),
+      resolveHit: (request) => this.resolveClaimHit(request),
+    });
+    this.harvestSnapshot = this.combat.harvest.snapshot();
+    this.harvestFloorAttempts = new Set();
+    this.normalActionSerial = 0;
+    this.activeAttackActionId = null;
+    this.combatUpdateActive = false;
+    this.pendingQueenEnding = false;
     this.spatialHash = new SpatialHash(5.5);
     this.phase = "title";
     this.seed = null;
@@ -87,21 +133,39 @@ export class Game {
     this.flags = {};
     this.ownedBlessings = new Set();
     this.upgradeRanks = new Map();
+    this.upgradeSelections = [];
+    this.blessingIds = [];
     this.pendingBlessings = [];
     this.pendingRoomRewards = [];
+    this.rerollsUsedByFloor = Array(RUN_CONFIG.totalFloors).fill(0);
     this.roomRewardPending = false;
+    this.roomRewardSequencePending = false;
+    this.blessingSequencePending = false;
     this.narrativeQueue = [];
     this.activeNarrative = null;
+    this.lastDialogueSignature = null;
     this.seenRunSequences = new Set();
     this.bossModifiers = { health: 0, enrage: 0 };
     this.ending = new EndingSequence();
     this.endingPresentationStage = "inactive";
     this.endingResolutionHandled = false;
     this.endingCompletionHandled = false;
+    this.endingStrike = null;
+    this.endingStrikeActionSerial = 0;
+    this.reviveActionSerial = 0;
+    this.healingSerial = 0;
+    this.playerDamageSerial = 0;
+    this.transformationTriggerKeys = new Set();
+    this.harvestCrownActionIds = new Set();
+    this.soulSiphonHealingByAction = new Map();
+    this.eclipseCriticalReady = 0;
+    this.eclipseCriticalActionId = null;
+    this.moonwellRetaliationReady = 0;
     this.lastNarrativeTimestamp = 0;
     this.pausedPhase = null;
     this.benchmarkMode = false;
     this.showcaseMode = null;
+    this.roomBoundaryStable = false;
   }
 
   on(listener) {
@@ -114,21 +178,40 @@ export class Game {
   }
 
   startRun(seed = createRunSeed()) {
+    this.initializeRunState(seed);
+    this.emit("runStarted", { seed, difficultyId: this.difficultyId });
+    this.loadRoom();
+  }
+
+  initializeRunState(seed) {
+    this.hitStop.reset();
+    this.flushGameplayActions();
+    this.cancelClaim("runReset");
+    this.cancelCombatActions("runReset");
     this.seed = seed;
     this.rng = new SeededRandom(seed);
+    this.difficultyId = this.settings.get("gameplay.difficulty");
     this.floor = 1;
     this.room = 1;
     this.flags = {};
     this.ownedBlessings.clear();
     this.upgradeRanks.clear();
+    this.upgradeSelections = [];
+    this.blessingIds = [];
     this.pendingBlessings = [];
     this.pendingRoomRewards = [];
+    this.rerollsUsedByFloor = Array(RUN_CONFIG.totalFloors).fill(0);
     this.roomRewardPending = false;
+    this.roomRewardSequencePending = false;
+    this.blessingSequencePending = false;
     this.bossModifiers = { health: 0, enrage: 0 };
     this.resetNarrativeState();
+    this.lastNarrativeTimestamp = performance.now();
     this.benchmarkMode = false;
     this.showcaseMode = null;
     this.portalTraversal = null;
+    this.pendingQueenEnding = false;
+    this.roomBoundaryStable = false;
     this.player = {
       position: { x: 0, z: 0 },
       previousPosition: { x: 0, z: 0 },
@@ -145,19 +228,115 @@ export class Game {
       healthOnKill: 0,
       roomRecoveryBonus: 0,
       deathDefiance: 0,
+      deathDefianceGranted: 0,
+      transformationRanks: {},
     };
+    this.normalActionSerial = 0;
+    this.activeAttackActionId = null;
+    this.reviveActionSerial = 0;
+    this.healingSerial = 0;
+    this.playerDamageSerial = 0;
+    this.resetTransformationCombatState();
+    this.harvestFloorAttempts.clear();
     this.combat.reset();
-    this.emit("runStarted", { seed });
+    this.harvestSnapshot = this.combat.harvest.snapshot();
+    this.refreshClaimSnapshots();
+  }
+
+  resumeRun(snapshot) {
+    if (!snapshot || typeof snapshot !== "object" || typeof snapshot.seed !== "string") return false;
+    this.initializeRunState(snapshot.seed);
+    this.difficultyId = snapshot.difficultyId;
+    const chamberCatalog = new Map([...RUN_UPGRADES, CHAMBER_FALLBACK].map((definition) => [definition.id, definition]));
+    const blessingCatalog = new Map([...BLESSINGS, BLESSING_FALLBACK].map((definition) => [definition.id, definition]));
+    const selections = snapshot.statisticsDraft?.selections;
+    if (!Array.isArray(selections)) return false;
+
+    for (const selection of selections) {
+      const catalog = selection.tier === "chamber" ? chamberCatalog : selection.tier === "blessing" ? blessingCatalog : null;
+      const definition = catalog?.get(selection.id);
+      const result = definition ? applyRunUpgrade(definition, this.player, this.upgradeRanks) : null;
+      if (!result || result.rank !== selection.rankAfter) return false;
+      if (selection.tier === "chamber") {
+        this.upgradeSelections.push({ upgradeId: selection.id, rankAfter: selection.rankAfter });
+      } else {
+        this.blessingIds.push(selection.id);
+        this.ownedBlessings.add(selection.id);
+      }
+    }
+
+    const restoredRanks = [...new Map(this.upgradeSelections.map(({ upgradeId, rankAfter }) => [upgradeId, rankAfter]))]
+      .sort(([left], [right]) => left.localeCompare(right));
+    if (
+      JSON.stringify(this.upgradeSelections) !== JSON.stringify(snapshot.upgradeSelections)
+      || JSON.stringify(this.blessingIds) !== JSON.stringify(snapshot.blessingIds)
+      || JSON.stringify(restoredRanks) !== JSON.stringify(snapshot.upgradeRanks)
+      || this.player.deathDefianceGranted !== snapshot.deathDefiance?.granted
+    ) return false;
+    if (!Number.isFinite(snapshot.player?.health) || snapshot.player.health <= 0 || snapshot.player.health > this.player.maxHealth) return false;
+    if (!this.combat.harvest.restoreUnits(snapshot.harvestUnits)) return false;
+
+    this.player.health = snapshot.player.health;
+    this.player.deathDefiance = snapshot.deathDefiance.remaining;
+    this.rerollsUsedByFloor = [...snapshot.rerollsUsedByFloor];
+    this.flags = { ...snapshot.runFlags };
+    this.seenRunSequences = new Set(snapshot.seenRunSequenceIds);
+    this.floor = snapshot.nextFloor;
+    this.room = snapshot.nextRoom;
+    this.harvestFloorAttempts.clear();
+    for (let floor = 1; floor <= this.floor; floor += 1) this.harvestFloorAttempts.add(floor);
+    this.harvestSnapshot = this.combat.harvest.snapshot();
+    this.emit("runResumed", {
+      seed: this.seed,
+      difficultyId: snapshot.difficultyId,
+      floor: this.floor,
+      room: this.room,
+    });
     this.loadRoom();
+    return true;
+  }
+
+  createSuspendedRunSnapshot(statisticsDraft) {
+    if (!this.roomBoundaryStable || !statisticsDraft || this.benchmarkMode || this.showcaseMode) return null;
+    const upgradeRanks = [...new Map(this.upgradeSelections.map(({ upgradeId, rankAfter }) => [upgradeId, rankAfter]))]
+      .sort(([left], [right]) => left.localeCompare(right));
+    const completedUpgradeSequenceIds = [...this.seenRunSequences]
+      .filter((id) => UPGRADE_SEQUENCE_IDS.includes(id))
+      .sort();
+    return immutableValue({
+      seed: this.seed,
+      difficultyId: this.difficultyId,
+      nextFloor: this.floor,
+      nextRoom: this.room,
+      player: { health: this.player.health },
+      harvestUnits: this.combat.harvest.snapshot().units,
+      deathDefiance: {
+        granted: this.player.deathDefianceGranted,
+        remaining: this.player.deathDefiance,
+      },
+      upgradeSelections: this.upgradeSelections.map((selection) => ({ ...selection })),
+      upgradeRanks,
+      blessingIds: [...this.blessingIds],
+      rerollsUsedByFloor: [...this.rerollsUsedByFloor],
+      runFlags: Object.fromEntries(Object.entries(this.flags).filter(([, value]) => typeof value === "boolean")),
+      seenRunSequenceIds: [...this.seenRunSequences].sort(),
+      completedUpgradeSequenceIds,
+      statisticsDraft,
+    });
   }
 
   loadRoom() {
+    this.hitStop.reset();
+    this.flushGameplayActions();
+    this.cancelClaim("roomReplacement");
+    this.cancelCombatActions("roomReplacement");
     const boss = this.floor === RUN_CONFIG.totalFloors && this.room === RUN_CONFIG.roomsPerFloor;
     this.arena = generateArena({ seed: this.seed, floor: this.floor, room: this.room, boss });
     this.roomLoadSerial += 1;
     this.roomLoadToken = `${this.seed}:${this.arena.id}:${this.roomLoadSerial}`;
     this.roomReady = !this.requireRoomReady;
     this.roomPlayRequested = false;
+    this.roomBoundaryStable = false;
     this.player.position = clonePosition(this.arena.playerSpawn);
     this.player.previousPosition = clonePosition(this.arena.playerSpawn);
     this.portalActive = false;
@@ -166,7 +345,8 @@ export class Game {
     this.roomClearResolved = false;
     this.pendingRoomRewards = [];
     this.roomRewardPending = false;
-    const difficulty = DIFFICULTY[this.settings.get("gameplay.difficulty")] ?? DIFFICULTY.standard;
+    this.resetTransformationCombatState();
+    const difficulty = DIFFICULTY[this.difficultyId] ?? DIFFICULTY.standard;
     this.director.reset({
       arena: this.arena,
       floor: this.floor,
@@ -175,6 +355,8 @@ export class Game {
       difficulty,
       bossModifiers: this.bossModifiers,
     });
+    this.ensureFloorHarvestMinimum();
+    this.roomBoundaryStable = true;
     this.emit("arenaChanged", {
       arena: this.arena,
       floor: this.floor,
@@ -182,6 +364,7 @@ export class Game {
       boss,
       loadToken: this.roomLoadToken,
     });
+    this.roomBoundaryStable = false;
     this.emitHud();
 
     this.queueRoomOpeningNarrative(boss);
@@ -194,11 +377,20 @@ export class Game {
 
   updateFixed(dt) {
     if (!this.player) return;
+    if (this.phase === "endingStrike") {
+      this.updateEndingStrike(dt);
+      return;
+    }
     if (this.phase === "portalTraversal") {
       this.updatePortalTraversal(dt);
       return;
     }
     if (this.phase !== "playing") return;
+    if (this.hitStop.remaining() > 0) {
+      this.combat.captureInput(this.input);
+      this.hitStop.update(dt);
+      return;
+    }
 
     this.player.previousPosition.x = this.player.position.x;
     this.player.previousPosition.z = this.player.position.z;
@@ -221,59 +413,576 @@ export class Game {
     }
 
     const movement = cameraRelativeMovement(this.input.movement());
-    const velocity = this.combat.update(dt, this.input, this.player, movement, {
-      onDash: () => {},
-      onActiveAttack: (attack, hitIds, facing) => this.resolvePlayerAttack(attack, hitIds, facing),
-    });
+    const previousClaimSnapshot = this.claimSnapshots.current;
+    const claimOwnershipVersion = this.claimOwnershipVersion;
+    let velocity;
+    this.combatUpdateActive = true;
+    try {
+      velocity = this.combat.update(dt, this.input, this.player, movement, {
+        onDash: () => {},
+        onActiveAttack: (attack, hitIds, facing) => this.resolvePlayerAttack(attack, hitIds, facing),
+        claimCollision: this.claimCollisionAdapter,
+      });
+    } finally {
+      this.combatUpdateActive = false;
+    }
+    if (claimOwnershipVersion === this.claimOwnershipVersion) {
+      this.claimSnapshots = Object.freeze({
+        previous: previousClaimSnapshot,
+        current: this.combat.claim.snapshot(),
+      });
+    } else {
+      this.refreshClaimSnapshots();
+    }
+    if (this.pendingQueenEnding) {
+      this.pendingQueenEnding = false;
+      this.startEndingFlow();
+      return;
+    }
     const movementResult = moveCircleDetailed(this.player.position, velocity, dt, this.player.radius, this.arena);
     this.player.position = movementResult.position;
     this.combat.resolveMovement(movementResult);
 
-    this.director.update(dt, this.player, (damage, source) => this.damagePlayer(damage, source));
+    this.director.update(dt, this.player, (attempt) => this.resolvePlayerDamageAttempt(attempt));
     this.checkRoomProgress(dt);
   }
 
   resolvePlayerAttack(attack, hitIds, facing = this.combat.attackFacing) {
+    const actionId = this.activeAttackActionId ?? this.nextNormalActionId();
+    const isDashAttack = attack === DASH_ATTACK;
+    const hollowStepRank = isDashAttack ? this.transformationRank("hollowStepAfterimage") : 0;
+    const reapingPassageRank = isDashAttack ? this.transformationRank("reapingPassageDashAttack") : 0;
+    const royalBloodRank = this.isWounded() ? this.transformationRank("royalBloodWounded") : 0;
+    let retaliationRank = this.moonwellRetaliationReady;
+    const eclipseCritical = this.eclipseCriticalActionId === actionId || this.eclipseCriticalReady > 0;
+    const dashDamageMultiplier = 1
+      + PROGRESSION_TRANSFORMATION_CONFIG.hollowStepAfterimage.damagePerRank * hollowStepRank
+      + PROGRESSION_TRANSFORMATION_CONFIG.reapingPassageDashAttack.damagePerRank * reapingPassageRank;
+    const woundedDamageMultiplier = 1
+      + PROGRESSION_TRANSFORMATION_CONFIG.royalBloodWounded.damagePerRank * royalBloodRank;
+    const woundedPoiseMultiplier = 1
+      + PROGRESSION_TRANSFORMATION_CONFIG.royalBloodWounded.poisePerRank * royalBloodRank;
     this.spatialHash.rebuild(this.director.enemies);
     const range = attack.range * this.player.reachMultiplier;
     const candidates = this.spatialHash.query(this.player.position.x, this.player.position.z, range + 2);
     for (const enemy of candidates) {
       if (!enemy.active || hitIds.has(enemy.id)) continue;
-      const assistedArc = attack.arc + this.settings.get("gameplay.aimAssist") * 0.24;
+      const assistedArc = attack.arc * (
+        1 + PROGRESSION_TRANSFORMATION_CONFIG.reapingPassageDashAttack.arcPerRank * reapingPassageRank
+      ) + this.settings.get("gameplay.aimAssist") * 0.24;
       if (!circleIntersectsArc(this.player.position, facing, range, assistedArc, enemy.position, enemy.radius)) continue;
       hitIds.add(enemy.id);
-      const critical = this.rng.chance(this.player.criticalChance);
-      const damage = attack.damage * this.player.damageMultiplier * (critical ? 1.75 : 1);
+      const critical = eclipseCritical || this.rng.chance(this.player.criticalChance);
+      const retaliationDamage = PROGRESSION_TRANSFORMATION_CONFIG.moonwellRenewalRetaliation.damagePerRank * retaliationRank;
+      const damage = (
+        attack.damage * this.player.damageMultiplier * dashDamageMultiplier * woundedDamageMultiplier
+        + retaliationDamage
+      ) * (critical ? 1.75 : 1);
       const dx = enemy.position.x - this.player.position.x;
       const dz = enemy.position.z - this.player.position.z;
       const length = Math.hypot(dx, dz) || 1;
-      const defeated = this.director.damageEnemy(enemy, damage, { x: dx / length, z: dz / length }, attack.knockback, critical);
-      if (defeated && this.player.healthOnKill > 0) {
-        this.player.health = Math.min(this.player.maxHealth, this.player.health + this.player.healthOnKill);
+      const chargedPoiseDamage = Number.isFinite(attack.poiseDamage) ? attack.poiseDamage : null;
+      const basePoiseDamage = chargedPoiseDamage ?? Math.max(
+        NORMAL_ATTACK_POISE.minimum,
+        Math.min(NORMAL_ATTACK_POISE.maximum, Math.round(attack.damage * NORMAL_ATTACK_POISE.damageScale)),
+      );
+      const hit = {
+        actionId,
+        damage,
+        critical,
+        direction: { x: dx / length, z: dz / length },
+        knockback: attack.knockback,
+        poiseDamage: basePoiseDamage * woundedPoiseMultiplier
+          + PROGRESSION_TRANSFORMATION_CONFIG.moonwellRenewalRetaliation.poiseDamagePerRank * retaliationRank,
+        pullStrength: 0,
+        sourcePosition: this.player.position,
+        origin: "player",
+      };
+      const resolution = this.director.resolveCombatHit(enemy, hit);
+      if (!resolution.accepted) continue;
+      if (this.eclipseCriticalReady > 0 && this.eclipseCriticalActionId !== actionId) {
+        const rank = this.eclipseCriticalReady;
+        this.eclipseCriticalReady = 0;
+        this.eclipseCriticalActionId = actionId;
+        this.emitTransformationOnce("perfectEclipsePerfectDash", actionId, { consumed: "guaranteedCritical", armedRank: rank });
+      }
+      if (retaliationRank > 0) {
+        this.moonwellRetaliationReady = 0;
+        this.emitTransformationOnce("moonwellRenewalRetaliation", actionId, { consumed: "retaliation" });
+        retaliationRank = 0;
+      }
+      if (hollowStepRank > 0) {
+        this.emitTransformationOnce("hollowStepAfterimage", actionId, { synchronizedWith: "dashAttack" });
+      }
+      if (reapingPassageRank > 0) this.emitTransformationOnce("reapingPassageDashAttack", actionId);
+      if (royalBloodRank > 0) this.emitTransformationOnce("royalBloodWounded", actionId);
+      this.applySoulSiphon(actionId, resolution.hit.damage);
+      const hitStopReasons = [];
+      if (attack === SCYTHE_ATTACKS[SCYTHE_ATTACKS.length - 1]) hitStopReasons.push("comboFinisher");
+      if (critical) hitStopReasons.push("critical");
+      if (attack.chargeQuality) hitStopReasons.push(`charge${attack.chargeQuality[0].toUpperCase()}${attack.chargeQuality.slice(1)}`);
+      this.requestHitStop(actionId, hitStopReasons);
+      const eventId = `${actionId}:${enemy.id}:normal`;
+      if (
+        attack.chargeQuality === "perfect"
+        && attack.harvestUnits === HARVEST_CONFIG.gainUnits.perfectCharge
+      ) {
+        this.applyHarvestGain("perfectCharge", attack.chargeActionId ?? actionId);
+      }
+      if (length <= HARVEST_CONFIG.closeHitRange) this.applyHarvestGain("closeHit", eventId);
+      if (critical) this.applyHarvestGain("critical", eventId);
+      if (resolution.defeated) {
+        this.applyHarvestGain("kill", eventId);
+        this.applyHealthOnKill(actionId);
       }
     }
   }
 
+  handleCombatEvent(type, detail) {
+    if (type === "attack") {
+      const actionId = this.nextNormalActionId();
+      this.emit(type, Object.freeze({ ...detail, actionId }));
+      return;
+    }
+    if (type === "claimStarted") this.syncHarvestSpend("claim");
+    if (type === "claimRejected" && detail.reason === "insufficientHarvest") {
+      this.emitHarvestRejected("insufficientUnits", `claim:${detail.inputTime ?? "unknown"}`);
+    }
+    this.emit(type, detail);
+  }
+
+  nextNormalActionId() {
+    this.normalActionSerial += 1;
+    this.activeAttackActionId = `attack-${this.normalActionSerial}`;
+    return this.activeAttackActionId;
+  }
+
+  transformationRank(hookId) {
+    const rank = this.player?.transformationRanks?.[hookId];
+    return Number.isInteger(rank) && rank > 0 ? rank : 0;
+  }
+
+  resetTransformationCombatState() {
+    this.transformationTriggerKeys.clear();
+    this.harvestCrownActionIds.clear();
+    this.soulSiphonHealingByAction.clear();
+    this.eclipseCriticalReady = 0;
+    this.eclipseCriticalActionId = null;
+    this.moonwellRetaliationReady = 0;
+  }
+
+  rememberBounded(set, value, limit = 256) {
+    if (set.has(value)) return false;
+    set.add(value);
+    if (set.size > limit) set.delete(set.values().next().value);
+    return true;
+  }
+
+  emitTransformationOnce(hookId, actionId, detail = {}) {
+    const key = `${hookId}:${actionId}`;
+    if (!this.rememberBounded(this.transformationTriggerKeys, key, 512)) return false;
+    this.emit("progressionTransformationTriggered", immutableValue({
+      hookId,
+      actionId,
+      rank: this.transformationRank(hookId),
+      floor: this.floor,
+      room: this.room,
+      ...detail,
+    }));
+    return true;
+  }
+
+  isWounded() {
+    const threshold = this.player.maxHealth * PROGRESSION_TRANSFORMATION_CONFIG.royalBloodWounded.healthThreshold;
+    return this.player.health <= threshold + Number.EPSILON * this.player.maxHealth;
+  }
+
+  transformedClaimQuery(query) {
+    const rank = this.transformationRank("farReachClaim");
+    if (rank === 0 || !["recall", "cleave"].includes(query.pass)) return query;
+    const config = PROGRESSION_TRANSFORMATION_CONFIG.farReachClaim;
+    const radiusPerRank = query.pass === "recall" ? config.recallRadiusPerRank : config.cleaveRadiusPerRank;
+    return Object.freeze({ ...query, radius: query.radius * (1 + radiusPerRank * rank) });
+  }
+
+  applyTransformationHarvest(hookId, actionId, rank) {
+    const unitsPerRank = PROGRESSION_TRANSFORMATION_CONFIG[hookId].harvestUnitsPerRank;
+    let granted = 0;
+    for (let index = 0; index < rank; index += 1) {
+      const result = this.applyHarvestGain("upgradeModifier", `${hookId}:${actionId}:${index}`);
+      if (result.accepted) granted += result.delta;
+    }
+    this.emitTransformationOnce(hookId, actionId, { harvestRequested: unitsPerRank * rank, harvestGranted: granted });
+    return granted;
+  }
+
+  applySoulSiphon(actionId, appliedDamage) {
+    const rank = this.transformationRank("soulSiphonAggressiveHeal");
+    if (rank === 0 || appliedDamage <= 0) return null;
+    const config = PROGRESSION_TRANSFORMATION_CONFIG.soulSiphonAggressiveHeal;
+    const used = this.soulSiphonHealingByAction.get(actionId) ?? 0;
+    const cap = config.actionHealthCapPerRank * rank;
+    const requested = Math.min(cap - used, appliedDamage * config.damageHealingPerRank * rank);
+    if (requested <= 0) return null;
+    this.soulSiphonHealingByAction.set(actionId, used + requested);
+    if (this.soulSiphonHealingByAction.size > 256) {
+      this.soulSiphonHealingByAction.delete(this.soulSiphonHealingByAction.keys().next().value);
+    }
+    const healed = this.restorePlayerHealth(requested, "soulSiphon", {
+      sourceActionId: actionId,
+      upgradeId: "soul-siphon",
+    });
+    if (healed) this.emitTransformationOnce("soulSiphonAggressiveHeal", actionId, { actionHealingCap: cap });
+    return healed;
+  }
+
+  requestHitStop(actionId, reasons) {
+    if (
+      this.phase !== "playing"
+      || this.pendingQueenEnding
+      || this.flags.queenDefeated
+      || !Array.isArray(reasons)
+    ) return Object.freeze({ accepted: false, reason: "terminal" });
+
+    const candidates = reasons
+      .map((reason) => ({ reason, policy: HIT_STOP_CONFIG.policies[reason] }))
+      .filter((candidate) => candidate.policy);
+    if (candidates.length === 0) return Object.freeze({ accepted: false, reason: "nonQualifying" });
+    const strongest = candidates.reduce((best, candidate) => {
+      const candidateStrength = HIT_STOP_CONFIG.tiers[candidate.policy.tier];
+      const bestStrength = HIT_STOP_CONFIG.tiers[best.policy.tier];
+      if (candidateStrength !== bestStrength) return candidateStrength > bestStrength ? candidate : best;
+      return candidate.policy.duration > best.policy.duration ? candidate : best;
+    });
+    const duration = Math.max(...candidates.map((candidate) => candidate.policy.duration));
+    const result = this.hitStop.request(duration, strongest.policy.tier);
+    if (result.accepted) {
+      this.emit("hitStopRequested", Object.freeze({
+        tier: result.tier,
+        duration,
+        remaining: result.remaining,
+        actionId,
+        reason: strongest.reason,
+      }));
+    }
+    return result;
+  }
+
+  resolveClaimHit({ actionId, pass, target, definition }) {
+    const sourcePosition = this.combat.claim.snapshot().scythePosition;
+    const dx = target.position.x - sourcePosition.x;
+    const dz = target.position.z - sourcePosition.z;
+    const length = Math.hypot(dx, dz) || 1;
+    const farReachRank = this.transformationRank("farReachClaim");
+    const royalBloodRank = this.isWounded() ? this.transformationRank("royalBloodWounded") : 0;
+    const retaliationRank = this.moonwellRetaliationReady;
+    const woundedConfig = PROGRESSION_TRANSFORMATION_CONFIG.royalBloodWounded;
+    const retaliationConfig = PROGRESSION_TRANSFORMATION_CONFIG.moonwellRenewalRetaliation;
+    const pullStrength = (definition.pullStrength ?? 0) * (
+      pass === "recall"
+        ? 1 + PROGRESSION_TRANSFORMATION_CONFIG.farReachClaim.recallPullPerRank * farReachRank
+        : 1
+    );
+    const resolution = this.director.resolveCombatHit(target, {
+      actionId,
+      damage: definition.damage * this.player.damageMultiplier * (1 + woundedConfig.damagePerRank * royalBloodRank)
+        + retaliationConfig.damagePerRank * retaliationRank,
+      critical: false,
+      direction: { x: dx / length, z: dz / length },
+      knockback: definition.knockback ?? 0,
+      poiseDamage: definition.poiseDamage * (1 + woundedConfig.poisePerRank * royalBloodRank)
+        + retaliationConfig.poiseDamagePerRank * retaliationRank,
+      pullStrength,
+      sourcePosition,
+      origin: "player",
+    });
+    if (resolution.accepted && retaliationRank > 0) {
+      this.moonwellRetaliationReady = 0;
+      this.emitTransformationOnce("moonwellRenewalRetaliation", actionId, { consumed: "retaliation", pass });
+    }
+    if (resolution.accepted && farReachRank > 0 && ["recall", "cleave"].includes(pass)) {
+      this.emitTransformationOnce("farReachClaim", actionId, { pass });
+    }
+    if (
+      resolution.accepted
+      && pass === "recall"
+      && this.transformationRank("harvestCrownClaim") > 0
+      && this.rememberBounded(this.harvestCrownActionIds, actionId)
+    ) {
+      this.applyTransformationHarvest("harvestCrownClaim", actionId, this.transformationRank("harvestCrownClaim"));
+    }
+    if (resolution.accepted && royalBloodRank > 0) this.emitTransformationOnce("royalBloodWounded", actionId, { pass });
+    if (resolution.accepted) this.applySoulSiphon(actionId, resolution.hit.damage);
+    if (resolution.accepted && pass === "recall") this.requestHitStop(actionId, ["claimRecall"]);
+    let pull = null;
+    if (pass === "recall" && resolution.accepted && !resolution.defeated && target.active) {
+      pull = this.director.pullEnemyToward(target, this.combat.claim.snapshot().origin, pullStrength);
+    }
+    if (resolution.accepted && resolution.defeated) {
+      this.applyHarvestGain("kill", `${actionId}:${target.id}:${pass}:claim`);
+      this.applyHealthOnKill(actionId);
+    }
+    return Object.freeze({
+      hit: resolution.hit,
+      pull,
+      terminatePass: resolution.defeated && target.type === "queen",
+    });
+  }
+
+  applyHealthOnKill(sourceActionId = null) {
+    return this.restorePlayerHealth(this.player.healthOnKill, "kill", { sourceActionId });
+  }
+
+  emitPlayerHeal(previousHealth, requestedAmount, reason, { sourceActionId = null, upgradeId = null } = {}) {
+    const amount = this.player.health - previousHealth;
+    if (amount <= 0) return null;
+    this.healingSerial += 1;
+    const detail = immutableValue({
+      healingId: `player-heal-${this.healingSerial}`,
+      targetId: "player",
+      amount,
+      requestedAmount,
+      reason,
+      position: clonePosition(this.player.position),
+      health: this.player.health,
+      maxHealth: this.player.maxHealth,
+      sourceActionId,
+      upgradeId,
+      floor: this.floor,
+      room: this.room,
+    });
+    this.emit("playerHealed", detail);
+    this.emitHud();
+    return detail;
+  }
+
+  restorePlayerHealth(requestedAmount, reason, options = {}) {
+    if (!Number.isFinite(requestedAmount) || requestedAmount <= 0 || !this.player) return null;
+    const previousHealth = this.player.health;
+    this.player.health = Math.min(this.player.maxHealth, this.player.health + requestedAmount);
+    return this.emitPlayerHeal(previousHealth, requestedAmount, reason, options);
+  }
+
+  applyHarvestGain(source, eventId) {
+    const previous = this.combat.harvest.snapshot();
+    const result = this.combat.harvest.gain({ type: source, eventId });
+    if (!result.accepted) {
+      this.harvestSnapshot = result.snapshot;
+      this.emitHarvestRejected(result.reason, eventId, previous, result.snapshot);
+      return result;
+    }
+    this.emitHarvestChanged(previous, result.snapshot, result.delta, source, eventId);
+    return result;
+  }
+
+  ensureFloorHarvestMinimum() {
+    if (this.harvestFloorAttempts.has(this.floor)) return;
+    this.harvestFloorAttempts.add(this.floor);
+    const previous = this.combat.harvest.snapshot();
+    const result = this.combat.harvest.ensureFloorMinimum();
+    this.harvestSnapshot = result.snapshot;
+    if (result.granted) this.emitHarvestChanged(previous, result.snapshot, result.delta, "floorMinimum", `floor:${this.floor}`);
+  }
+
+  syncHarvestSpend(reason) {
+    const current = this.combat.harvest.snapshot();
+    const previous = this.harvestSnapshot;
+    if (current.units !== previous.units) {
+      this.emitHarvestChanged(previous, current, current.units - previous.units, reason, this.combat.claim.actionId);
+    }
+  }
+
+  emitHarvestChanged(previous, current, delta, reason, sourceEventId) {
+    this.harvestSnapshot = current;
+    this.emit("harvestChanged", Object.freeze({
+      previous: previous.units,
+      previousUnits: previous.units,
+      units: current.units,
+      delta,
+      reason,
+      sourceEventId,
+      floor: this.floor,
+      room: this.room,
+    }));
+    this.emitHud();
+  }
+
+  emitHarvestRejected(reason, sourceEventId, previous = this.harvestSnapshot, current = this.combat.harvest.snapshot()) {
+    this.harvestSnapshot = current;
+    this.emit("harvestGainRejected", Object.freeze({
+      previous: previous.units,
+      previousUnits: previous.units,
+      units: current.units,
+      delta: 0,
+      reason,
+      sourceEventId,
+      floor: this.floor,
+      room: this.room,
+    }));
+  }
+
+  cancelClaim(reason) {
+    const snapshot = this.combat.claim.cancel(reason);
+    this.claimOwnershipVersion += 1;
+    this.combat.claimBuffer = 0;
+    this.combat.claimRequest = null;
+    this.refreshClaimSnapshots(snapshot);
+    return snapshot;
+  }
+
+  refreshClaimSnapshots(snapshot = this.combat.claim.snapshot()) {
+    this.claimSnapshots = Object.freeze({ previous: snapshot, current: snapshot });
+    return this.claimSnapshots;
+  }
+
+  flushGameplayActions() {
+    this.input.flushActions?.(["attack", "heavy", "dash", "claim", "interact"]);
+  }
+
+  cancelCombatActions(reason) {
+    this.activeAttackActionId = null;
+    return this.combat.cancelPlayerActions(reason);
+  }
+
   damagePlayer(amount, source) {
-    if (this.player.invulnerable > 0 || this.phase !== "playing") return;
+    return this.applyPlayerDamage(amount, source, null);
+  }
+
+  resolvePlayerDamageAttempt(attempt) {
+    const valid = this.phase === "playing"
+      && attempt
+      && typeof attempt === "object"
+      && Object.isFrozen(attempt)
+      && typeof attempt.attemptId === "string"
+      && attempt.attemptId.length > 0
+      && typeof attempt.actionId === "string"
+      && attempt.actionId.length > 0
+      && Number.isFinite(attempt.amount)
+      && attempt.amount > 0
+      && typeof attempt.source === "string"
+      && attempt.source.length > 0
+      && typeof attempt.family === "string"
+      && attempt.family.length > 0;
+    if (!valid) return Object.freeze({ accepted: false, reason: "invalidAttempt", damaged: false, perfectDash: false });
+
+    const qualification = this.combat.qualifyPerfectDash();
+    if (qualification.accepted) {
+      const detail = Object.freeze({
+        actionId: qualification.actionId,
+        inputTime: qualification.inputTime,
+        elapsed: qualification.elapsed,
+        windowOpen: PLAYER_CONFIG.dash.perfectOpen,
+        windowClose: PLAYER_CONFIG.dash.perfectClose,
+        attemptId: attempt.attemptId,
+        sourceActionId: attempt.actionId,
+        source: attempt.source,
+        family: attempt.family,
+        enemyId: attempt.enemyId,
+        enemyType: attempt.enemyType,
+        enemyOrigin: attempt.enemyOrigin,
+        projectileId: attempt.projectileId,
+        position: Object.freeze({ ...this.player.position }),
+        direction: qualification.direction,
+        floor: this.floor,
+        room: this.room,
+      });
+      this.emit("perfectDash", detail);
+      const harvest = this.applyHarvestGain("perfectDash", qualification.actionId);
+      const eclipseRank = this.transformationRank("perfectEclipsePerfectDash");
+      if (eclipseRank > 0) {
+        this.eclipseCriticalReady = Math.max(this.eclipseCriticalReady, eclipseRank);
+        this.eclipseCriticalActionId = null;
+        this.applyTransformationHarvest("perfectEclipsePerfectDash", qualification.actionId, eclipseRank);
+      }
+      return Object.freeze({
+        accepted: true,
+        reason: "perfectDash",
+        damaged: false,
+        perfectDash: true,
+        detail,
+        harvest,
+      });
+    }
+
+    return this.applyPlayerDamage(attempt.amount, attempt.source, attempt);
+  }
+
+  applyPlayerDamage(amount, source, attempt) {
+    if (!Number.isFinite(amount) || amount <= 0 || this.phase !== "playing") {
+      return Object.freeze({ accepted: false, reason: "invalidDamage", damaged: false, perfectDash: false });
+    }
+    if (this.player.invulnerable > 0) {
+      return Object.freeze({ accepted: false, reason: "invulnerable", damaged: false, perfectDash: false });
+    }
+    const previousHealth = this.player.health;
     this.player.health = Math.max(0, this.player.health - amount);
+    const appliedAmount = previousHealth - this.player.health;
+    this.playerDamageSerial += 1;
+    const damageId = `player-damage-${this.playerDamageSerial}`;
     this.player.invulnerable = PLAYER_CONFIG.hitInvulnerability;
     this.player.hitFlash = 0.14;
-    this.emit("playerHit", { amount, source, health: this.player.health, maxHealth: this.player.maxHealth });
+    const detail = {
+      damageId,
+      amount,
+      appliedAmount,
+      source,
+      health: this.player.health,
+      maxHealth: this.player.maxHealth,
+      severity: appliedAmount / this.player.maxHealth >= PLAYER_CONFIG.hitSeverity.heavyThresholdRatio
+        ? "heavy"
+        : "light",
+      position: Object.freeze(clonePosition(this.player.position)),
+      direction: this.incomingDamageDirection(attempt),
+    };
+    if (attempt) {
+      Object.assign(detail, {
+        attemptId: attempt.attemptId,
+        actionId: attempt.actionId,
+        family: attempt.family,
+        enemyId: attempt.enemyId,
+        enemyType: attempt.enemyType,
+        enemyOrigin: attempt.enemyOrigin,
+        projectileId: attempt.projectileId,
+      });
+    }
+    const frozenDetail = immutableValue(detail);
+    this.emit("playerHit", frozenDetail);
     this.emitHud();
+    const moonwellRank = this.transformationRank("moonwellRenewalRetaliation");
+    if (moonwellRank > 0 && (this.player.health > 0 || this.player.deathDefiance > 0)) {
+      this.moonwellRetaliationReady = moonwellRank;
+      this.emitTransformationOnce("moonwellRenewalRetaliation", damageId, { armed: "retaliation", sourceActionId: attempt?.actionId ?? null });
+    }
     if (this.player.health <= 0) {
       if (this.player.deathDefiance > 0) {
+        this.cancelClaim("deathDefiance");
+        this.cancelCombatActions("deathDefiance");
+        this.flushGameplayActions();
         this.player.deathDefiance -= 1;
         this.player.health = Math.max(1, Math.round(this.player.maxHealth * 0.35));
         this.player.invulnerable = 1.2;
-        this.emit("playerRevived", {
+        this.reviveActionSerial += 1;
+        this.emitPlayerHeal(0, this.player.health, "deathDefiance", {
+          sourceActionId: attempt?.actionId ?? null,
+          upgradeId: "final-mercy",
+        });
+        const revived = immutableValue({
+          actionId: `player-revive-${this.reviveActionSerial}`,
+          sourceActionId: attempt?.actionId ?? null,
+          amount: this.player.health,
           health: this.player.health,
           maxHealth: this.player.maxHealth,
+          grantedTotal: this.player.deathDefianceGranted,
           chargesRemaining: this.player.deathDefiance,
+          position: clonePosition(this.player.position),
         });
+        this.emit("playerRevived", revived);
         this.emitHud();
-        return;
+        return Object.freeze({ accepted: true, reason: "deathDefiance", damaged: true, perfectDash: false, detail: frozenDetail });
       }
+      this.cancelClaim("death");
+      this.cancelCombatActions("death");
+      this.flushGameplayActions();
       this.setPhase("dead");
       this.emit("runEnded", {
         completed: false,
@@ -284,6 +993,28 @@ export class Game {
         seed: this.seed,
       });
     }
+    return Object.freeze({ accepted: true, reason: "damaged", damaged: true, perfectDash: false, detail: frozenDetail });
+  }
+
+  incomingDamageDirection(attempt) {
+    if (!attempt) return Object.freeze({ x: 0, z: 0 });
+    const projectile = attempt.projectileId === null || attempt.projectileId === undefined
+      ? null
+      : this.director.projectiles.find((candidate) => candidate.id === attempt.projectileId);
+    if (projectile) {
+      const velocityLength = Math.hypot(projectile.velocity.x, projectile.velocity.z);
+      if (velocityLength > 0.0001) {
+        return Object.freeze({
+          x: projectile.velocity.x / velocityLength,
+          z: projectile.velocity.z / velocityLength,
+        });
+      }
+      return normalizedDirection(projectile.position, this.player.position);
+    }
+    const enemy = this.director.enemies.find((candidate) => candidate.id === attempt.enemyId);
+    return enemy
+      ? normalizedDirection(enemy.position, this.player.position)
+      : Object.freeze({ x: 0, z: 0 });
   }
 
   handleDirectorEvent(type, detail) {
@@ -295,7 +1026,8 @@ export class Game {
       this.emit("bossHealth", { health: detail.health, maxHealth: detail.maxHealth });
     }
     if (type === "enemyDefeated" && detail.type === "queen" && !this.flags.queenDefeated) {
-      this.startEndingFlow();
+      if (this.combatUpdateActive) this.pendingQueenEnding = true;
+      else this.startEndingFlow();
     }
   }
 
@@ -310,11 +1042,11 @@ export class Game {
         this.roomClearResolved = true;
         const recoveryPercent = RUN_CONFIG.roomRecoveryPercent + this.player.roomRecoveryBonus;
         const recovery = Math.max(1, Math.round(this.player.maxHealth * recoveryPercent));
-        const restored = Math.min(recovery, this.player.maxHealth - this.player.health);
-        this.player.health += restored;
-        this.emitHud();
+        const healed = this.restorePlayerHealth(recovery, "roomRecovery", {
+          sourceActionId: `room:${this.floor}:${this.room}`,
+        });
         this.emit("roomCleared", { floor: this.floor, room: this.room, portal: clonePosition(this.arena.portal) });
-        if (restored > 0) this.emit("roomRecovered", { amount: restored, health: this.player.health, maxHealth: this.player.maxHealth });
+        if (healed) this.emit("roomRecovered", { amount: healed.amount, health: this.player.health, maxHealth: this.player.maxHealth });
         if (this.room < RUN_CONFIG.roomsPerFloor && !this.benchmarkMode) this.offerRoomReward();
         else this.activatePortal();
       }
@@ -359,14 +1091,9 @@ export class Game {
     const dx = target.x - origin.x;
     const dz = target.z - origin.z;
     if (Math.hypot(dx, dz) > 0.01) this.player.aimAngle = Math.atan2(dz, dx);
-    if (this.combat.attack) this.combat.cancelAttack("portal");
-    if (this.combat.chargingHeavy) this.combat.cancelHeavyCharge();
-    this.combat.attackBuffer = 0;
-    this.combat.dashBuffer = 0;
-    this.combat.heavyBuffer = 0;
-    this.combat.dashTime = 0;
-    this.combat.dashMomentum = { x: 0, z: 0 };
-    this.combat.dashMomentumTime = 0;
+    this.cancelClaim("portal");
+    this.cancelCombatActions("portal");
+    this.flushGameplayActions();
     this.portalActive = false;
     this.portalTraversal = {
       active: true,
@@ -418,28 +1145,109 @@ export class Game {
   }
 
   offerRoomReward() {
-    const dialogue = this.dialogue.readInline(upgradeSequenceId(this.floor, this.room));
+    if (this.roomRewardPending || this.roomRewardSequencePending) return false;
+    const sequenceId = upgradeSequenceId(this.floor, this.room);
+    if (this.showcaseMode === "reward") {
+      this.presentRoomReward(sequenceId);
+      return true;
+    }
+    this.roomRewardSequencePending = true;
+    this.enqueueNarrative(sequenceId, () => this.presentRoomReward(sequenceId));
+    return true;
+  }
+
+  presentRoomReward(sequenceId) {
+    this.roomRewardSequencePending = false;
     this.pendingRoomRewards = offerUpgradeChoices(
       this.rng.fork(`reward-${this.floor}-${this.room}`),
       this.upgradeRanks,
+      RUN_UPGRADES,
+      3,
+      CHAMBER_FALLBACK,
+      this.player,
     );
     this.roomRewardPending = true;
     this.setPhase("reward");
     this.emit("roomRewardOffered", {
       floor: this.floor,
       room: this.room,
-      dialogue,
-      choices: this.pendingRoomRewards.map(publicUpgradeChoice),
+      sequenceId,
+      choices: Object.freeze(this.pendingRoomRewards.map(publicUpgradeChoice)),
+      rerollAvailable: this.rerollAvailableFor(this.pendingRoomRewards, RUN_UPGRADES),
     });
+  }
+
+  rerollAvailableFor(choices, pool) {
+    if (
+      this.rerollsUsedByFloor[this.floor - 1] === 1
+      || choices.length === 0
+      || choices.some((choice) => choice.fallback === true)
+    ) return false;
+    const currentIds = new Set(choices.map((choice) => choice.id));
+    return pool.some((definition) => (
+      !currentIds.has(definition.id)
+      && isUpgradeEligible(definition, this.upgradeRanks, this.player)
+      && choices.some((choice) => choice.path === definition.path)
+    ));
+  }
+
+  rerollUpgradeOffer() {
+    const reward = this.phase === "reward" && this.roomRewardPending;
+    const blessing = this.phase === "blessing";
+    if (!reward && !blessing) return false;
+    const current = reward ? this.pendingRoomRewards : this.pendingBlessings;
+    const pool = reward ? RUN_UPGRADES : BLESSINGS;
+    if (!this.rerollAvailableFor(current, pool)) return false;
+    const previousChoiceIds = current.map((choice) => choice.id);
+    const seedLabel = reward
+      ? `reward-${this.floor}-${this.room}-reroll-1`
+      : `blessing-${this.floor}-reroll-1`;
+    const replacements = reward
+      ? offerUpgradeChoices(
+        this.rng.fork(seedLabel),
+        this.upgradeRanks,
+        RUN_UPGRADES,
+        3,
+        CHAMBER_FALLBACK,
+        this.player,
+        { avoidIds: previousChoiceIds },
+      )
+      : chooseBlessings(
+        this.rng.fork(seedLabel),
+        this.upgradeRanks,
+        3,
+        this.player,
+        { avoidIds: previousChoiceIds },
+      );
+    const previousIdSet = new Set(previousChoiceIds);
+    if (replacements.every((choice) => previousIdSet.has(choice.id))) return false;
+    this.rerollsUsedByFloor[this.floor - 1] = 1;
+    if (reward) this.pendingRoomRewards = replacements;
+    else this.pendingBlessings = replacements;
+    this.emit("upgradeRerolled", immutableValue({
+      tier: reward ? "chamber" : "blessing",
+      floor: this.floor,
+      room: this.room,
+      previousChoiceIds,
+      choices: replacements.map(publicUpgradeChoice),
+      rerollAvailable: false,
+    }));
+    return true;
   }
 
   chooseRoomReward(id) {
     if (this.phase !== "reward" || !this.roomRewardPending) return;
     const reward = this.pendingRoomRewards.find((choice) => choice.id === id);
+    const previousHealth = this.player.health;
     const result = applyRunUpgrade(reward, this.player, this.upgradeRanks);
     if (!result) return;
+    this.emitPlayerHeal(previousHealth, this.player.health - previousHealth, "roomUpgrade", {
+      upgradeId: result.id,
+    });
     this.pendingRoomRewards = [];
     this.roomRewardPending = false;
+    this.roomRewardSequencePending = false;
+    this.upgradeSelections.push({ upgradeId: result.id, rankAfter: result.rank });
     this.setPhase("playing");
     this.emit("roomRewardChosen", { ...result, floor: this.floor, room: this.room });
     this.activatePortal();
@@ -454,13 +1262,26 @@ export class Game {
     }
 
     if (this.floor >= RUN_CONFIG.totalFloors) return;
-    this.pendingBlessings = chooseBlessings(this.rng.fork(`blessing-${this.floor}`), this.upgradeRanks);
+    this.pendingBlessings = chooseBlessings(
+      this.rng.fork(`blessing-${this.floor}`),
+      this.upgradeRanks,
+      3,
+      this.player,
+    );
+    this.blessingSequencePending = true;
+    const sequenceId = upgradeSequenceId(this.floor, this.room);
+    this.enqueueNarrative(sequenceId, () => this.presentBlessings(sequenceId));
+  }
+
+  presentBlessings(sequenceId) {
+    this.blessingSequencePending = false;
     this.setPhase("blessing");
     this.emit("blessingOffered", {
       floor: this.floor,
       room: this.room,
-      dialogue: this.dialogue.readInline(upgradeSequenceId(this.floor, this.room)),
-      choices: this.pendingBlessings.map(publicUpgradeChoice),
+      sequenceId,
+      choices: Object.freeze(this.pendingBlessings.map(publicUpgradeChoice)),
+      rerollAvailable: this.rerollAvailableFor(this.pendingBlessings, BLESSINGS),
     });
   }
 
@@ -489,16 +1310,33 @@ export class Game {
     if (this.phase !== "blessing") return;
     const blessing = this.pendingBlessings.find((choice) => choice.id === id);
     if (!blessing) return;
+    const previousHealth = this.player.health;
     const result = applyRunUpgrade(blessing, this.player, this.upgradeRanks);
     if (!result) return;
+    this.emitPlayerHeal(previousHealth, this.player.health - previousHealth, "blessing", {
+      upgradeId: result.id,
+    });
     this.ownedBlessings.add(blessing.id);
+    this.blessingIds.push(blessing.id);
     this.pendingBlessings = [];
+    this.blessingSequencePending = false;
+    if (result.deathDefianceGranted > 0) {
+      this.emit("deathDefianceGranted", immutableValue({
+        amount: result.deathDefianceGranted,
+        grantedTotal: result.deathDefianceGrantedTotal,
+        chargesRemaining: result.deathDefianceRemaining,
+        upgradeId: result.id,
+        floor: this.floor,
+        room: this.room,
+      }));
+    }
     this.emit("blessingChosen", result);
     this.floor += 1;
     this.room = 1;
-    this.player.health = Math.min(
-      this.player.maxHealth,
-      this.player.health + Math.round(this.player.maxHealth * RUN_CONFIG.floorRecoveryPercent),
+    this.restorePlayerHealth(
+      Math.round(this.player.maxHealth * RUN_CONFIG.floorRecoveryPercent),
+      "floorRecovery",
+      { sourceActionId: `floor:${this.floor}` },
     );
     this.loadRoom();
   }
@@ -507,11 +1345,14 @@ export class Game {
     this.dialogue.reset();
     this.narrativeQueue.length = 0;
     this.activeNarrative = null;
+    this.lastDialogueSignature = null;
     this.seenRunSequences.clear();
     this.ending.reset();
     this.endingPresentationStage = "inactive";
     this.endingResolutionHandled = false;
     this.endingCompletionHandled = false;
+    this.endingStrike = null;
+    this.endingStrikeActionSerial = 0;
     this.lastNarrativeTimestamp = 0;
     this.pausedPhase = null;
   }
@@ -524,7 +1365,7 @@ export class Game {
 
     const sequenceIds = [];
     if (this.floor === 1 && this.room === 1) {
-      sequenceIds.push("opening.ring", "opening.threshold", floorProjectionId(1));
+      sequenceIds.push("opening.domestic", "opening.ring", "opening.threshold", floorProjectionId(1));
     } else if (this.room === 1) {
       sequenceIds.push(floorProjectionId(this.floor));
     }
@@ -542,7 +1383,7 @@ export class Game {
 
   enqueueNarrative(id, onComplete = null) {
     const sequence = this.dialogue.sequence(id);
-    if (sequence.presentation !== "modal") throw new Error(`Narrative sequence is not modal: ${id}`);
+    if (sequence.presentation !== "vn") throw new Error(`Narrative sequence is not VN presentation: ${id}`);
     if (sequence.repeat === "oncePerRun" && this.seenRunSequences.has(id)) {
       onComplete?.();
       return false;
@@ -556,33 +1397,100 @@ export class Game {
   drainNarrativeQueue() {
     if (this.activeNarrative || this.narrativeQueue.length === 0) return;
     this.activeNarrative = this.narrativeQueue.shift();
-    const beat = this.dialogue.start(this.activeNarrative.id);
+    this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, performance.now());
+    const beat = this.dialogue.start(this.activeNarrative.id, this.lastNarrativeTimestamp);
     this.setPhase("dialogue");
+    this.lastDialogueSignature = this.dialogueSignature(beat);
     this.emit("dialogueStarted", beat);
   }
 
-  continueDialogue() {
-    if (this.phase !== "dialogue" || !this.activeNarrative) return false;
-    const result = this.dialogue.advance();
-    if (!result.completed) {
-      this.emit("dialogueAdvanced", result.view);
-      return true;
-    }
-    this.completeActiveNarrative(result.completedId, false);
+  dialogueSignature(view) {
+    if (!view) return null;
+    return [
+      view.beatId,
+      view.phase,
+      view.revealedCount,
+      view.autoEnabled,
+      view.fastForwardHeld,
+      view.backlogOpen,
+      view.uiHidden,
+      view.skipConfirmationOpen,
+    ].join(":");
+  }
+
+  publishDialogueView(view, force = false) {
+    if (!view || view.phase === "completed") return false;
+    const signature = this.dialogueSignature(view);
+    if (!force && signature === this.lastDialogueSignature) return false;
+    this.lastDialogueSignature = signature;
+    this.emit("dialogueAdvanced", view);
     return true;
   }
 
-  skipDialogue() {
-    if (this.phase !== "dialogue" || !this.activeNarrative) return false;
-    const completedId = this.activeNarrative.id;
-    this.dialogue.reset();
-    this.completeActiveNarrative(completedId, true);
+  finishDialogueReader(view) {
+    if (view?.phase !== "completed") return false;
+    const completion = this.dialogue.acknowledgeCompletion();
+    if (!completion) return false;
+    this.completeActiveNarrative(completion.sequenceId, completion.skipped);
     return true;
+  }
+
+  runDialogueCommand(command, nowMs = performance.now()) {
+    if (this.phase !== "dialogue" || !this.activeNarrative) return false;
+    this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, nowMs);
+    let view = this.dialogue.handleCommand(command, this.lastNarrativeTimestamp);
+    if (view?.phase === "transitioning") {
+      view = this.dialogue.update(this.lastNarrativeTimestamp, { activeForeground: true });
+    }
+    if (!this.finishDialogueReader(view)) this.publishDialogueView(view, true);
+    return true;
+  }
+
+  continueDialogue(nowMs = performance.now()) {
+    return this.runDialogueCommand("advance", nowMs);
+  }
+
+  toggleDialogueAuto(nowMs = performance.now()) {
+    return this.runDialogueCommand("toggleAuto", nowMs);
+  }
+
+  setDialogueFastForward(active, nowMs = performance.now()) {
+    return this.runDialogueCommand(active ? "fastForwardStart" : "fastForwardEnd", nowMs);
+  }
+
+  openDialogueBacklog(nowMs = performance.now()) {
+    return this.runDialogueCommand("openBacklog", nowMs);
+  }
+
+  closeDialogueBacklog(nowMs = performance.now()) {
+    return this.runDialogueCommand("closeBacklog", nowMs);
+  }
+
+  toggleDialogueUi(nowMs = performance.now()) {
+    return this.runDialogueCommand("toggleUi", nowMs);
+  }
+
+  requestDialogueSkip(nowMs = performance.now()) {
+    return this.runDialogueCommand("requestSceneSkip", nowMs);
+  }
+
+  confirmDialogueSkip(nowMs = performance.now()) {
+    return this.runDialogueCommand("confirmSceneSkip", nowMs);
+  }
+
+  cancelDialogueOverlay(nowMs = performance.now()) {
+    return this.runDialogueCommand("cancel", nowMs);
+  }
+
+  skipDialogue(nowMs = performance.now()) {
+    if (!this.requestDialogueSkip(nowMs)) return false;
+    return this.confirmDialogueSkip(nowMs);
   }
 
   completeActiveNarrative(completedId, skipped) {
     const completed = this.activeNarrative;
     this.activeNarrative = null;
+    this.lastDialogueSignature = null;
     this.emit("dialogueCompleted", { sequenceId: completedId, skipped });
     completed?.onComplete?.();
     this.drainNarrativeQueue();
@@ -590,10 +1498,13 @@ export class Game {
 
   startEndingFlow() {
     if (this.flags.queenDefeated) return;
+    this.hitStop.reset();
+    this.cancelClaim("ending");
+    this.cancelCombatActions("ending");
     this.flags.queenDefeated = true;
     this.portalActive = false;
     this.roomClearResolved = true;
-    this.input.flushActions?.(["attack", "heavy", "dash", "interact"]);
+    this.flushGameplayActions();
     this.endingPresentationStage = "witchDeath";
     this.emit("endingSequenceStarted", { floor: this.floor, room: this.room });
     this.enqueueNarrative("ending.witch-death", () => {
@@ -609,12 +1520,14 @@ export class Game {
   }
 
   beginEndingDecision(nowMs = performance.now()) {
+    this.cancelClaim("endingDecision");
+    this.cancelCombatActions("endingDecision");
     this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, nowMs);
     this.ending.reset();
     this.ending.startDecision(this.lastNarrativeTimestamp);
     this.endingPresentationStage = "decision";
     this.endingResolutionHandled = false;
-    this.input.flushActions?.(["attack", "heavy", "dash", "interact"]);
+    this.flushGameplayActions();
     this.setPhase("endingChoice");
     const snapshot = this.ending.snapshot();
     this.emit("endingDecisionStarted", snapshot);
@@ -630,8 +1543,17 @@ export class Game {
   }
 
   updateNarrativeClock(nowMs) {
-    if (!["endingChoice", "endingFade"].includes(this.phase)) return this.ending.snapshot();
     this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, nowMs);
+    const dialogueActive = this.activeNarrative
+      && (this.phase === "dialogue" || (this.phase === "paused" && this.pausedPhase === "dialogue"));
+    if (dialogueActive) {
+      const view = this.dialogue.update(this.lastNarrativeTimestamp, {
+        activeForeground: this.phase === "dialogue",
+      });
+      if (!this.finishDialogueReader(view)) this.publishDialogueView(view);
+      return view;
+    }
+    if (!["endingChoice", "endingFade"].includes(this.phase)) return this.ending.snapshot();
     const snapshot = this.ending.update(this.lastNarrativeTimestamp);
     if (this.phase === "endingChoice") {
       this.emit("endingDecisionUpdated", snapshot);
@@ -645,22 +1567,19 @@ export class Game {
 
   handleEndingResolution(snapshot) {
     if (this.endingResolutionHandled || !snapshot.result) return;
+    this.cancelClaim(`ending:${snapshot.result.id}`);
+    this.cancelCombatActions(`ending:${snapshot.result.id}`);
     this.endingResolutionHandled = true;
     const ending = snapshot.result.id;
     this.endingPresentationStage = ending;
-    this.input.flushActions?.(["attack", "heavy", "dash", "interact"]);
-    this.emit("endingChoiceResolved", {
+    this.flushGameplayActions();
+    this.emit("endingChoiceResolved", immutableValue({
       ending,
       result: snapshot.result,
       decision: snapshot.decision,
-    });
+    }));
     if (ending === "kill") {
-      this.emit("princessStruck", { ending });
-      this.enqueueNarrative("ending.kill", () => {
-        this.emit("princessKilled", { ending });
-        this.emit("corruptionDestroyed", { ending });
-        this.beginEndingFade();
-      });
+      this.beginEndingStrike();
       return;
     }
 
@@ -673,7 +1592,65 @@ export class Game {
     });
   }
 
+  beginEndingStrike() {
+    if (this.endingStrike && !this.endingStrike.completed) return this.endingStrike;
+    this.hitStop.reset();
+    this.cancelClaim("endingStrike");
+    this.cancelCombatActions("endingStrike");
+    this.flushGameplayActions();
+    this.endingStrikeActionSerial += 1;
+    this.endingStrike = {
+      actionId: `ending-strike-${this.endingStrikeActionSerial}`,
+      elapsed: 0,
+      timing: NARRATIVE_TIMING.endingStrike,
+      contactEmitted: false,
+      completed: false,
+    };
+    this.endingPresentationStage = "endingStrike";
+    this.setPhase("endingStrike");
+    this.emit("endingStrikeStarted", immutableValue({
+      actionId: this.endingStrike.actionId,
+      ending: "kill",
+      elapsed: 0,
+      timing: this.endingStrike.timing,
+    }));
+    return this.endingStrike;
+  }
+
+  updateEndingStrike(dt) {
+    const strike = this.endingStrike;
+    if (!strike || strike.completed || !Number.isFinite(dt) || dt <= 0) return;
+    const previous = strike.elapsed;
+    strike.elapsed = Math.min(strike.timing.R, strike.elapsed + dt);
+    if (!strike.contactEmitted && previous < strike.timing.C && strike.elapsed >= strike.timing.C) {
+      strike.contactEmitted = true;
+      this.emit("princessStruck", immutableValue({
+        actionId: strike.actionId,
+        ending: "kill",
+        elapsed: strike.timing.C,
+        contact: strike.timing.C,
+        timing: strike.timing,
+      }));
+    }
+    if (strike.completed || strike.elapsed < strike.timing.R) return;
+    strike.completed = true;
+    this.emit("endingStrikeCompleted", immutableValue({
+      actionId: strike.actionId,
+      ending: "kill",
+      elapsed: strike.timing.R,
+      timing: strike.timing,
+    }));
+    this.endingPresentationStage = "kill";
+    this.enqueueNarrative("ending.kill", () => {
+      this.emit("princessKilled", { ending: "kill" });
+      this.emit("corruptionDestroyed", { ending: "kill" });
+      this.beginEndingFade();
+    });
+  }
+
   beginEndingFade(nowMs = Math.max(performance.now(), this.lastNarrativeTimestamp)) {
+    this.cancelClaim("endingFade");
+    this.cancelCombatActions("endingFade");
     this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, nowMs);
     const snapshot = this.ending.startFade(this.lastNarrativeTimestamp);
     this.endingPresentationStage = "fade";
@@ -684,6 +1661,8 @@ export class Game {
 
   completeEnding() {
     if (this.endingCompletionHandled) return;
+    this.cancelClaim("endingComplete");
+    this.cancelCombatActions("endingComplete");
     this.endingCompletionHandled = true;
     this.endingPresentationStage = "complete";
     const ending = this.ending.snapshot().result?.id;
@@ -699,8 +1678,12 @@ export class Game {
 
   togglePause(nowMs = performance.now()) {
     this.lastNarrativeTimestamp = Math.max(this.lastNarrativeTimestamp, nowMs);
-    if (["playing", "dialogue", "reward", "blessing", "endingChoice"].includes(this.phase)) {
+    if (["playing", "dialogue", "reward", "blessing", "endingChoice", "endingStrike"].includes(this.phase)) {
       this.pausedPhase = this.phase;
+      if (this.phase === "dialogue") {
+        const view = this.dialogue.update(this.lastNarrativeTimestamp, { activeForeground: true });
+        if (!this.finishDialogueReader(view)) this.publishDialogueView(view);
+      }
       if (this.phase === "endingChoice") {
         const snapshot = this.ending.pause(this.lastNarrativeTimestamp);
         if (snapshot.result) {
@@ -715,18 +1698,48 @@ export class Game {
     if (this.phase !== "paused" || !this.pausedPhase) return false;
     const resumePhase = this.pausedPhase;
     this.pausedPhase = null;
+    if (resumePhase === "dialogue") {
+      const view = this.dialogue.update(this.lastNarrativeTimestamp, { activeForeground: false });
+      if (!this.finishDialogueReader(view)) this.publishDialogueView(view);
+    }
     if (resumePhase === "endingChoice") this.ending.resume(this.lastNarrativeTimestamp);
     this.setPhase(resumePhase);
     return true;
   }
 
   returnToTitle() {
+    this.cancelClaim("returnToTitle");
+    this.cancelCombatActions("returnToTitle");
+    this.flushGameplayActions();
     this.resetNarrativeState();
     this.setPhase("title");
   }
 
+  abandonRun() {
+    if (!this.player || ["title", "dead", "endingComplete", "victory"].includes(this.phase)) return false;
+    this.emit("runEnded", {
+      completed: false,
+      victory: false,
+      ending: null,
+      cause: "abandoned",
+      floor: this.floor,
+      room: this.room,
+      seed: this.seed,
+      difficultyId: this.difficultyId,
+    });
+    this.returnToTitle();
+    return true;
+  }
+
   setPhase(phase) {
     this.phase = phase;
+    if (ACTION_CLEAR_PHASES.has(phase)) {
+      this.hitStop.reset();
+      this.cancelClaim(`phase:${phase}`);
+      this.cancelCombatActions(`phase:${phase}`);
+      this.flushGameplayActions();
+      this.resetTransformationCombatState();
+    }
     this.emit("phaseChanged", { phase });
   }
 
@@ -739,6 +1752,9 @@ export class Game {
       health: this.player.health,
       maxHealth: this.player.maxHealth,
       seed: this.seed,
+      harvest: this.combat.harvest.snapshot(),
+      claim: this.claimSnapshots.current,
+      claimSnapshots: this.claimSnapshots,
       paths: summarizeUpgradePaths(this.upgradeRanks, [...RUN_UPGRADES, ...BLESSINGS]),
     });
   }

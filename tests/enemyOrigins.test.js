@@ -53,6 +53,20 @@ function createDirector(seed = "ORIGIN-DIRECTOR") {
   return { director, events };
 }
 
+function combatHit(actionId, damage, sourcePosition) {
+  return Object.freeze({
+    actionId,
+    damage,
+    critical: false,
+    direction: Object.freeze({ x: 1, z: 0 }),
+    knockback: 0,
+    poiseDamage: 0,
+    pullStrength: 0,
+    sourcePosition: Object.freeze({ ...sourcePosition }),
+    origin: "player",
+  });
+}
+
 test("origin planning is deterministic and keeps the pre-origin type sequence", () => {
   const fixtures = [
     ["ORIGIN-ROSTER", 8, 3, [
@@ -125,7 +139,7 @@ test("runtime enemies, projectiles, and combat events retain their origin", () =
   assert.ok(director.projectiles.some((projectile) => projectile.active && projectile.origin === ENEMY_ORIGINS.PRINCESS));
   assert.equal(events.find((event) => event.type === "enemyAttack")?.detail.origin, ENEMY_ORIGINS.PRINCESS);
 
-  director.damageEnemy(enemy, enemy.maxHealth, { x: 1, z: 0 }, 0);
+  director.resolveCombatHit(enemy, combatHit("origin-runtime-defeat", enemy.maxHealth, { x: -1, z: 0 }));
   assert.equal(events.find((event) => event.type === "enemyHit")?.detail.origin, ENEMY_ORIGINS.PRINCESS);
   assert.equal(events.find((event) => event.type === "enemyDefeated")?.detail.origin, ENEMY_ORIGINS.PRINCESS);
   assert.throws(
@@ -199,7 +213,7 @@ test("boss cleanup waits for the narrative cue and dismisses surviving Witch sum
   const { director, events } = createDirector("ORIGIN-BOSS-CLEANUP");
   const queen = director.spawnEnemy("queen", { x: 0, z: 0 }, 10, { origin: ENEMY_ORIGINS.WITCH });
   const guard = director.spawnEnemy("thrall", { x: 3, z: 0 }, 10, { origin: ENEMY_ORIGINS.WITCH });
-  director.damageEnemy(queen, queen.maxHealth, { x: 1, z: 0 }, 0);
+  director.resolveCombatHit(queen, combatHit("origin-boss-defeat", queen.maxHealth, { x: -1, z: 0 }));
   assert.equal(guard.active, true);
   assert.equal(events.filter((event) => event.type === "witchOriginDismissed").length, 0);
   director.dismissWitchOrigin();

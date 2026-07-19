@@ -22,6 +22,15 @@ export function createBenchmarkHarness(game, renderer, ui) {
     maxActiveMixers: 0,
     maxSkinnedMeshes: 0,
     maxTelegraphs: 0,
+    damageNumberScenarioStarted: false,
+    maxDamageNumbers: 0,
+    damageNumberCapacity: 0,
+    maxDamageNumberPeak: 0,
+    maxDamageNumberDropped: 0,
+    maxDamageNumberReplaced: 0,
+    maxDamageNumberAggregated: 0,
+    maxDamageNumberDomNodes: 0,
+    maxDamageNumberProjected: 0,
     longTasks: 0,
   };
   globalThis.__ROGUE_BENCHMARK__ = state;
@@ -51,6 +60,11 @@ export function createBenchmarkHarness(game, renderer, ui) {
       if (state.startedAt === null) return;
       const elapsed = performance.now() - state.startedAt;
       if (elapsed < state.warmupMs) return;
+      if (!state.damageNumberScenarioStarted) {
+        const damageNumbers = renderer.saturateDamageNumbersForBenchmark(game);
+        metrics = { ...metrics, damageNumbers };
+        state.damageNumberScenarioStarted = true;
+      }
       state.status = "sampling";
       resultElement.dataset.status = "sampling";
       state.frameTimes.push(frameMs);
@@ -62,6 +76,14 @@ export function createBenchmarkHarness(game, renderer, ui) {
       state.maxActiveMixers = Math.max(state.maxActiveMixers, metrics.activeMixers ?? 0);
       state.maxSkinnedMeshes = Math.max(state.maxSkinnedMeshes, metrics.skinnedMeshes ?? 0);
       state.maxTelegraphs = Math.max(state.maxTelegraphs, metrics.telegraphs ?? 0);
+      state.maxDamageNumbers = Math.max(state.maxDamageNumbers, metrics.damageNumbers?.active ?? 0);
+      state.damageNumberCapacity = Math.max(state.damageNumberCapacity, metrics.damageNumbers?.capacity ?? 0);
+      state.maxDamageNumberPeak = Math.max(state.maxDamageNumberPeak, metrics.damageNumbers?.peak ?? 0);
+      state.maxDamageNumberDropped = Math.max(state.maxDamageNumberDropped, metrics.damageNumbers?.dropped ?? 0);
+      state.maxDamageNumberReplaced = Math.max(state.maxDamageNumberReplaced, metrics.damageNumbers?.replaced ?? 0);
+      state.maxDamageNumberAggregated = Math.max(state.maxDamageNumberAggregated, metrics.damageNumbers?.aggregated ?? 0);
+      state.maxDamageNumberDomNodes = Math.max(state.maxDamageNumberDomNodes, metrics.damageNumbers?.domNodes ?? 0);
+      state.maxDamageNumberProjected = Math.max(state.maxDamageNumberProjected, metrics.damageNumbers?.projected ?? 0);
       if (elapsed >= state.warmupMs + state.sampleMs) this.finish();
     },
 
@@ -84,6 +106,11 @@ export function createBenchmarkHarness(game, renderer, ui) {
           (gpuP95 == null || !gpuTimerReliable || gpuP95 <= PERFORMANCE_BUDGET.gpuP95Ms) &&
           state.maxDrawCalls <= PERFORMANCE_BUDGET.drawCalls &&
           state.maxTriangles <= PERFORMANCE_BUDGET.triangles &&
+          state.maxDamageNumbers === 48 &&
+          state.damageNumberCapacity === 48 &&
+          state.maxDamageNumberPeak === 48 &&
+          state.maxDamageNumberDomNodes === 48 &&
+          state.maxDamageNumberAggregated > 0 &&
           state.longTasks === 0 &&
           (refreshCapped || frameP95 <= 12.5),
         samples: state.frameTimes.length,
@@ -99,6 +126,16 @@ export function createBenchmarkHarness(game, renderer, ui) {
         maxActiveMixers: state.maxActiveMixers,
         maxSkinnedMeshes: state.maxSkinnedMeshes,
         maxTelegraphs: state.maxTelegraphs,
+        damageNumbers: {
+          maxActive: state.maxDamageNumbers,
+          capacity: state.damageNumberCapacity,
+          peak: state.maxDamageNumberPeak,
+          dropped: state.maxDamageNumberDropped,
+          replaced: state.maxDamageNumberReplaced,
+          aggregated: state.maxDamageNumberAggregated,
+          domNodes: state.maxDamageNumberDomNodes,
+          maxProjected: state.maxDamageNumberProjected,
+        },
         longTasks: state.longTasks,
         domInteractiveMs: navigation ? Number(navigation.domInteractive.toFixed(1)) : null,
         resourceTransferBytes: resourceBytes,

@@ -13,6 +13,12 @@ export const RUN_CONFIG = Object.freeze({
 export const NARRATIVE_TIMING = Object.freeze({
   decisionDurationMs: 5_000,
   fadeDurationMs: 1_200,
+  endingStrike: Object.freeze({
+    A0: 0,
+    T: 0.14,
+    C: 0.34,
+    R: 0.78,
+  }),
 });
 
 export const PORTAL_CONFIG = Object.freeze({
@@ -31,6 +37,9 @@ export const PLAYER_CONFIG = Object.freeze({
   baseDamageMultiplier: 1,
   baseReachMultiplier: 1,
   hitInvulnerability: 0.52,
+  hitSeverity: Object.freeze({
+    heavyThresholdRatio: 0.18,
+  }),
   combat: Object.freeze({
     attackBuffer: 0.14,
     dashBuffer: 0.12,
@@ -42,6 +51,8 @@ export const PLAYER_CONFIG = Object.freeze({
   dash: Object.freeze({
     speed: 25,
     duration: 0.19,
+    perfectOpen: 0,
+    perfectClose: 0.12,
     invulnerability: 0.29,
     cooldown: 0.64,
     steeringRate: 3.2,
@@ -49,6 +60,103 @@ export const PLAYER_CONFIG = Object.freeze({
     momentumDuration: 0.22,
     momentumDecay: 14,
     reverseBrakeMultiplier: 2.6,
+  }),
+});
+
+export const HARVEST_CONFIG = Object.freeze({
+  maxUnits: 300,
+  unitsPerSegment: 100,
+  floorMinimumUnits: 100,
+  closeHitRange: 3.5,
+  rememberedEventIds: 512,
+  gainUnits: Object.freeze({
+    closeHit: 14,
+    critical: 22,
+    kill: 34,
+    perfectDash: 28,
+    perfectCharge: 28,
+    upgradeModifier: 10,
+  }),
+});
+
+export const HIT_STOP_CONFIG = Object.freeze({
+  maxDuration: 6 / 60,
+  tiers: Object.freeze({ light: 1, medium: 2, heavy: 3 }),
+  policies: Object.freeze({
+    critical: Object.freeze({ duration: 2 / 60, tier: "light" }),
+    comboFinisher: Object.freeze({ duration: 3 / 60, tier: "medium" }),
+    chargePartial: Object.freeze({ duration: 2 / 60, tier: "light" }),
+    chargeFull: Object.freeze({ duration: 3 / 60, tier: "medium" }),
+    chargePerfect: Object.freeze({ duration: 4 / 60, tier: "heavy" }),
+    claimRecall: Object.freeze({ duration: 3 / 60, tier: "medium" }),
+  }),
+});
+
+export const CLAIM_CONFIG = Object.freeze({
+  costSegments: 1,
+  inputBuffer: 0.14,
+  movementScale: 0.62,
+  maxTargetsPerPass: 64,
+  outbound: Object.freeze({
+    duration: 0.32,
+    releaseAt: 0.08,
+    distance: 7.2,
+    radius: 0.72,
+    damage: 46,
+    poiseDamage: 32,
+  }),
+  recall: Object.freeze({
+    duration: 0.28,
+    radius: 0.8,
+    damage: 38,
+    poiseDamage: 38,
+    pullStrength: 7,
+    followupBuffer: 0.12,
+  }),
+  empoweredWindow: 0.22,
+  empoweredCleave: Object.freeze({
+    duration: 0.44,
+    activeStart: 0.08,
+    activeEnd: 0.25,
+    cancelToDashAt: 0.25,
+    radius: 5.4,
+    arc: Math.PI * 1.15,
+    damage: 76,
+    poiseDamage: 60,
+  }),
+  recoveryDuration: 0.18,
+});
+
+export const DEATH_DEFIANCE_GRANT_CAP = 2;
+
+export const PROGRESSION_TRANSFORMATION_CONFIG = Object.freeze({
+  farReachClaim: Object.freeze({
+    recallRadiusPerRank: 0.25,
+    recallPullPerRank: 0.35,
+    cleaveRadiusPerRank: 0.15,
+  }),
+  graveEdgeCharge: Object.freeze({ poiseDamagePerRank: 0.35 }),
+  harvestCrownClaim: Object.freeze({ harvestUnitsPerRank: HARVEST_CONFIG.gainUnits.upgradeModifier }),
+  hollowStepAfterimage: Object.freeze({ damagePerRank: 0.45 }),
+  perfectEclipsePerfectDash: Object.freeze({ harvestUnitsPerRank: HARVEST_CONFIG.gainUnits.upgradeModifier }),
+  reapingPassageDashAttack: Object.freeze({ damagePerRank: 0.35, arcPerRank: 0.2 }),
+  royalBloodWounded: Object.freeze({ healthThreshold: 0.4, damagePerRank: 0.25, poisePerRank: 0.2 }),
+  soulSiphonAggressiveHeal: Object.freeze({ damageHealingPerRank: 0.03, actionHealthCapPerRank: 10 }),
+  moonwellRenewalRetaliation: Object.freeze({ damagePerRank: 28, poiseDamagePerRank: 32 }),
+});
+
+export const CHARGE_CONFIG = Object.freeze({
+  timing: Object.freeze({
+    minimumRelease: 0.12,
+    fullThreshold: 0.55,
+    perfectOpen: 0.72,
+    perfectClose: 0.82,
+    forcedRelease: 0.9,
+  }),
+  qualities: Object.freeze({
+    partial: Object.freeze({ damageMultiplier: 0.78, rangeMultiplier: 0.92, poiseDamage: 30, harvestUnits: 0 }),
+    full: Object.freeze({ damageMultiplier: 1, rangeMultiplier: 1, poiseDamage: 46, harvestUnits: 0 }),
+    perfect: Object.freeze({ damageMultiplier: 1.22, rangeMultiplier: 1.08, poiseDamage: 62, harvestUnits: 28 }),
   }),
 });
 
@@ -151,8 +259,68 @@ export const PERFORMANCE_BUDGET = Object.freeze({
   stressParticles: 200,
 });
 
+export const DEFAULT_DIFFICULTY_ID = "standard";
+export const DIFFICULTY_IDS = Object.freeze(["story", "standard", "ruthless"]);
+
+/**
+ * Immutable scalar and behavioral rules copied into a run when difficulty is confirmed.
+ * Attack budgets are simultaneous committed actions, not enemy population caps.
+ */
+function difficultyProfile(definition) {
+  return Object.freeze({
+    ...definition,
+    attackBudgets: Object.freeze({ ...definition.attackBudgets }),
+  });
+}
+
 export const DIFFICULTY = Object.freeze({
-  story: Object.freeze({ enemyHealth: 0.78, enemyDamage: 0.72, enemySpeed: 0.92 }),
-  standard: Object.freeze({ enemyHealth: 1, enemyDamage: 1, enemySpeed: 1 }),
-  ruthless: Object.freeze({ enemyHealth: 1.25, enemyDamage: 1.22, enemySpeed: 1.08 }),
+  story: difficultyProfile({
+    id: "story",
+    label: "Story",
+    description: "More recovery and fewer overlapping threats, with every mechanic and full narrative preserved.",
+    enemyHealth: 0.82,
+    enemyDamage: 0.76,
+    enemySpeed: 0.94,
+    windupMultiplier: 1.18,
+    cooldownMultiplier: 1.18,
+    attackBudgets: { total: 3, melee: 2, ranged: 1, area: 1 },
+    compositionPressure: 0.82,
+    poiseMultiplier: 0.88,
+    bossCadenceMultiplier: 0.88,
+  }),
+  standard: difficultyProfile({
+    id: "standard",
+    label: "Standard",
+    description: "The intended balance of readable squad pressure, build choices, and mechanical execution.",
+    enemyHealth: 1,
+    enemyDamage: 1,
+    enemySpeed: 1,
+    windupMultiplier: 1,
+    cooldownMultiplier: 1,
+    attackBudgets: { total: 4, melee: 2, ranged: 2, area: 1 },
+    compositionPressure: 1,
+    poiseMultiplier: 1,
+    bossCadenceMultiplier: 1,
+  }),
+  ruthless: difficultyProfile({
+    id: "ruthless",
+    label: "Ruthless",
+    description: "Tighter telegraphs, coordinated overlaps, and specialist-heavy squads demand a coherent build and precise play.",
+    enemyHealth: 1.15,
+    enemyDamage: 1.14,
+    enemySpeed: 1.05,
+    windupMultiplier: 0.88,
+    cooldownMultiplier: 0.84,
+    attackBudgets: { total: 5, melee: 3, ranged: 2, area: 2 },
+    compositionPressure: 1.24,
+    poiseMultiplier: 1.14,
+    bossCadenceMultiplier: 1.2,
+  }),
 });
+
+export function getDifficultyProfile(id, { fallback = true } = {}) {
+  const profile = DIFFICULTY[id];
+  if (profile) return profile;
+  if (fallback) return DIFFICULTY[DEFAULT_DIFFICULTY_ID];
+  throw new RangeError(`Unknown difficulty ID: ${id}`);
+}

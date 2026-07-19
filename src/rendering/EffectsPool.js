@@ -23,6 +23,12 @@ function clamp01(value) {
   return Math.max(0, Math.min(1, value));
 }
 
+export function particleDensityForSettings(settings) {
+  if (settings?.get?.("accessibility.reducedParticles")) return 0.35;
+  const configuredDensity = Number(settings?.get?.("graphics.effectsDensity"));
+  return Number.isFinite(configuredDensity) ? clamp01(configuredDensity) : 1;
+}
+
 function createArcGeometry(innerRadius, outerRadius, arc) {
   const segments = Math.max(12, Math.ceil(SCYTHE_ARC_SEGMENTS * (arc / FULL_CIRCLE)));
   const geometry = new THREE.RingGeometry(innerRadius, outerRadius, segments, 1, -arc / 2, arc);
@@ -135,6 +141,9 @@ function createTelegraphMaterial() {
 }
 
 function telegraphColor(detail) {
+  if (detail.telegraphRole === "departure") return 0x9c35ca;
+  if (detail.telegraphRole === "arrival") return 0xf0a7ff;
+  if (detail.telegraphRole === "summonCore") return 0xffc2ef;
   if (detail.type === "queen") return 0xd75aff;
   if (detail.attack === "lobbedBomb") return 0xff6128;
   if (detail.attack === "rune" || detail.type === "hexer") return 0xb95dff;
@@ -153,6 +162,54 @@ export function telegraphBatchDescriptor(detail) {
     return { key: `cone:${Math.round(angle * 100)}`, angle };
   }
   return { key: "circle", angle: null };
+}
+
+export function queenTelegraphDescriptors(detail = {}) {
+  const action = detail.attack ?? detail.action;
+  const radius = Math.max(0.35, detail.radius ?? (action === "summon" ? 3.2 : 1.35));
+  const position = detail.position ?? detail.origin ?? { x: 0, z: 0 };
+  const target = detail.target ?? position;
+  if (action === "teleport" || detail.shape === "blink") {
+    return [
+      {
+        ...detail,
+        shape: "ring",
+        position,
+        target: position,
+        radius: radius * 0.72,
+        telegraphRole: "departure",
+      },
+      {
+        ...detail,
+        shape: "circle",
+        position: target,
+        target,
+        radius,
+        telegraphRole: "arrival",
+      },
+    ];
+  }
+  if (action === "summon") {
+    return [
+      {
+        ...detail,
+        shape: "ring",
+        position,
+        target: position,
+        radius,
+        telegraphRole: "summonWard",
+      },
+      {
+        ...detail,
+        shape: "circle",
+        position,
+        target: position,
+        radius: radius * 0.38,
+        telegraphRole: "summonCore",
+      },
+    ];
+  }
+  return [detail];
 }
 
 export class EffectsPool {
@@ -248,6 +305,9 @@ export class EffectsPool {
   createTelegraph() {
     return {
       active: false,
+      actionId: null,
+      attack: null,
+      telegraphRole: null,
       key: "circle",
       angle: null,
       position: new THREE.Vector3(),
@@ -333,16 +393,16 @@ export class EffectsPool {
     sweep.endRay.rotation.y = endAngle;
 
     const finisher = stage === 2;
-    const fillColor = heavy ? 0xb84dff : finisher ? 0x825cff : 0x2ccfff;
-    const edgeColor = heavy ? 0xf0a6ff : finisher ? 0xffdc89 : 0xcafaff;
+    const fillColor = heavy ? 0xd9aa52 : finisher ? 0xffd985 : 0x2ccfff;
+    const edgeColor = heavy ? 0xe3fbff : finisher ? 0xffdc89 : 0xcafaff;
     sweep.coverage.material.color.set(fillColor);
-    sweep.activeTrail.material.color.set(heavy ? 0xf3b8ff : finisher ? 0xd6c1ff : 0x8defff);
+    sweep.activeTrail.material.color.set(heavy ? 0xffd985 : finisher ? 0xffe7ac : 0x8defff);
     sweep.innerRim.material.color.set(fillColor);
     sweep.outerRim.material.color.set(edgeColor);
     sweep.startRay.material.color.set(fillColor);
     sweep.endRay.material.color.set(edgeColor);
-    sweep.leadingBlade.material.color.set(heavy ? 0xffebff : finisher ? 0xffe7ac : 0xffffff);
-    sweep.movingGlow.material.color.set(heavy ? 0xffd4ff : finisher ? 0xffd677 : 0xffffff);
+    sweep.leadingBlade.material.color.set(heavy ? 0xf7f2d0 : finisher ? 0xffe7ac : 0xffffff);
+    sweep.movingGlow.material.color.set(heavy ? 0xe3fbff : finisher ? 0xffd677 : 0xffffff);
   }
 
   syncPlayerAttack(player, combat) {
@@ -427,6 +487,13 @@ export class EffectsPool {
   }
 
   spawnTelegraph(detail) {
+    const descriptors = detail?.type === "queen"
+      ? queenTelegraphDescriptors(detail)
+      : [detail];
+    return descriptors.map((descriptor) => this.spawnTelegraphEntry(descriptor));
+  }
+
+  spawnTelegraphEntry(detail) {
     const entry = this.telegraphs.find((item) => !item.active) ?? this.telegraphs[0];
     const shape = detail.shape ?? "circle";
     const radius = Math.max(0.35, detail.radius ?? 2.2);
@@ -436,6 +503,9 @@ export class EffectsPool {
     const origin = detail.origin ?? detail.position;
     const descriptor = telegraphBatchDescriptor(detail);
     entry.active = true;
+    entry.actionId = detail.actionId ?? null;
+    entry.attack = detail.attack ?? detail.action ?? null;
+    entry.telegraphRole = detail.telegraphRole ?? null;
     entry.key = descriptor.key;
     entry.angle = descriptor.angle;
     entry.life = Math.max(0.08, detail.duration ?? 0.42);
@@ -451,7 +521,7 @@ export class EffectsPool {
       entry.rotationY = Math.atan2(direction.x, direction.z);
       entry.baseScaleX = width + 0.12;
       entry.baseScaleZ = radius + 0.12;
-      return;
+      return entry;
     }
 
     if (shape === "cone") {
@@ -459,12 +529,36 @@ export class EffectsPool {
       entry.rotationY = -Math.atan2(direction.z, direction.x);
       entry.baseScaleX = radius;
       entry.baseScaleZ = radius;
-      return;
+      return entry;
     }
 
     entry.position.set(target.x, 0, target.z);
     entry.baseScaleX = radius;
     entry.baseScaleZ = radius;
+    return entry;
+  }
+
+  alignTelegraphAction(actionId, duration) {
+    if (actionId == null || !Number.isFinite(duration)) return 0;
+    let aligned = 0;
+    for (const entry of this.telegraphs) {
+      if (!entry.active || entry.actionId !== actionId) continue;
+      entry.maxLife = Math.max(0.08, duration);
+      entry.life = entry.maxLife;
+      aligned += 1;
+    }
+    return aligned;
+  }
+
+  resolveTelegraphAction(actionId) {
+    if (actionId == null) return 0;
+    let resolved = 0;
+    for (const entry of this.telegraphs) {
+      if (!entry.active || entry.actionId !== actionId) continue;
+      entry.active = false;
+      resolved += 1;
+    }
+    return resolved;
   }
 
   spawnDashStreak(position, direction) {
@@ -479,7 +573,7 @@ export class EffectsPool {
   }
 
   spawnBurst(position, color, requestedCount = 12, force = 4.5) {
-    const density = this.settings.get("accessibility.reducedParticles") ? 0.35 : this.settings.get("graphics.effectsDensity");
+    const density = particleDensityForSettings(this.settings);
     let remaining = Math.max(1, Math.round(requestedCount * density));
     for (const particle of this.particles) {
       if (particle.active) continue;
@@ -525,7 +619,7 @@ export class EffectsPool {
       if (!effect.visible) continue;
       effect.userData.life -= dt;
       const ratio = Math.max(0, effect.userData.life / effect.userData.maxLife);
-      effect.material.opacity *= 0.84;
+      effect.material.opacity = ratio * 0.7;
       if (effect.userData.life <= 0) effect.visible = false;
       else effect.scale.multiplyScalar(1 + dt * (1.8 + ratio));
     }
@@ -590,6 +684,12 @@ export class EffectsPool {
 
   activeTelegraphCount() {
     return this.telegraphs.reduce((count, entry) => count + Number(entry.active), 0);
+  }
+
+  activeTelegraphCountForAction(actionId) {
+    return this.telegraphs.reduce((count, entry) => (
+      count + Number(entry.active && entry.actionId === actionId)
+    ), 0);
   }
 
   activeTelegraphBatchCount() {

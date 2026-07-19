@@ -1,6 +1,7 @@
 import "./styles.css";
 import { AudioSystem } from "./audio/AudioSystem.js";
 import { Game } from "./game/Game.js";
+import { RunSessionController } from "./game/RunSessionController.js";
 import { CAMERA_CONFIG, RUN_CONFIG } from "./game/gameConfig.js";
 import { InputController } from "./game/InputController.js";
 import { AutoplayAgent } from "./playtest/AutoplayAgent.js";
@@ -8,6 +9,8 @@ import { PlaytestReporter } from "./playtest/PlaytestReporter.js";
 import { GameRenderer } from "./rendering/GameRenderer.js";
 import { SettingsStore } from "./settings/SettingsStore.js";
 import { NarrativeProgressStore } from "./settings/NarrativeProgressStore.js";
+import { StatisticsStore } from "./settings/StatisticsStore.js";
+import { SuspendedRunStore } from "./settings/SuspendedRunStore.js";
 import { GameUi } from "./ui/GameUi.js";
 import { SettingsMenu } from "./ui/SettingsMenu.js";
 
@@ -17,6 +20,15 @@ function worldToScreenMovement(worldMove) {
   return {
     x: worldMove.x * sinYaw - worldMove.z * cosYaw,
     y: -worldMove.x * cosYaw - worldMove.z * sinYaw,
+  };
+}
+
+function screenToWorldDirection(screenDirection) {
+  const sinYaw = Math.sin(CAMERA_CONFIG.yaw);
+  const cosYaw = Math.cos(CAMERA_CONFIG.yaw);
+  return {
+    x: screenDirection.x * sinYaw - screenDirection.y * cosYaw,
+    z: -screenDirection.x * cosYaw - screenDirection.y * sinYaw,
   };
 }
 
@@ -39,6 +51,8 @@ function autoplayState(game, telegraphs) {
         dashReady: game.combat.dashCooldown <= 0,
         heavyReady: game.combat.heavyCooldown <= 0,
       },
+      harvest: game.combat.harvest.snapshot(),
+      claim: game.combat.claim.snapshot(),
     } : null,
     arena: game.arena ? {
       width: game.arena.width,
@@ -212,6 +226,14 @@ function updateRuntimeProbe(probe, game, renderer) {
   probe.dataset.attackFacing = Number.isFinite(game.combat.attackFacing) ? game.combat.attackFacing.toFixed(5) : "";
   probe.dataset.attackKind = game.combat.attackKind ?? "";
   probe.dataset.comboIndex = String(game.combat.comboIndex);
+  const harvest = game.combat.harvest.snapshot();
+  const claim = game.combat.claim.snapshot();
+  probe.dataset.harvestUnits = String(harvest.units);
+  probe.dataset.harvestSegments = String(harvest.filledSegments);
+  probe.dataset.claimActionId = claim.actionId ?? "";
+  probe.dataset.claimPhase = claim.phase;
+  probe.dataset.claimX = claim.scythePosition.x.toFixed(3);
+  probe.dataset.claimZ = claim.scythePosition.z.toFixed(3);
   probe.dataset.bossPhase = boss ? String(boss.bossPhase) : "";
   probe.dataset.bossHealth = boss ? boss.health.toFixed(2) : "";
   probe.dataset.bossMaxHealth = boss ? String(boss.maxHealth) : "";
@@ -230,6 +252,10 @@ function updateRuntimeProbe(probe, game, renderer) {
   probe.dataset.activeActors = String(metrics.activeActors ?? 0);
   probe.dataset.activeMixers = String(metrics.activeMixers ?? 0);
   probe.dataset.proxyActors = String(metrics.proxyActors ?? 0);
+  probe.dataset.damageNumbers = String(metrics.damageNumbers?.active ?? 0);
+  probe.dataset.damageNumberCapacity = String(metrics.damageNumbers?.capacity ?? 0);
+  probe.dataset.damageNumberPeak = String(metrics.damageNumbers?.peak ?? 0);
+  probe.dataset.damageNumberDropped = String(metrics.damageNumbers?.dropped ?? 0);
 }
 
 const searchParams = new URLSearchParams(window.location.search);
@@ -240,6 +266,7 @@ const endingPolicy = searchParams.get("ending") === "timeout" ? "timeout" : "kil
 const autoplayRunNumber = Math.max(1, Number(searchParams.get("run")) || 1);
 const simulationScale = autoplayEnabled ? Math.min(4, Math.max(1, Number(searchParams.get("timeScale")) || 4)) : 1;
 const canvas = document.querySelector("#game-canvas");
+const combatOverlay = document.querySelector("#combat-overlay");
 const uiRoot = document.querySelector("#ui");
 const runtimeProbe = document.createElement("pre");
 runtimeProbe.id = "runtime-probe";
@@ -247,18 +274,30 @@ runtimeProbe.hidden = true;
 document.body.append(runtimeProbe);
 const settings = new SettingsStore(searchParams.get("benchmark") === "1" ? null : undefined);
 const narrativeProgress = new NarrativeProgressStore(searchParams.get("benchmark") === "1" ? null : undefined);
+const statistics = new StatisticsStore(searchParams.get("benchmark") === "1" ? null : undefined);
+const suspendedRuns = new SuspendedRunStore(searchParams.get("benchmark") === "1" ? null : undefined);
 if (autoplayEnabled) settings.set("gameplay.difficulty", searchParams.get("difficulty") ?? "standard");
 const input = new InputController(canvas, settings);
 const audio = new AudioSystem(settings);
-const renderer = new GameRenderer(canvas, settings);
-const game = new Game(input, settings, { requireRoomReady: true });
+const renderer = new GameRenderer(canvas, settings, combatOverlay);
+const game = new Game(input, settings, { requireRoomReady: true, narrativeProgress });
+const runSession = new RunSessionController({
+  game,
+  settings,
+  suspendedRuns,
+  statistics,
+  platform: Object.freeze({ canQuit: false, quit: null }),
+});
 const settingsMenu = new SettingsMenu(uiRoot, settings, input);
-const ui = new GameUi(uiRoot, game, settings, input, audio, settingsMenu, narrativeProgress);
+const ui = new GameUi(uiRoot, game, settings, input, audio, settingsMenu, narrativeProgress, runSession);
 let autoplayRuntime = null;
+
+input.onActiveDeviceChanged((event) => game.emit(event.type, event.detail));
 
 renderer.setLoadProgressListener((progress) => ui.setLoadingProgress(progress));
 
 game.on((event) => {
+  runSession.handleEvent(event);
   if (event.type === "endingCompleted" && narrativeProgress.unlockGlossary()) {
     game.emit("glossaryUnlocked", narrativeProgress.getSnapshot());
   }
@@ -283,11 +322,21 @@ settings.subscribe((values) => {
   ui.applySettings(values);
 });
 
-window.addEventListener("focus", () => audio.setFocused(true));
-window.addEventListener("blur", () => audio.setFocused(false));
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden && ["playing", "endingChoice"].includes(game.phase)) game.togglePause(performance.now());
+let foregroundFocused = document.hasFocus();
+window.addEventListener("focus", () => {
+  foregroundFocused = true;
+  audio.setFocused(true);
 });
+window.addEventListener("blur", () => {
+  foregroundFocused = false;
+  audio.setFocused(false);
+  runSession.flush();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) runSession.flush();
+  if (document.hidden && ["playing", "dialogue", "endingChoice"].includes(game.phase)) game.togglePause(performance.now());
+});
+window.addEventListener("pagehide", () => runSession.flush());
 
 try {
   await renderer.ready;
@@ -326,8 +375,10 @@ if (searchParams.get("benchmark") === "1") {
 let previousTime = performance.now();
 let accumulator = 0;
 let lastPresentedAt = 0;
+let dialogueFastForwardHeld = false;
 
 renderer.setAnimationLoop((time) => {
+  input.pollGamepads(undefined, time);
   const fpsLimit = settings.get("graphics.fpsLimit");
   const minimumFrameMs = fpsLimit === "unlimited" ? 0 : 1000 / Number(fpsLimit);
   if (minimumFrameMs > 0 && time - lastPresentedAt < minimumFrameMs - 0.5) return;
@@ -336,11 +387,57 @@ renderer.setAnimationLoop((time) => {
   const cpuStart = performance.now();
   previousTime = time;
   lastPresentedAt = time;
+  runSession.sampleTime(rawDelta, game.phase, foregroundFocused && !document.hidden);
 
-  const pauseInput = input.consumePressed("pause");
-  if (pauseInput) {
-    if (settingsMenu.isOpen) settingsMenu.close();
-    else game.togglePause(pauseInput.timeStamp);
+  const dialogueWasActive = game.phase === "dialogue";
+  const menuInputHandled = dialogueWasActive ? false : ui.handleMenuInput(time);
+  if (!dialogueWasActive && !menuInputHandled) {
+    const pauseInput = input.consumePressed("pause");
+    if (pauseInput) game.togglePause(pauseInput.timeStamp);
+  }
+
+  if (dialogueWasActive) {
+    const view = game.dialogue.snapshot();
+    const attackInput = input.consumePressed("attack");
+    const interactInput = input.consumePressed("interact");
+    const advanceInput = attackInput ?? interactInput;
+    const autoInput = input.consumePressed("heavy");
+    const historyInput = input.consumePressed("dash");
+    const hideInput = input.consumePressed("moveUp");
+    const skipInput = input.consumePressed("moveDown");
+    const pauseInput = input.consumePressed("pause");
+    if (view?.backlogOpen) {
+      const closeInput = pauseInput ?? historyInput;
+      if (closeInput) game.closeDialogueBacklog(closeInput.timeStamp);
+    } else if (view?.skipConfirmationOpen) {
+      if (advanceInput) game.confirmDialogueSkip(advanceInput.timeStamp);
+      else {
+        const cancelInput = pauseInput ?? historyInput;
+        if (cancelInput) game.cancelDialogueOverlay(cancelInput.timeStamp);
+      }
+    } else {
+      if (pauseInput) {
+        if (dialogueFastForwardHeld) game.setDialogueFastForward(false, pauseInput.timeStamp);
+        dialogueFastForwardHeld = false;
+        game.togglePause(pauseInput.timeStamp);
+      }
+      else if (advanceInput) game.continueDialogue(advanceInput.timeStamp);
+      else if (autoInput) game.toggleDialogueAuto(autoInput.timeStamp);
+      else if (historyInput) game.openDialogueBacklog(historyInput.timeStamp);
+      else if (hideInput) game.toggleDialogueUi(hideInput.timeStamp);
+      else if (skipInput) game.requestDialogueSkip(skipInput.timeStamp);
+    }
+    if (game.phase === "dialogue") {
+      const activeView = game.dialogue.snapshot();
+      const fastForwardHeld = !activeView?.backlogOpen && !activeView?.skipConfirmationOpen && input.isDown("claim");
+      if (fastForwardHeld !== dialogueFastForwardHeld) {
+        dialogueFastForwardHeld = fastForwardHeld;
+        game.setDialogueFastForward(fastForwardHeld, time);
+      }
+    }
+    input.flushActions(["attack", "interact", "heavy", "dash", "moveUp", "moveDown", "claim", "pause"]);
+  } else {
+    dialogueFastForwardHeld = false;
   }
 
   if (game.phase === "endingChoice") {
@@ -349,7 +446,19 @@ renderer.setAnimationLoop((time) => {
   }
   game.updateNarrativeClock(time);
 
-  if (game.player && !autoplayRuntime?.active) game.setAimPoint(renderer.screenToGround(input.pointerNdc));
+  if (game.player && !autoplayRuntime?.active) {
+    const pointerGround = renderer.screenToGround(input.pointerNdc);
+    const aimIntent = input.aimIntent(pointerGround);
+    if (aimIntent?.kind === "worldPoint") {
+      game.setAimPoint({ x: aimIntent.x, z: aimIntent.z });
+    } else if (aimIntent?.kind === "direction") {
+      const direction = screenToWorldDirection(aimIntent);
+      game.setAimPoint({
+        x: game.player.position.x + direction.x * 10,
+        z: game.player.position.z + direction.z * 10,
+      });
+    }
+  }
   accumulator += Math.min(rawDelta * simulationScale, RUN_CONFIG.fixedStep * RUN_CONFIG.maxFixedSteps);
   let fixedSteps = 0;
   while (accumulator >= RUN_CONFIG.fixedStep && fixedSteps < RUN_CONFIG.maxFixedSteps) {
@@ -376,5 +485,6 @@ globalThis.__ROGUE_GAME__ = {
   game,
   renderer,
   settings,
+  runSession,
   getMetrics: () => renderer.metrics(),
 };
