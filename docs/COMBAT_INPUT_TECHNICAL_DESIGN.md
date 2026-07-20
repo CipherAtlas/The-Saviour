@@ -273,7 +273,7 @@ snapshot() -> readonly lease summaries
 
 - Attack families are `melee`, `ranged`, and `area`.
 - Requests are evaluated in stable enemy-ID order with a deterministic tie-breaker; wall-clock order and renderer distance do not decide grants.
-- The locked difficulty profile controls family budgets, cadence pressure, and composition pressure. Story leaves more recovery and fewer overlapping denial zones; Ruthless coordinates more aggressively through behavior rather than mainly health inflation.
+- The locked difficulty profile controls family budgets, cadence pressure, and composition pressure. Relaxed leaves more recovery and fewer overlapping denial zones; Ruthless coordinates more aggressively through behavior rather than mainly health inflation.
 - A granted lease becomes a visible telegraph commitment. Completion, interruption, death, dismissal, or actor recycling releases it exactly once.
 - A denied enemy repositions or waits through its existing behavior; it does not start a hidden attack.
 - Witch/Elowen origin remains attached through enemies, projectiles, hazards, resolved hits, dismissal, and statistics. Coordination cannot permit unrestricted friendly fire to decide a room.
@@ -300,7 +300,7 @@ Aim rules:
 
 Binding rules:
 
-- Add named `claim` plus VN/menu actions required by the narrative design.
+- Add named `claim` plus the VN bookend and menu actions required by the product design.
 - Canonical gamepad button strings participate in existing conflict detection.
 - Settings migration preserves existing v2 arrays and supplies defaults only for missing new actions.
 - Runtime touch actions no longer mutate persisted binding arrays. Touch uses its own adapter state.
@@ -321,7 +321,7 @@ difficultySelect -- cancel --> previous menu
 - `Game.loadRoom()` uses the run-owned difficulty ID and does not reread settings.
 - `runStarted`, suspend snapshots, end-of-run statistics, Records, benchmark diagnostics, and all enemy/boss construction use the locked value.
 - Difficulty changes enemy decisions, windups/cadence, attack leases, compositions, poise pressure, and boss escalation. Scalar health/damage/speed remain supporting parameters.
-- Narrative content, rooms, endings, and upgrades are not removed on harder modes.
+- Opening/ending bookends, rooms, endings, and upgrades are not removed on harder modes.
 
 Invalid IDs fall back only before confirmation to the documented Standard profile and surface a recoverable UI error. A confirmed active run never changes silently.
 
@@ -403,7 +403,7 @@ Additional invariants:
 | Charge | Before/at/after both perfect boundaries; forced release; partial/full value; hold/toggle parity; pause, background, and low-frame timestamp behavior |
 | Hit-stop | Qualifying-hit filter; max-not-sum; global cap; fixed-step pause; buffered input retained; ordinary crowd hit excluded |
 | Poise | Single threshold stagger; attack interruption and lease release; recovery cap; uninterruptible authored boss action; death/dismissal idempotence |
-| Coordination | Stable grants under reordered iteration; each family budget; Story/Standard/Ruthless behavior; release on every terminal path; denied actor never attacks |
+| Coordination | Stable grants under reordered iteration; each family budget; Relaxed/Standard/Ruthless behavior; release on every terminal path; denied actor never attacks |
 | Input | Keyboard/mouse, gamepad, touch, automation; pressed versus held; deadzone/hysteresis; device switches; disconnect; remap conflict; modal flush; vector/world aim equivalence |
 | Difficulty | Selection before new/retry; last highlight persistence; invalid selection; run lock across rooms/settings changes/suspend; behavioral profile fields used |
 | Origin | Enemy/projectile/hazard/hit/kill/stat origin propagation; Witch-only dismissal preserves Elowen-origin state |
@@ -413,7 +413,7 @@ Additional invariants:
 
 Focused files include existing `tests/playerCombat.test.js`, `tests/combatRules.test.js`, `tests/inputController.test.js`, `tests/settingsStore.test.js`, `tests/encounterPatterns.test.js`, `tests/enemyOrigins.test.js`, `tests/playerScytheAnimation.test.js`, `tests/audioSystem.test.js`, and `tests/telegraphBatching.test.js`, plus narrowly named new module tests. Compilation alone is not gameplay, animation, visual, audio, or accessibility validation.
 
-Manual validation must cover all devices, all difficulties, weak/coherent/high-synergy builds, Reaper/Shade/Grave/hybrid paths, two-to-four Claim uses in a typical chamber, every affected enemy/boss response, high UI scale, high contrast, reduced motion, flash reduction, minimum viewport, and stress behavior.
+Manual validation must cover all devices, all difficulties, different five-Oath mixes and Rank-I/Rank-II loadouts, two-to-four Claim uses in a typical chamber, every affected enemy/boss response, high UI scale, high contrast, reduced motion, flash reduction, minimum viewport, and stress behavior.
 
 ## Non-overlapping implementation ownership
 
@@ -424,7 +424,7 @@ Only one writer owns each path at a time. A later owner starts after the prior o
 3. **Enemy-system owner:** after combat records freeze, `src/game/EnemyDirector.js`, encounter/boss pattern files, and enemy/encounter tests.
 4. **Game integration owner:** after owners 1–3 release, `src/game/Game.js`, `src/main.js`, and combat integration tests.
 5. **Presentation owner:** after Game events freeze, `src/rendering/ActorRenderer.js`, `src/rendering/GameRenderer.js`, `src/rendering/EffectsPool.js`, `src/audio/AudioSystem.js`, and presentation/audio tests.
-6. **Sole UI owner:** after input and event interfaces freeze, `src/ui/GameUi.js` and `src/styles.css`. Narrative UI work uses this same owner or begins only after release.
+6. **Sole UI owner:** after input and event interfaces freeze, `src/ui/GameUi.js` and `src/styles.css`. Bookend UI work uses this same owner or begins only after release.
 7. **QA/benchmark owner:** receives released source and owns only remaining acceptance harnesses and benchmark evidence.
 
 No parallel owner may edit `Game.js`, `GameUi.js`, settings, shared config, render/audio files, or a test file already assigned above.

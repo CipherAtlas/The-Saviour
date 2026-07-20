@@ -166,7 +166,7 @@ test("horde suppression prevents adjacent horde chambers while every fallback fa
   assert.deepEqual(observed, new Set(Object.values(ENCOUNTER_RECIPE_TYPES)));
 });
 
-test("all recipe families expose their authored batch triggers and streamed cadence in every run band", () => {
+test("all recipe families use authored remaining-enemy thresholds in every run band", () => {
   for (const floor of [2, 5, 8]) {
     for (const recipeType of Object.values(ENCOUNTER_RECIPE_TYPES)) {
       const encounter = findPlan(recipeType, { floor, room: 3 });
@@ -180,17 +180,21 @@ test("all recipe families expose their authored batch triggers and streamed cade
       } else if (recipeType === ENCOUNTER_RECIPE_TYPES.DEATH_TRIGGERED) {
         assert.ok(encounter.batches.slice(1).every((batch) => batch.trigger.type === BATCH_TRIGGER_TYPES.REMAINING));
         assert.ok(encounter.batches.slice(1).every((batch) => batch.spawnMode === BATCH_SPAWN_MODES.STREAMED));
-      } else if (recipeType === ENCOUNTER_RECIPE_TYPES.TIMED) {
-        assert.ok(encounter.batches.slice(1).every((batch) => batch.trigger.type === BATCH_TRIGGER_TYPES.TIMER));
+      } else if (recipeType === ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE) {
+        assert.ok(encounter.batches.slice(1).every((batch) => batch.trigger.type === BATCH_TRIGGER_TYPES.REMAINING));
+        assert.ok(encounter.batches.slice(1).every((batch) => (
+          batch.trigger.remainingRatio >= 0.45 && batch.trigger.remainingRatio <= 0.65
+        )));
         assert.ok(encounter.batches.some((batch) => batch.spawnMode === BATCH_SPAWN_MODES.STREAMED));
       } else {
-        assert.equal(encounter.batches[1].trigger.type, BATCH_TRIGGER_TYPES.TIMER);
+        assert.equal(encounter.batches[1].trigger.type, BATCH_TRIGGER_TYPES.REMAINING);
         assert.equal(encounter.batches.at(-1).trigger.type, BATCH_TRIGGER_TYPES.REMAINING);
+        assert.ok(encounter.batches[1].trigger.remainingRatio > encounter.batches.at(-1).trigger.remainingRatio);
         assert.equal(encounter.batches.at(-1).spawnMode, BATCH_SPAWN_MODES.STREAMED);
       }
       for (const batch of encounter.batches.slice(1)) {
-        if (batch.trigger.type !== BATCH_TRIGGER_TYPES.REMAINING) continue;
-        assert.ok(batch.trigger.remainingRatio >= 0.25 && batch.trigger.remainingRatio <= 0.35);
+        assert.equal(batch.trigger.type, BATCH_TRIGGER_TYPES.REMAINING);
+        assert.equal(Number.isFinite(batch.trigger.remainingCount), true);
       }
     }
   }
@@ -243,13 +247,13 @@ test("hordes reserve most bodies for low-threat families and use fewer specialis
   assert.ok(hordeSpecialists / hordePopulation < reinforcementSpecialists / reinforcementPopulation);
 });
 
-test("layout, room complexity, and difficulty inform deterministic batch size and cadence", () => {
-  const timed = findPlan(ENCOUNTER_RECIPE_TYPES.TIMED, { floor: 8, room: 3, layoutFamily: "openCourtyard" });
-  const seed = timed.hordeRoll;
+test("layout, room complexity, and difficulty inform deterministic batch size and pressure thresholds", () => {
+  const pressure = findPlan(ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE, { floor: 8, room: 3, layoutFamily: "openCourtyard" });
+  const seed = pressure.hordeRoll;
   let matchingSeed = null;
   for (let index = 0; index < 2_000; index += 1) {
     const candidate = plan(`LAYOUT-CADENCE-${index}`, { floor: 8, room: 3, layoutFamily: "openCourtyard" });
-    if (candidate.type === ENCOUNTER_RECIPE_TYPES.TIMED) {
+    if (candidate.type === ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE) {
       matchingSeed = `LAYOUT-CADENCE-${index}`;
       break;
     }
@@ -260,8 +264,8 @@ test("layout, room complexity, and difficulty inform deterministic batch size an
   const relaxed = plan(matchingSeed, { floor: 8, room: 3, difficultyId: "relaxed", layoutFamily: "longHall", layoutComplexity: 3 });
   const ruthless = plan(matchingSeed, { floor: 8, room: 3, difficultyId: "ruthless", layoutFamily: "longHall", layoutComplexity: 3 });
   assert.notDeepEqual(courtyard.batches.map((batch) => batch.entries.length), hall.batches.map((batch) => batch.entries.length));
-  assert.notEqual(courtyard.batches[1].trigger.atSeconds, hall.batches[1].trigger.atSeconds);
-  assert.ok(relaxed.batches[1].trigger.atSeconds > ruthless.batches[1].trigger.atSeconds);
+  assert.notEqual(courtyard.batches[1].trigger.remainingRatio, hall.batches[1].trigger.remainingRatio);
+  assert.ok(relaxed.batches[1].trigger.remainingRatio < ruthless.batches[1].trigger.remainingRatio);
   assert.ok(relaxed.totalPopulation < ruthless.totalPopulation);
 });
 

@@ -98,7 +98,7 @@ test("adjacent reinforcement placement preserves the response window without col
   assert.equal(isCircleWalkable(generated, point, radius + 0.08), true);
 });
 
-test("timed reinforcements spawn while the player remains outside every combat zone", () => {
+test("kill-threshold reinforcements spawn immediately while the player remains outside every combat zone", () => {
   const generated = generateArena({ seed: "VERTICAL-SLICE-L", floor: 4, room: 2 });
   const events = [];
   const director = new EnemyDirector((type, detail) => events.push({ type, detail }));
@@ -118,22 +118,34 @@ test("timed reinforcements spawn while the player remains outside every combat z
     Math.hypot(player.position.x - zone.x, player.position.z - zone.z) > zone.radius
   )));
 
-  const timedBatch = director.encounterPlan.batches.find((batch) => batch.trigger.type === "timer");
-  assert.ok(timedBatch);
+  const reinforcementBatch = director.encounterPlan.batches[1];
+  assert.equal(reinforcementBatch.trigger.type, "remaining");
+  const sourceBatch = director.encounterPlan.batches[0];
+  const killsToTrigger = sourceBatch.entries.length - reinforcementBatch.trigger.remainingCount;
+  director.update(ENEMY_EMERGENCE.durationSeconds, player, () => {});
   const initialEnemyCount = director.enemies.length;
-  director.update(timedBatch.trigger.atSeconds, player, () => {});
+  director.update(10, player, () => {});
+  assert.equal(director.enemies.length, initialEnemyCount);
+  for (const enemy of director.enemies.slice(0, killsToTrigger)) {
+    director.resolveCombatHit(enemy, {
+      damage: enemy.maxHealth * 3,
+      direction: { x: 1, z: 0 },
+      knockback: 0,
+      poiseDamage: 0,
+    });
+  }
 
   assert.deepEqual(player.position, generated.playerSpawn);
   assert.ok(director.enemies.length > initialEnemyCount);
   assert.ok(events.some(({ type, detail }) => (
-    type === "encounterBatchTriggered" && detail.batchId === timedBatch.id
+    type === "encounterBatchTriggered" && detail.batchId === reinforcementBatch.id
   )));
   assert.ok(events.some(({ type, detail }) => (
-    type === "enemyEmergenceStarted" && detail.batchId === timedBatch.id
+    type === "enemyEmergenceStarted" && detail.batchId === reinforcementBatch.id
   )));
 });
 
-test("runtime scheduler prevents premature clear while a timed reserve is pending", () => {
+test("clearing the current field releases the next reserve without an empty delay", () => {
   const generated = generateArena({ seed: "VERTICAL-SLICE-L", floor: 4, room: 2 });
   const director = new EnemyDirector(() => {});
   director.reset({
@@ -145,19 +157,21 @@ test("runtime scheduler prevents premature clear while a timed reserve is pendin
   });
   const player = { position: { ...generated.playerSpawn }, previousPosition: { ...generated.playerSpawn }, radius: 0.58 };
   director.update(ENEMY_EMERGENCE.durationSeconds, player, () => {});
-  for (const enemy of [...director.enemies]) {
+  const initialEnemies = [...director.enemies];
+  for (const enemy of initialEnemies) {
     if (!director.isEnemyInteractive(enemy)) continue;
     director.resolveCombatHit(enemy, {
-      damage: enemy.maxHealth,
+      damage: enemy.maxHealth * 3,
       direction: { x: 1, z: 0 },
       knockback: 0,
       poiseDamage: 0,
     });
   }
-  assert.equal(director.encounterPlan.type, "timed");
-  assert.equal(director.hasLivingEnemies(), false);
+  assert.equal(director.encounterPlan.type, "populationPressure");
+  assert.ok(director.enemies.length > initialEnemies.length);
+  assert.equal(director.hasLivingEnemies(), true);
   assert.equal(director.hasCombatRemaining(), true);
-  assert.ok(director.encounterScheduler.snapshot().pending > 0);
+  assert.ok(director.encounterScheduler.snapshot().spawning > 0);
 });
 
 test("direct projectiles despawn at the actual concave silhouette instead of crossing exterior void", () => {

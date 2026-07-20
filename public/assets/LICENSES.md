@@ -23,38 +23,64 @@ Required attribution:
 | `assets/audio/music/death-of-kings.mp3` | [Death of Kings](https://incompetech.com/music/royalty-free/index.html?Search=Search&isrc=USUAN1100876) | `0e0963879464247de91dd78727f2007656af85ba8b8ead706b9b5d9eb1b56c7e` |
 | `assets/audio/music/unlight.mp3` | [Unlight](https://incompetech.com/music/royalty-free/index.html?Search=Search&isrc=USUAN1100878) | `5f3c118a4786eb39e9749c1f1f6f72f7712bd22f93b11b804f20e66139b2301b` |
 
-## Project-original narrative and menu art
+## Combat sound effects — CC0 source recordings
+
+All runtime files under `assets/audio/sfx/combat/` are derivative mixes of the
+following [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/)
+recordings. Attribution is not legally required, but the creators and source
+pages are retained here for provenance.
+
+| Source collection | Creator | Used for |
+|---|---|---|
+| [Swish — bamboo stick weapon swooshes](https://opengameart.org/content/swish-bamboo-stick-weapon-swhoshes) | qubodup | Player combo, Q, Grave Line, Claim, and enemy movement layers |
+| [Swishes Sound Pack](https://opengameart.org/content/swishes-sound-pack) | artisticdude | Player dash variations |
+| [Battle Sound Effects](https://opengameart.org/content/battle-sound-effects) | artisticdude, submitted by Ogrebane | Physical Q, Grave Line, and Claim blade movement |
+| [Air whoosh](https://opengameart.org/content/air-whoosh) | pyranostudios | Q and Grave Line charge beds |
+| [Erase / Escape](https://opengameart.org/content/erase-escape) | Fupi | Claim recall air layer |
+| [Wood and Metal Sound Effects: Volume 2](https://opengameart.org/content/wood-and-metal-sound-effects-volume-2) | Ogrebane | Q, Grave Line, Claim catch, and cleave contact layers |
+| [20 Sword Sound Effects](https://opengameart.org/content/20-sword-sound-effects-attacks-and-clashes) | StarNinjas | Scythe impact, enemy blade, shield, and Queen attack layers |
+| [RPG Sound Pack](https://opengameart.org/content/rpg-sound-pack) | artisticdude | Monster, heavy enemy, Grave Line blade scrape, and impact layers |
+| [Spell sounds](https://opengameart.org/content/spell-sounds) | Augmentality (Brandon Morris), submitted by HaelDB | Hexer, Wraith, Bombardier, and Queen magic layers |
+
+Runtime derivatives were cropped from individual takes or larger source files,
+silence-trimmed, equalized, filtered, compressed, layered where appropriate,
+faded, and peak-matched. Some return and charge textures were reversed. The two
+Bombardier explosions also contain project-created filtered noise and sine
+layers. Final delivery files are 44.1 kHz stereo MP3s encoded for low-latency web
+playback; no unmodified source recording is distributed.
+
+## Project-original title, bookend, and gameplay UI art
 
 - Creator: project production team
 - Creation date: 2026-07-18
-- Source references: the approved in-repository concept and representative-scene direction under `docs/art-samples/`; canonical selections are Zephyr C/right, Elowen A/left, and Witch B/center
+- Source references: the approved in-repository concept and representative-scene direction under `docs/art-samples/`; retained character selections are Zephyr C and Elowen A
 - Rights basis: project-original production; no external source art or third-party attribution dependency
 - Modifications: character exports use transparent alpha-matte cleanup; backgrounds are opaque native-resolution exports
 - Attribution requirement: none
 
-### Current character production inventory — 26 PNGs
+### Gameplay UI framework
 
-The following list is the complete file coverage of `assets/vn/characters/*.png` on 2026-07-18. All 26 files use the common project-original record above.
+- `assets/ui/upgrade-scythe-dial-framework.png`: project-original scythe-dial framework retained for the Technique Oath overlay; derived from the approved in-project visual direction and used behind live interface text and controls
+- `assets/ui/upgrade-scythe-dial-background.png`: project-original static dial background, generated from the approved framework with the three interactive blade stations removed so the stations can animate independently
+- `assets/ui/upgrade-option-reaper-sprite.png`, `assets/ui/upgrade-option-shade-sprite.png`, `assets/ui/upgrade-option-grave-sprite.png`: project-original transparent interactive blade, medallion, and selector layers extracted from the approved scythe-dial direction
+- `assets/ui/upgrade-option-reaper-stud.png`, `assets/ui/upgrade-option-shade-stud.png`, `assets/ui/upgrade-option-grave-stud.png`: project-original isolated selector artwork used for the direct gold, cyan, and violet hover/focus illumination
 
-- Zephyr C/right (8): `zephyr-c-affectionate.png`, `zephyr-c-alarmed.png`, `zephyr-c-calm.png`, `zephyr-c-devastated.png`, `zephyr-c-doubtful.png`, `zephyr-c-enraged.png`, `zephyr-c-injured.png`, `zephyr-c-resolved.png`
-- Elowen A/left (14): `elowen-a-affectionate.png`, `elowen-a-commanding.png`, `elowen-a-corrupt-1.png`, `elowen-a-corrupt-2.png`, `elowen-a-corrupt-3.png`, `elowen-a-corrupt-4.png`, `elowen-a-corrupt-full.png`, `elowen-a-final-plea.png`, `elowen-a-frightened.png`, `elowen-a-human.png`, `elowen-a-lucid.png`, `elowen-a-possessive.png`, `elowen-a-strained.png`, `elowen-a-triumphant.png`
-- Witch B/center (4): `witch-b-acceptance.png`, `witch-b-combat.png`, `witch-b-observing.png`, `witch-b-wounded.png`
+### Retained VN and title inventory — 21 PNGs
 
-### Current narrative-background production inventory — 41 PNGs
+All retained files are runtime-used title, opening, boss-confrontation, ending,
+or Elowen world-actor art. The unused floor, biome, and expression inventory was
+removed on 2026-07-20; the approved Witch set and containment-heart background
+were restored when the boss confrontation returned to the product flow.
 
-The following list is the complete file coverage of `assets/vn/backgrounds/*.png` on 2026-07-18. All 41 files use the common project-original record above.
+- Zephyr (3): `assets/vn/zephyr-c-determined.png`, `assets/vn/characters/zephyr-c-alarmed.png`, `assets/vn/characters/zephyr-c-devastated.png`
+- Elowen (5): `assets/vn/characters/elowen-a-corrupt-full.png`, `assets/vn/characters/elowen-a-final-plea.png`, `assets/vn/characters/elowen-a-human.png`, `assets/vn/characters/elowen-a-lucid.png`, `assets/vn/characters/elowen-a-triumphant.png`
+- Witch (5): `assets/vn/witch-b-clinical.png`, `assets/vn/witch-b-containment-gesture.png`, `assets/vn/characters/witch-b-acceptance.png`, `assets/vn/characters/witch-b-combat.png`, `assets/vn/characters/witch-b-wounded.png`
+- Backgrounds (8): `assets/vn/backgrounds/containment-heart.png`, `assets/vn/backgrounds/containment-heart-broken.png`, `assets/vn/backgrounds/dungeon-threshold.png`, `assets/vn/backgrounds/prison-collapse-quiet.png`, `assets/vn/backgrounds/prison-collapse-violent.png`, `assets/vn/backgrounds/prison-open-unstable.png`, `assets/vn/backgrounds/ring-void.png`, `assets/vn/backgrounds/witch-domain-approach.png`
 
-- Thresholds and approaches (11): `abyss-threshold-soft.png`, `catacomb-threshold-soft.png`, `charnel-threshold-soft.png`, `crypt-threshold-soft.png`, `depths-threshold-soft.png`, `dungeon-threshold.png`, `ossuary-threshold-soft.png`, `ruins-threshold-soft.png`, `sanctum-threshold-soft.png`, `vault-threshold-soft.png`, `witch-domain-approach.png`
-- Biome and chamber plates (20): `biome-abyss-graded.png`, `biome-abyss-soft.png`, `biome-catacomb-graded.png`, `biome-catacomb-soft.png`, `biome-charnel-graded.png`, `biome-charnel-soft.png`, `biome-containment-graded.png`, `biome-containment-soft.png`, `biome-crypt-graded.png`, `biome-crypt-soft.png`, `depths-graded.png`, `depths-soft.png`, `ossuary-graded.png`, `ossuary-soft.png`, `ruins-graded.png`, `ruins-soft.png`, `sanctum-graded.png`, `sanctum-soft.png`, `vault-graded.png`, `vault-soft.png`
-- Story and ending plates (10): `containment-antechamber-soft.png`, `containment-heart-broken.png`, `containment-heart.png`, `prison-collapse-quiet.png`, `prison-collapse-violent.png`, `prison-open-unstable.png`, `ring-void.png`, `royal-armory-morning.png`, `royal-chamber-dawn.png`, `royal-study-evening.png`
+### Retained blocked menu candidates
 
-The group labels above are organizational only; the filenames are authoritative. The count is 11 threshold/approach files + 20 biome/chamber files + 10 story/ending files = 41.
-
-### Earlier Wave 2 production records — 6 PNGs
-
-- Accepted and runtime-referenced: `assets/vn/zephyr-c-determined.png`, `assets/vn/witch-b-clinical.png`, `assets/vn/witch-b-containment-gesture.png`
-- Retained, unreferenced visual candidates: `assets/vn/floor01-witch-projection-bg.png` and `assets/menu/title-bg-01.png`; both remain below the original layered 1920×1080 master gate and are not release masters
-- Retained, unreferenced blocked candidate: `assets/menu/zephyr-c-title.png`; its alpha-edge contamination was not accepted and it must not be runtime-loaded
+- `assets/menu/title-bg-01.png` remains an unreferenced rejected title candidate.
+- `assets/menu/zephyr-c-title.png` remains an unreferenced rejected character candidate with unaccepted alpha edges.
 
 ### Retained legacy WebPs with unknown provenance
 

@@ -1,13 +1,12 @@
 export const ENCOUNTER_RECIPE_TYPES = Object.freeze({
   HORDE: "horde",
   DEATH_TRIGGERED: "deathTriggered",
-  TIMED: "timed",
+  POPULATION_PRESSURE: "populationPressure",
   HYBRID: "hybrid",
 });
 
 export const BATCH_TRIGGER_TYPES = Object.freeze({
   INITIAL: "initial",
-  TIMER: "timer",
   REMAINING: "remaining",
 });
 
@@ -49,9 +48,6 @@ function positiveInteger(value, label) {
 export function createBatchTrigger(trigger) {
   if (!trigger || !TRIGGER_TYPE_SET.has(trigger.type)) throw new TypeError("Encounter batches require a supported trigger type.");
   if (trigger.type === BATCH_TRIGGER_TYPES.INITIAL) return Object.freeze({ type: trigger.type });
-  if (trigger.type === BATCH_TRIGGER_TYPES.TIMER) {
-    return Object.freeze({ type: trigger.type, atSeconds: finiteNonNegative(trigger.atSeconds, "Timer trigger time") });
-  }
   const remainingCount = trigger.remainingCount == null ? null : finiteNonNegative(trigger.remainingCount, "Remaining trigger count");
   const remainingRatio = trigger.remainingRatio == null ? null : finiteNonNegative(trigger.remainingRatio, "Remaining trigger ratio");
   if (remainingCount === null && remainingRatio === null) throw new TypeError("Remaining triggers require a count or ratio threshold.");

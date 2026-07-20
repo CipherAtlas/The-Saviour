@@ -2,7 +2,10 @@
   <img src="public/assets/branding/the-saviour-primary.png" alt="The Saviour — Descend for her." width="100%">
 </p>
 
-Princess Elowen is missing. Guided by the bond between their paired rings, Prince Zephyr takes up his scythe and descends into the dark beneath the kingdom. Ten floors, an ancient Witch, and a final choice stand between him and the woman he refuses to abandon.
+**Ten floors into the dark. One princess to bring home.**<br>
+Browser action roguelite · Three.js · Keyboard, mouse, controller, and touch
+
+Princess Elowen has vanished beneath the kingdom. Guided by the pull of their paired rings, Prince Zephyr follows with scythe in hand. To reach her, he must fight through ten ever-changing floors, forge a powerful build, and survive whatever waits in the depths.
 
 ## The descent
 
@@ -13,7 +16,7 @@ Every run is a fast, build-driven journey through ten increasingly dangerous flo
 - On floors 1–5, swear one of three Oaths for a new core technique.
 - On floors 6–9, master one of your five owned Oaths to Rank II.
 - Adapt to new biomes, enemy combinations, and volatile variants.
-- Reach the final chamber, defeat the Witch, and decide how the story ends.
+- Reach the depths and face what waits there.
 
 Choose **New Descent** for the complete story with your preferred difficulty, or **Speedrun** for a fixed Ruthless run with a dedicated timer and separate records.
 
@@ -37,7 +40,6 @@ Stay aggressive to build **Harvest** through close-range hits, critical strikes,
 | Aim | Mouse |
 | Dash | `Shift`, `Space`, or `Right Mouse` |
 | Enter the next chamber | Walk into the center portal |
-| Act during the final decision | `Left Mouse` or `E` |
 | Navigate menus | `WASD` or arrow keys; `Space`, `Enter`, or `E` to select |
 | Pause | `Escape` |
 

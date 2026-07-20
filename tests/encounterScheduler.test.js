@@ -43,31 +43,31 @@ test("a ceiling-sized horde emerges together and cannot be killed during its war
   assert.ok(active.enemies.every((enemy) => enemy.interactive));
 });
 
-test("slow kills let timed pressure overlap without exceeding the population cap", () => {
+test("elapsed time alone cannot release population pressure, while fast kills release it immediately", () => {
   const scheduler = new EncounterScheduler(recipe({
-    id: "timed-overlap",
-    type: ENCOUNTER_RECIPE_TYPES.TIMED,
+    id: "population-pressure",
+    type: ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE,
     cap: 4,
     batches: [
       { id: "initial", trigger: { type: BATCH_TRIGGER_TYPES.INITIAL }, entries: entries(3) },
-      { id: "timer", trigger: { type: BATCH_TRIGGER_TYPES.TIMER, atSeconds: 1 }, entries: entries(3, "reaver") },
+      { id: "reserve", trigger: { type: BATCH_TRIGGER_TYPES.REMAINING, remainingCount: 1 }, entries: entries(3, "reaver") },
     ],
   }));
 
-  scheduler.advance(1);
+  scheduler.advance(30);
   let state = scheduler.snapshot();
   assert.equal(state.alive, 3);
-  assert.equal(state.spawning, 1);
-  assert.equal(state.pending, 2);
-  assert.equal(state.batches[1].triggeredAtSeconds, 1);
-  assert.equal(state.maximumSimultaneous, 4);
+  assert.equal(state.spawning, 0);
+  assert.equal(state.pending, 3);
+  assert.equal(state.batches[1].triggeredAtSeconds, null);
+  assert.equal(state.maximumSimultaneous, 3);
 
-  scheduler.advance(ENEMY_EMERGENCE.durationSeconds);
   scheduler.kill(2);
   state = scheduler.snapshot();
-  assert.equal(state.alive, 2);
-  assert.equal(state.spawning, 2);
+  assert.equal(state.alive, 1);
+  assert.equal(state.spawning, 3);
   assert.equal(state.pending, 0);
+  assert.equal(state.batches[1].triggeredAtSeconds, 30);
   assert.equal(state.maximumSimultaneous, 4);
 });
 
@@ -97,7 +97,7 @@ test("fast kills release a death-triggered reserve at the preceding batch thresh
   assert.equal(triggered.spawning, 4);
 });
 
-test("hybrid streaming preserves cadence and its final reserve waits for stream deaths", () => {
+test("hybrid streaming starts from a kill threshold and its final reserve waits for stream deaths", () => {
   const scheduler = new EncounterScheduler(recipe({
     id: "streamed-hybrid",
     type: ENCOUNTER_RECIPE_TYPES.HYBRID,
@@ -106,7 +106,7 @@ test("hybrid streaming preserves cadence and its final reserve waits for stream 
       { id: "initial", trigger: { type: BATCH_TRIGGER_TYPES.INITIAL }, entries: entries(2) },
       {
         id: "surge",
-        trigger: { type: BATCH_TRIGGER_TYPES.TIMER, atSeconds: 1 },
+        trigger: { type: BATCH_TRIGGER_TYPES.REMAINING, remainingCount: 1 },
         spawnMode: BATCH_SPAWN_MODES.STREAMED,
         streamIntervalSeconds: 0.2,
         entries: entries(3, "wraith"),
@@ -119,7 +119,9 @@ test("hybrid streaming preserves cadence and its final reserve waits for stream 
     ],
   }));
 
-  scheduler.advance(1);
+  scheduler.advance(ENEMY_EMERGENCE.durationSeconds);
+  assert.equal(scheduler.snapshot().batches[1].status, "pending");
+  scheduler.kill(1);
   assert.equal(scheduler.snapshot().batches[1].spawned, 1);
   scheduler.advance(0.19);
   assert.equal(scheduler.snapshot().batches[1].spawned, 1);
@@ -137,14 +139,14 @@ test("hybrid streaming preserves cadence and its final reserve waits for stream 
   assert.equal(scheduler.snapshot().batches[2].status, "released");
 });
 
-test("an encounter cannot clear while any enemy is pending, emerging, or alive", () => {
+test("an encounter cannot clear while a kill-released reserve is emerging or alive", () => {
   const scheduler = new EncounterScheduler(recipe({
     id: "clear-guard",
-    type: ENCOUNTER_RECIPE_TYPES.TIMED,
+    type: ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE,
     cap: 2,
     batches: [
       { id: "initial", trigger: { type: BATCH_TRIGGER_TYPES.INITIAL }, entries: entries(1) },
-      { id: "timer", trigger: { type: BATCH_TRIGGER_TYPES.TIMER, atSeconds: 3 }, entries: entries(1) },
+      { id: "reserve", trigger: { type: BATCH_TRIGGER_TYPES.REMAINING, remainingCount: 0 }, entries: entries(1) },
     ],
   }));
 
@@ -152,11 +154,10 @@ test("an encounter cannot clear while any enemy is pending, emerging, or alive",
   scheduler.advance(ENEMY_EMERGENCE.durationSeconds);
   scheduler.kill(1);
   assert.equal(scheduler.snapshot().alive, 0);
-  assert.equal(scheduler.snapshot().pending, 1);
+  assert.equal(scheduler.snapshot().spawning, 1);
+  assert.equal(scheduler.snapshot().pending, 0);
   assert.equal(scheduler.isClear(), false);
 
-  scheduler.advance(3 - ENEMY_EMERGENCE.durationSeconds);
-  assert.equal(scheduler.isClear(), false);
   scheduler.advance(ENEMY_EMERGENCE.durationSeconds);
   scheduler.kill(1);
   assert.equal(scheduler.isClear(), true);
@@ -166,7 +167,7 @@ test("an encounter cannot clear while any enemy is pending, emerging, or alive",
 test("origin cancellation removes both emerging and pending entries without stranding the recipe", () => {
   const scheduler = new EncounterScheduler(recipe({
     id: "origin-cancellation",
-    type: ENCOUNTER_RECIPE_TYPES.TIMED,
+    type: ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE,
     cap: 4,
     batches: [
       {
@@ -175,17 +176,17 @@ test("origin cancellation removes both emerging and pending entries without stra
         entries: [{ type: "thrall", origin: "stable" }, { type: "reaver", origin: "volatile" }],
       },
       {
-        id: "timer",
-        trigger: { type: BATCH_TRIGGER_TYPES.TIMER, atSeconds: 1 },
+        id: "reserve",
+        trigger: { type: BATCH_TRIGGER_TYPES.REMAINING, remainingCount: 1 },
         entries: [{ type: "hexer", origin: "stable" }, { type: "wraith", origin: "volatile" }],
       },
     ],
   }));
 
   assert.equal(scheduler.cancelWhere((entry) => entry.origin === "stable", "originDismissed"), 2);
-  assert.equal(scheduler.snapshot().spawning, 1);
-  assert.equal(scheduler.snapshot().pending, 1);
-  scheduler.advance(1 + ENEMY_EMERGENCE.durationSeconds);
+  assert.equal(scheduler.snapshot().spawning, 2);
+  assert.equal(scheduler.snapshot().pending, 0);
+  scheduler.advance(ENEMY_EMERGENCE.durationSeconds);
   assert.deepEqual(
     scheduler.snapshot().enemies.filter((enemy) => enemy.interactive).map((enemy) => enemy.type),
     ["reaver", "wraith"],

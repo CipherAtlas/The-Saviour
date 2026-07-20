@@ -202,7 +202,6 @@ export class EnemyDirector {
     this.encounterScheduler = null;
     this.schedulerEnemyActors = new Map();
     this.pendingWaves = [];
-    this.waveDelay = 0;
     this.encounterFloor = 1;
     this.queenPatternState = null;
     this.stableOriginDismissed = false;
@@ -224,7 +223,6 @@ export class EnemyDirector {
     this.encounterScheduler = null;
     this.schedulerEnemyActors.clear();
     this.pendingWaves.length = 0;
-    this.waveDelay = 0;
     this.queenPatternState = createQueenPatternState(rng.fork("queen-patterns"));
     this.stableOriginDismissed = false;
     this.currentPlayer = null;
@@ -378,7 +376,7 @@ export class EnemyDirector {
 
   update(dt, player, resolvePlayerDamage) {
     this.currentPlayer = player;
-    // Encounter triggers are intentionally time/defeat driven; player position only repairs overlap at placement.
+    // Reinforcement triggers are defeat-driven; player position only repairs overlap at placement.
     this.encounterScheduler?.advance(dt);
     for (const enemy of this.enemies) {
       if (!enemy.active || enemy.lifecycleManagedByScheduler || enemy.lifecycle.state !== ENEMY_LIFECYCLE_STATES.EMERGING) continue;
@@ -2014,7 +2012,6 @@ export class EnemyDirector {
     this.encounterScheduler = null;
     this.schedulerEnemyActors.clear();
     this.pendingWaves.length = 0;
-    this.waveDelay = 0;
     for (let index = 0; index < count; index += 1) {
       const angle = (index / count) * Math.PI * 2;
       const radius = 6 + (index % 4) * 1.3;

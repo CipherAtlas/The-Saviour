@@ -83,33 +83,33 @@ const SPECIALIST_TYPES = new Set(SPECIALIST_ARCHETYPE_IDS);
 const FALLBACK_RECIPE_WEIGHTS = Object.freeze({
   [ENCOUNTER_BANDS.EARLY]: Object.freeze([
     Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.DEATH_TRIGGERED, weight: 46 }),
-    Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.TIMED, weight: 36 }),
+    Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE, weight: 36 }),
     Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.HYBRID, weight: 18 }),
   ]),
   [ENCOUNTER_BANDS.MIDDLE]: Object.freeze([
     Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.DEATH_TRIGGERED, weight: 36 }),
-    Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.TIMED, weight: 34 }),
+    Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE, weight: 34 }),
     Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.HYBRID, weight: 30 }),
   ]),
   [ENCOUNTER_BANDS.LATE]: Object.freeze([
     Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.DEATH_TRIGGERED, weight: 28 }),
-    Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.TIMED, weight: 30 }),
+    Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE, weight: 30 }),
     Object.freeze({ value: ENCOUNTER_RECIPE_TYPES.HYBRID, weight: 42 }),
   ]),
 });
 
 const LAYOUT_PACING = Object.freeze({
-  opencourtyard: Object.freeze({ cadence: 0.96, initialBatchBias: 1 }),
-  courtyard: Object.freeze({ cadence: 0.96, initialBatchBias: 1 }),
-  longhall: Object.freeze({ cadence: 0.92, initialBatchBias: -1 }),
-  lshape: Object.freeze({ cadence: 1.04, initialBatchBias: 0 }),
-  tshape: Object.freeze({ cadence: 1, initialBatchBias: 0 }),
-  cruciform: Object.freeze({ cadence: 0.94, initialBatchBias: 1 }),
-  hourglass: Object.freeze({ cadence: 1.08, initialBatchBias: 0 }),
-  offsettwinchambers: Object.freeze({ cadence: 0.9, initialBatchBias: -1 }),
-  twinchambers: Object.freeze({ cadence: 0.9, initialBatchBias: -1 }),
-  brokenringcourt: Object.freeze({ cadence: 1.02, initialBatchBias: 0 }),
-  brokenring: Object.freeze({ cadence: 1.02, initialBatchBias: 0 }),
+  opencourtyard: Object.freeze({ overlapBias: 0.01, initialBatchBias: 1 }),
+  courtyard: Object.freeze({ overlapBias: 0.01, initialBatchBias: 1 }),
+  longhall: Object.freeze({ overlapBias: 0.03, initialBatchBias: -1 }),
+  lshape: Object.freeze({ overlapBias: -0.02, initialBatchBias: 0 }),
+  tshape: Object.freeze({ overlapBias: 0, initialBatchBias: 0 }),
+  cruciform: Object.freeze({ overlapBias: 0.02, initialBatchBias: 1 }),
+  hourglass: Object.freeze({ overlapBias: -0.03, initialBatchBias: 0 }),
+  offsettwinchambers: Object.freeze({ overlapBias: 0.04, initialBatchBias: -1 }),
+  twinchambers: Object.freeze({ overlapBias: 0.04, initialBatchBias: -1 }),
+  brokenringcourt: Object.freeze({ overlapBias: -0.01, initialBatchBias: 0 }),
+  brokenring: Object.freeze({ overlapBias: -0.01, initialBatchBias: 0 }),
 });
 
 function validateLocation(floor, room) {
@@ -134,7 +134,7 @@ function normalizedLayoutKey(layoutFamily) {
 
 function resolveLayoutContext(layoutFamily, layout) {
   const family = layoutFamily ?? layout?.layoutFamily ?? layout?.family ?? layout?.id ?? "unknown";
-  const authored = LAYOUT_PACING[normalizedLayoutKey(family)] ?? { cadence: 1, initialBatchBias: 0 };
+  const authored = LAYOUT_PACING[normalizedLayoutKey(family)] ?? { overlapBias: 0, initialBatchBias: 0 };
   const regionCount = Array.isArray(layout?.combatZones)
     ? layout.combatZones.length
     : (Array.isArray(layout?.combatRegions)
@@ -145,7 +145,7 @@ function resolveLayoutContext(layoutFamily, layout) {
   const areaBias = Number.isFinite(walkableArea) && walkableArea >= 1_800 ? 1 : 0;
   return Object.freeze({
     family: String(family),
-    cadence: authored.cadence * (regionCount > 1 ? 0.96 : 1) * (1 - (complexity - 1) * 0.02),
+    overlapBias: clamp(authored.overlapBias + (regionCount > 1 ? 0.01 : 0) + (complexity - 1) * 0.01, -0.05, 0.06),
     initialBatchBias: clamp(authored.initialBatchBias + areaBias - (complexity === 3 ? 1 : 0), -1, 1),
   });
 }
@@ -434,37 +434,39 @@ function assignOrigins(types, floor, room, rng) {
   }));
 }
 
-function timingFor({ band, room, difficulty, layoutContext }) {
-  const baseCadence = {
-    [ENCOUNTER_BANDS.EARLY]: 7.8,
-    [ENCOUNTER_BANDS.MIDDLE]: 6,
-    [ENCOUNTER_BANDS.LATE]: 4.7,
-  }[band];
+function pacingFor({ band, room, difficulty, layoutContext }) {
   const difficultyCadence = { relaxed: 1.1, standard: 1, ruthless: 0.9 }[difficulty.id] ?? 1;
-  const cadence = baseCadence * (1 - (room - 1) * 0.06) * difficultyCadence * layoutContext.cadence;
   const streamInterval = {
     [ENCOUNTER_BANDS.EARLY]: 0.24,
     [ENCOUNTER_BANDS.MIDDLE]: 0.18,
     [ENCOUNTER_BANDS.LATE]: 0.13,
   }[band] * difficultyCadence;
-  const remainingRatio = clamp({
+  const attritionRemainingRatio = clamp({
     [ENCOUNTER_BANDS.EARLY]: 0.35,
     [ENCOUNTER_BANDS.MIDDLE]: 0.3,
     [ENCOUNTER_BANDS.LATE]: 0.25,
   }[band] + (room === 1 ? 0.02 : 0), 0.25, 0.35);
-  return { cadence, streamInterval, remainingRatio };
+  const difficultyOverlapBias = { relaxed: -0.03, standard: 0, ruthless: 0.03 }[difficulty.id] ?? 0;
+  const pressureRemainingRatio = clamp(
+    attritionRemainingRatio + 0.2 + difficultyOverlapBias + layoutContext.overlapBias,
+    0.45,
+    0.65,
+  );
+  return { attritionRemainingRatio, pressureRemainingRatio, streamInterval };
 }
 
-function batchTriggerFor(type, index, batchSizes, timing) {
+function batchTriggerFor(type, index, batchSizes, pacing) {
   if (index === 0) return { type: BATCH_TRIGGER_TYPES.INITIAL };
-  if (type === ENCOUNTER_RECIPE_TYPES.TIMED || (type === ENCOUNTER_RECIPE_TYPES.HYBRID && index === 1)) {
-    return { type: BATCH_TRIGGER_TYPES.TIMER, atSeconds: Number((timing.cadence * index).toFixed(2)) };
-  }
+  const pressureThreshold = type === ENCOUNTER_RECIPE_TYPES.POPULATION_PRESSURE
+    || (type === ENCOUNTER_RECIPE_TYPES.HYBRID && index === 1);
+  const remainingRatio = pressureThreshold
+    ? pacing.pressureRemainingRatio
+    : pacing.attritionRemainingRatio;
   const previousBatchSize = batchSizes[index - 1];
   return {
     type: BATCH_TRIGGER_TYPES.REMAINING,
-    remainingCount: Math.max(1, Math.floor(previousBatchSize * timing.remainingRatio)),
-    remainingRatio: timing.remainingRatio,
+    remainingCount: Math.max(1, Math.floor(previousBatchSize * remainingRatio)),
+    remainingRatio: Number(remainingRatio.toFixed(3)),
   };
 }
 
@@ -549,7 +551,7 @@ export function createEncounterPlan({
   );
   const flattenedTypes = distributed.batches.flat();
   const origins = assignOrigins(flattenedTypes, floor, room, rng.fork("enemy-origins"));
-  const timing = timingFor({ band, room, difficulty: difficultyProfile, layoutContext });
+  const pacing = pacingFor({ band, room, difficulty: difficultyProfile, layoutContext });
   const spawnCount = Math.max(1, spawnPoints.length);
   let rosterIndex = 0;
   const rawBatches = distributed.batches.map((types, index) => {
@@ -569,9 +571,9 @@ export function createEncounterPlan({
     });
     return {
       id: `${floor}-${room}-${selection.type}-batch-${index + 1}`,
-      trigger: batchTriggerFor(selection.type, index, batchSizes, timing),
+      trigger: batchTriggerFor(selection.type, index, batchSizes, pacing),
       spawnMode: mode,
-      streamIntervalSeconds: mode === BATCH_SPAWN_MODES.STREAMED ? Number(timing.streamInterval.toFixed(3)) : 0,
+      streamIntervalSeconds: mode === BATCH_SPAWN_MODES.STREAMED ? Number(pacing.streamInterval.toFixed(3)) : 0,
       entries,
     };
   });
@@ -582,10 +584,7 @@ export function createEncounterPlan({
     batches: rawBatches,
   });
   const allEntries = recipe.batches.flatMap((batch) => batch.entries);
-  const compatibilityWaves = Object.freeze(recipe.batches.map((batch) => Object.freeze({
-    ...batch,
-    delay: batch.index === 0 ? 0 : Math.min(0.8, timing.streamInterval + 0.42),
-  })));
+  const compatibilityWaves = Object.freeze(recipe.batches.map((batch) => Object.freeze({ ...batch })));
   return Object.freeze({
     id: recipe.id,
     floor,

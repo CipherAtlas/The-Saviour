@@ -500,7 +500,7 @@ export function summarizeRefinementBalanceSweep(scenarios) {
 
 export function auditRefinementHordeRoutes({ seedPrefix = "REFINEMENT-HORDE-ROUTE", runs = 200 } = {}) {
   if (!Number.isInteger(runs) || runs < 1) throw new RangeError("Horde route audit run count must be positive.");
-  const counts = { horde: 0, deathTriggered: 0, timed: 0, hybrid: 0 };
+  const counts = { horde: 0, deathTriggered: 0, populationPressure: 0, hybrid: 0 };
   const hordeByBand = { early: 0, middle: 0, late: 0 };
   let adjacentHordes = 0;
   let chambers = 0;

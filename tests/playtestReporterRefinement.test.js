@@ -42,7 +42,7 @@ test("refinement diagnostics retain encounter, emergence, navigation, geometry, 
     detail: {
       batchId: "surge",
       batchIndex: 1,
-      triggerType: "timer",
+      triggerType: "remaining",
       triggerTimestamp: 1.25,
       spawnMode: "streamed",
       entries: [{ type: "hexer" }, { type: "bombardier" }],
@@ -112,7 +112,7 @@ test("refinement diagnostics retain encounter, emergence, navigation, geometry, 
   assert.equal(room.population.total, 6);
   assert.equal(room.population.maximumSpawning, 2);
   assert.equal(room.population.maximumLiving, 2);
-  assert.equal(room.batchTriggers[0].triggerType, "timer");
+  assert.equal(room.batchTriggers[0].triggerType, "remaining");
   assert.equal(room.batchTriggers[0].timestamp, 1.25);
   assert.deepEqual(room.roster.origins, { stable: 4, volatile: 2 });
   assert.deepEqual(room.roster.specialistMaxima, { hexer: 1, bombardier: 1 });
@@ -158,7 +158,7 @@ test("scoped director diagnostics emitted before arenaChanged attach to the inco
   const reporter = new PlaytestReporter();
   reporter.recordEvent({
     type: "encounterStarted",
-    detail: { floor: 4, room: 2, recipeId: "queued-timed", recipeType: "timed", totalPopulation: 9 },
+    detail: { floor: 4, room: 2, recipeId: "queued-pressure", recipeType: "populationPressure", totalPopulation: 9 },
   });
   reporter.recordEvent({
     type: "encounterBatchTriggered",
@@ -171,7 +171,7 @@ test("scoped director diagnostics emitted before arenaChanged attach to the inco
   reporter.recordEvent({ type: "arenaChanged", detail: { floor: 4, room: 2, arena: { layoutFamily: "tShape" } } });
 
   const room = reporter.finalize().progression.rooms[0];
-  assert.equal(room.recipeType, "timed");
+  assert.equal(room.recipeType, "populationPressure");
   assert.equal(room.population.total, 9);
   assert.equal(room.population.spawning, 1);
   assert.equal(room.batchTriggers[0].triggerType, "initial");

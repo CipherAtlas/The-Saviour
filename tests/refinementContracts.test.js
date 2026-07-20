@@ -53,7 +53,7 @@ test("encounter recipe batches and emergence state use a closed shared contract"
       { id: "initial", trigger: { type: BATCH_TRIGGER_TYPES.INITIAL }, entries: [{ type: "thrall" }] },
       {
         id: "surge",
-        trigger: { type: BATCH_TRIGGER_TYPES.TIMER, atSeconds: 2.5 },
+        trigger: { type: BATCH_TRIGGER_TYPES.REMAINING, remainingRatio: 0.6 },
         spawnMode: BATCH_SPAWN_MODES.STREAMED,
         streamIntervalSeconds: 0.18,
         entries: [{ type: "reaver" }, { type: "hexer" }],

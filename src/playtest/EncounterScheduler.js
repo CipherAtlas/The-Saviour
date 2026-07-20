@@ -61,7 +61,7 @@ function lifecycleSnapshot(enemy) {
 
 /**
  * Rendering-free encounter lifecycle simulator. It intentionally models only
- * recipe timing, population pressure, emergence, and direct deterministic kills.
+ * population pressure, emergence timing, and direct deterministic kills.
  */
 export class EncounterScheduler {
   constructor(recipe, {
@@ -277,9 +277,6 @@ export class EncounterScheduler {
       next = Math.min(next, enemy.lifecycle.startedAtSeconds + ENEMY_EMERGENCE.durationSeconds);
     }
     for (const state of this.batchStates) {
-      if (state.status === "pending" && state.batch.trigger.type === BATCH_TRIGGER_TYPES.TIMER) {
-        next = Math.min(next, state.batch.trigger.atSeconds);
-      }
       if (
         state.status === "triggered"
         && state.batch.spawnMode === BATCH_SPAWN_MODES.STREAMED
@@ -294,9 +291,6 @@ export class EncounterScheduler {
     const state = this.batchStates[index];
     const trigger = state.batch.trigger;
     if (trigger.type === BATCH_TRIGGER_TYPES.INITIAL) return index === 0;
-    if (trigger.type === BATCH_TRIGGER_TYPES.TIMER) {
-      return this.elapsedSeconds + EPSILON >= trigger.atSeconds;
-    }
     if (trigger.type !== BATCH_TRIGGER_TYPES.REMAINING || index === 0) return false;
 
     const source = this.batchStates[index - 1];
