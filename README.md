@@ -2,13 +2,6 @@
   <img src="public/assets/branding/the-saviour-primary.png" alt="The Saviour — Descend for her." width="100%">
 </p>
 
-<p align="center">
-  <strong>A ten-floor descent. A missing princess. Five seconds to choose.</strong><br>
-  Browser action roguelite · Three.js · Keyboard, mouse, controller, and touch
-</p>
-
----
-
 Princess Elowen is missing. Guided by the bond between their paired rings, Prince Zephyr takes up his scythe and descends into the dark beneath the kingdom. Ten floors, an ancient Witch, and a final choice stand between him and the woman he refuses to abandon.
 
 ## The descent
