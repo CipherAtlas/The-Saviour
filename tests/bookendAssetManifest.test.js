@@ -20,7 +20,10 @@ test("bookend asset lookup is closed and immutable", () => {
   assert.ok(Object.isFrozen(BOOKEND_BACKGROUND_ASSETS));
   assert.ok(Object.isFrozen(BOOKEND_CHARACTER_ASSETS));
   assert.equal(bookendBackgroundAsset("ring-void").id, "ring-void");
+  assert.equal(bookendBackgroundAsset("containment-heart").id, "containment-heart");
   assert.equal(bookendCharacterAsset("prince.determined").characterId, "prince");
+  assert.equal(bookendCharacterAsset("witch.wounded").characterId, "witch");
+  assert.equal(bookendCharacterAsset("princess.human").characterId, "princess");
   assert.throws(() => bookendBackgroundAsset("missing"), RangeError);
   assert.throws(() => bookendCharacterAsset("missing"), RangeError);
 });

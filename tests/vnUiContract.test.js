@@ -19,9 +19,13 @@ test("bookends retain the full-screen layered VN presentation", () => {
 });
 
 test("bookends expose one accessible Continue action and no reader subsystem", () => {
+  const bookendStart = uiSource.indexOf('data-screen="bookend"');
+  const bookendEnd = uiSource.indexOf('data-screen="blessing"', bookendStart);
+  const bookendMarkup = uiSource.slice(bookendStart, bookendEnd);
   assert.match(uiSource, /data-action="bookend-continue"/);
   assert.match(uiSource, /data-bookend="input-hint"/);
-  assert.doesNotMatch(uiSource, /dialogue-auto|dialogue-backlog|dialogue-fast-forward|dialogue-skip|glossary/i);
+  assert.doesNotMatch(uiSource, /dialogue-auto|dialogue-backlog|dialogue-fast-forward|dialogue-skip/i);
+  assert.doesNotMatch(bookendMarkup, /glossary/i);
   assert.match(mainSource, /game\.continueBookend\(\)/);
   assert.match(mainSource, /consumePressed\("attack"\)/);
   assert.match(mainSource, /consumePressed\("interact"\)/);

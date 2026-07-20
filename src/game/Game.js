@@ -1,8 +1,16 @@
-import { BLESSINGS, BLESSING_FALLBACK, chooseBlessings } from "./blessings.js";
+import {
+  BLESSINGS,
+  chooseBlessings,
+  oathSlotOrderForSeed,
+  TECHNIQUE_SLOTS,
+  techniqueSlotForOathFloor,
+} from "./blessings.js";
 import { BookendSequence } from "./BookendSequence.js";
 import { circleIntersectsArc, circleIntersectsLine, moveCircleDetailed, SpatialHash } from "./collision.js";
 import { EndingSequence } from "./EndingSequence.js";
 import { EnemyDirector } from "./EnemyDirector.js";
+import { walkableArea } from "./arenaGeometry.js";
+import { createEncounterPlan } from "./encounterPatterns.js";
 import {
   CAMERA_CONFIG,
   DASH_ATTACK,
@@ -13,22 +21,20 @@ import {
   ENDING_TIMING,
   PLAYER_CONFIG,
   PORTAL_CONFIG,
-  PROGRESSION_TRANSFORMATION_CONFIG,
+  PROGRESSION_BALANCE_LIMITS,
   RUN_CONFIG,
   RUN_TYPE_IDS,
   SCYTHE_ATTACKS,
 } from "./gameConfig.js";
 import { HitStopClock } from "./HitStopClock.js";
+import { hasLineOfSight } from "./navigation.js";
 import { PlayerCombat } from "./PlayerCombat.js";
+import { applyProgressionChoice, progressionCardSnapshot } from "./progressionModel.js";
 import {
-  applyRunUpgrade,
-  CHAMBER_FALLBACK,
-  isUpgradeEligible,
-  offerUpgradeChoices,
-  RUN_UPGRADES,
-  summarizeUpgradePaths,
-} from "./runUpgrades.js";
-import { progressionCardSnapshot } from "./progressionModel.js";
+  modifierTotal,
+  progressionBuildSnapshot,
+  progressionConditionsSnapshot,
+} from "./progressionRuntime.js";
 import { generateArena } from "../generation/arenaGenerator.js";
 import { createRunSeed, SeededRandom } from "../generation/seededRandom.js";
 
@@ -107,7 +113,7 @@ export class Game {
     this.claimSnapshots = Object.freeze({ previous: initialClaimSnapshot, current: initialClaimSnapshot });
     this.claimOwnershipVersion = 0;
     this.claimCollisionAdapter = Object.freeze({
-      querySweep: (query) => this.director.querySweep(this.transformedClaimQuery(query)),
+      querySweep: (query) => this.director.querySweep(query),
       resolveHit: (request) => this.resolveClaimHit(request),
     });
     this.harvestSnapshot = this.combat.harvest.snapshot();
@@ -138,12 +144,8 @@ export class Game {
     this.flags = {};
     this.ownedBlessings = new Set();
     this.upgradeRanks = new Map();
-    this.upgradeSelections = [];
     this.blessingIds = [];
     this.pendingBlessings = [];
-    this.pendingRoomRewards = [];
-    this.rerollsUsedByFloor = Array(RUN_CONFIG.totalFloors).fill(0);
-    this.roomRewardPending = false;
     this.introCompleted = false;
     this.bossModifiers = { health: 0, enrage: 0 };
     this.ending = new EndingSequence();
@@ -155,17 +157,15 @@ export class Game {
     this.reviveActionSerial = 0;
     this.healingSerial = 0;
     this.playerDamageSerial = 0;
-    this.transformationTriggerKeys = new Set();
-    this.harvestCrownActionIds = new Set();
-    this.soulSiphonHealingByAction = new Map();
-    this.eclipseCriticalReady = 0;
-    this.eclipseCriticalActionId = null;
-    this.moonwellRetaliationReady = 0;
+    this.progressionState = this.createProgressionCombatState();
     this.endingTimeMs = 0;
     this.pausedPhase = null;
     this.benchmarkMode = false;
     this.showcaseMode = null;
     this.roomBoundaryStable = false;
+    this.lastEncounterRecipeType = null;
+    this.encounterRecipeLocation = null;
+    this.encounterPreviousRecipeType = null;
   }
 
   on(listener) {
@@ -198,12 +198,8 @@ export class Game {
     this.flags = {};
     this.ownedBlessings.clear();
     this.upgradeRanks.clear();
-    this.upgradeSelections = [];
     this.blessingIds = [];
     this.pendingBlessings = [];
-    this.pendingRoomRewards = [];
-    this.rerollsUsedByFloor = Array(RUN_CONFIG.totalFloors).fill(0);
-    this.roomRewardPending = false;
     this.bossModifiers = { health: 0, enrage: 0 };
     this.introCompleted = runType === "speedrun";
     this.resetPresentationState();
@@ -213,6 +209,9 @@ export class Game {
     this.portalTraversal = null;
     this.pendingQueenEnding = false;
     this.roomBoundaryStable = false;
+    this.lastEncounterRecipeType = null;
+    this.encounterRecipeLocation = null;
+    this.encounterPreviousRecipeType = null;
     this.player = {
       position: { x: 0, z: 0 },
       previousPosition: { x: 0, z: 0 },
@@ -226,18 +225,16 @@ export class Game {
       reachMultiplier: PLAYER_CONFIG.baseReachMultiplier,
       dashCooldownMultiplier: 1,
       criticalChance: 0.05,
-      healthOnKill: 0,
-      roomRecoveryBonus: 0,
       deathDefiance: 0,
       deathDefianceGranted: 0,
-      transformationRanks: {},
+      modifierRanks: {},
     };
     this.normalActionSerial = 0;
     this.activeAttackActionId = null;
     this.reviveActionSerial = 0;
     this.healingSerial = 0;
     this.playerDamageSerial = 0;
-    this.resetTransformationCombatState();
+    this.resetProgressionCombatState();
     this.harvestFloorAttempts.clear();
     this.combat.reset();
     this.harvestSnapshot = this.combat.harvest.snapshot();
@@ -248,30 +245,21 @@ export class Game {
     if (!snapshot || typeof snapshot !== "object" || typeof snapshot.seed !== "string") return false;
     this.initializeRunState(snapshot.seed, snapshot.runType ?? DEFAULT_RUN_TYPE);
     this.difficultyId = snapshot.difficultyId;
-    const chamberCatalog = new Map([...RUN_UPGRADES, CHAMBER_FALLBACK].map((definition) => [definition.id, definition]));
     const blessingCatalog = new Map([...BLESSINGS, BLESSING_FALLBACK].map((definition) => [definition.id, definition]));
     const selections = snapshot.statisticsDraft?.selections;
     if (!Array.isArray(selections)) return false;
 
     for (const selection of selections) {
-      const catalog = selection.tier === "chamber" ? chamberCatalog : selection.tier === "blessing" ? blessingCatalog : null;
-      const definition = catalog?.get(selection.id);
-      const result = definition ? applyRunUpgrade(definition, this.player, this.upgradeRanks) : null;
+      if (selection.tier !== "blessing") return false;
+      const definition = blessingCatalog.get(selection.id);
+      const result = definition ? applyProgressionChoice(definition, this.player, this.upgradeRanks) : null;
       if (!result || result.rank !== selection.rankAfter) return false;
-      if (selection.tier === "chamber") {
-        this.upgradeSelections.push({ upgradeId: selection.id, rankAfter: selection.rankAfter });
-      } else {
-        this.blessingIds.push(selection.id);
-        this.ownedBlessings.add(selection.id);
-      }
+      this.blessingIds.push(selection.id);
+      this.ownedBlessings.add(selection.id);
     }
 
-    const restoredRanks = [...new Map(this.upgradeSelections.map(({ upgradeId, rankAfter }) => [upgradeId, rankAfter]))]
-      .sort(([left], [right]) => left.localeCompare(right));
     if (
-      JSON.stringify(this.upgradeSelections) !== JSON.stringify(snapshot.upgradeSelections)
-      || JSON.stringify(this.blessingIds) !== JSON.stringify(snapshot.blessingIds)
-      || JSON.stringify(restoredRanks) !== JSON.stringify(snapshot.upgradeRanks)
+      JSON.stringify(this.blessingIds) !== JSON.stringify(snapshot.blessingIds)
       || this.player.deathDefianceGranted !== snapshot.deathDefiance?.granted
     ) return false;
     if (!Number.isFinite(snapshot.player?.health) || snapshot.player.health <= 0 || snapshot.player.health > this.player.maxHealth) return false;
@@ -279,11 +267,11 @@ export class Game {
 
     this.player.health = snapshot.player.health;
     this.player.deathDefiance = snapshot.deathDefiance.remaining;
-    this.rerollsUsedByFloor = [...snapshot.rerollsUsedByFloor];
     this.flags = { ...snapshot.runFlags };
     this.introCompleted = true;
     this.floor = snapshot.nextFloor;
     this.room = snapshot.nextRoom;
+    this.lastEncounterRecipeType = this.derivePreviousEncounterRecipeType();
     this.harvestFloorAttempts.clear();
     for (let floor = 1; floor <= this.floor; floor += 1) this.harvestFloorAttempts.add(floor);
     this.harvestSnapshot = this.combat.harvest.snapshot();
@@ -300,8 +288,6 @@ export class Game {
 
   createSuspendedRunSnapshot(statisticsDraft, speedrun = null) {
     if (!this.roomBoundaryStable || !statisticsDraft || this.benchmarkMode || this.showcaseMode) return null;
-    const upgradeRanks = [...new Map(this.upgradeSelections.map(({ upgradeId, rankAfter }) => [upgradeId, rankAfter]))]
-      .sort(([left], [right]) => left.localeCompare(right));
     return immutableValue({
       seed: this.seed,
       difficultyId: this.difficultyId,
@@ -317,10 +303,7 @@ export class Game {
         granted: this.player.deathDefianceGranted,
         remaining: this.player.deathDefiance,
       },
-      upgradeSelections: this.upgradeSelections.map((selection) => ({ ...selection })),
-      upgradeRanks,
       blessingIds: [...this.blessingIds],
-      rerollsUsedByFloor: [...this.rerollsUsedByFloor],
       runFlags: Object.fromEntries(Object.entries(this.flags).filter(([, value]) => typeof value === "boolean")),
       statisticsDraft,
     });
@@ -344,10 +327,12 @@ export class Game {
     this.portalTraversal = null;
     this.clearTimer = 0;
     this.roomClearResolved = false;
-    this.pendingRoomRewards = [];
-    this.roomRewardPending = false;
-    this.resetTransformationCombatState();
+    this.resetProgressionCombatState();
     const difficulty = DIFFICULTY[this.difficultyId] ?? DIFFICULTY.standard;
+    const encounterLocation = `${this.floor}:${this.room}`;
+    const previousRecipeType = this.encounterRecipeLocation === encounterLocation
+      ? this.encounterPreviousRecipeType
+      : this.lastEncounterRecipeType;
     this.director.reset({
       arena: this.arena,
       floor: this.floor,
@@ -355,7 +340,13 @@ export class Game {
       rng: this.rng.fork(`encounter-${this.floor}-${this.room}`),
       difficulty,
       bossModifiers: this.bossModifiers,
+      previousRecipeType,
     });
+    if (this.director.encounterPlan) {
+      this.encounterRecipeLocation = encounterLocation;
+      this.encounterPreviousRecipeType = previousRecipeType;
+      this.lastEncounterRecipeType = this.director.encounterPlan.type;
+    }
     this.ensureFloorHarvestMinimum();
     this.roomBoundaryStable = true;
     this.emit("arenaChanged", {
@@ -364,11 +355,45 @@ export class Game {
       room: this.room,
       boss,
       loadToken: this.roomLoadToken,
+      encounterPlan: this.director.encounterPlan,
+      geometry: {
+        walkableArea: walkableArea(this.arena),
+        connectorWidths: this.arena.walkableShape.connectors.map((connector) => connector.width),
+        objectiveReachable: true,
+        escapeRouteChecks: this.arena.walkableShape.majorRegionIds.length,
+        escapeRouteFailures: 0,
+      },
     });
     this.roomBoundaryStable = false;
     this.emitHud();
 
     this.openRoom();
+  }
+
+  derivePreviousEncounterRecipeType() {
+    const difficulty = DIFFICULTY[this.difficultyId] ?? DIFFICULTY.standard;
+    let previousRecipeType = null;
+    for (let floor = 1; floor <= RUN_CONFIG.totalFloors; floor += 1) {
+      for (let room = 1; room <= RUN_CONFIG.roomsPerFloor; room += 1) {
+        if (floor === this.floor && room === this.room) return previousRecipeType;
+        const boss = floor === RUN_CONFIG.totalFloors && room === RUN_CONFIG.roomsPerFloor;
+        if (boss) return previousRecipeType;
+        const arena = generateArena({ seed: this.seed, floor, room, boss: false });
+        const encounterRng = new SeededRandom(this.seed).fork(`encounter-${floor}-${room}`);
+        const plan = createEncounterPlan({
+          floor,
+          room,
+          spawnPoints: arena.enemySpawnPoints,
+          rng: encounterRng.fork("plan"),
+          difficulty,
+          layout: arena,
+          layoutFamily: arena.layoutFamily,
+          previousRecipeType,
+        });
+        previousRecipeType = plan.type;
+      }
+    }
+    return previousRecipeType;
   }
 
   setAimPoint(point) {
@@ -387,6 +412,7 @@ export class Game {
       return;
     }
     if (this.phase !== "playing") return;
+    this.tickProgressionState(dt);
     if (this.hitStop.remaining() > 0) {
       this.combat.captureInput(this.input);
       this.hitStop.update(dt);
@@ -450,27 +476,18 @@ export class Game {
 
   resolvePlayerAttack(attack, hitIds, facing = this.combat.attackFacing) {
     const actionId = this.activeAttackActionId ?? this.nextNormalActionId();
-    const isDashAttack = attack === DASH_ATTACK;
-    const hollowStepRank = isDashAttack ? this.transformationRank("hollowStepAfterimage") : 0;
-    const reapingPassageRank = isDashAttack ? this.transformationRank("reapingPassageDashAttack") : 0;
-    const royalBloodRank = this.isWounded() ? this.transformationRank("royalBloodWounded") : 0;
-    let retaliationRank = this.moonwellRetaliationReady;
-    const eclipseCritical = this.eclipseCriticalActionId === actionId || this.eclipseCriticalReady > 0;
-    const dashDamageMultiplier = 1
-      + PROGRESSION_TRANSFORMATION_CONFIG.hollowStepAfterimage.damagePerRank * hollowStepRank
-      + PROGRESSION_TRANSFORMATION_CONFIG.reapingPassageDashAttack.damagePerRank * reapingPassageRank;
-    const woundedDamageMultiplier = 1
-      + PROGRESSION_TRANSFORMATION_CONFIG.royalBloodWounded.damagePerRank * royalBloodRank;
-    const woundedPoiseMultiplier = 1
-      + PROGRESSION_TRANSFORMATION_CONFIG.royalBloodWounded.poisePerRank * royalBloodRank;
+    const state = this.progressionState;
+    const isDashAttack = attack.isDashAttack === true || attack === DASH_ATTACK;
+    const comboIndex = Number.isInteger(attack.comboIndex) ? attack.comboIndex : this.combat.comboIndex;
+    const reapingPassage = isDashAttack ? modifierTotal(this.player, "reapingPassageOath") : null;
+    const headsman = comboIndex === 2 ? modifierTotal(this.player, "headsmansCadence") : null;
+    const guaranteedCritical = state.guaranteedCriticalActionId === actionId || state.guaranteedCriticalReady;
     this.spatialHash.rebuild(this.director.enemies);
     const range = attack.range * this.player.reachMultiplier;
     const candidates = this.spatialHash.query(this.player.position.x, this.player.position.z, range + 2);
     for (const enemy of candidates) {
-      if (!enemy.active || hitIds.has(enemy.id)) continue;
-      const assistedArc = (attack.arc ?? 0) * (
-        1 + PROGRESSION_TRANSFORMATION_CONFIG.reapingPassageDashAttack.arcPerRank * reapingPassageRank
-      ) + this.settings.get("gameplay.aimAssist") * 0.24;
+      if (!this.director.isEnemyInteractive(enemy) || hitIds.has(enemy.id)) continue;
+      const assistedArc = (attack.arc ?? 0) + this.settings.get("gameplay.aimAssist") * 0.24;
       const intersectsAttack = attack.shape === "line"
         ? circleIntersectsLine(
             this.player.position,
@@ -482,16 +499,23 @@ export class Game {
           )
         : circleIntersectsArc(this.player.position, facing, range, assistedArc, enemy.position, enemy.radius);
       if (!intersectsAttack) continue;
+      if (!hasLineOfSight(this.player.position, enemy.position, this.arena, 0.08)) continue;
       hitIds.add(enemy.id);
-      const critical = eclipseCritical || this.rng.chance(this.player.criticalChance);
-      const retaliationDamage = PROGRESSION_TRANSFORMATION_CONFIG.moonwellRenewalRetaliation.damagePerRank * retaliationRank;
-      const damage = (
-        attack.damage * this.player.damageMultiplier * dashDamageMultiplier * woundedDamageMultiplier
-        + retaliationDamage
-      ) * (critical ? 1.75 : 1);
       const dx = enemy.position.x - this.player.position.x;
       const dz = enemy.position.z - this.player.position.z;
       const length = Math.hypot(dx, dz) || 1;
+      const critical = guaranteedCritical || this.rng.chance(Math.min(
+        PROGRESSION_BALANCE_LIMITS.criticalChance,
+        this.player.criticalChance,
+      ));
+      let actionDamageMultiplier = attack.progressionCombo?.damageMultiplier ?? 1;
+      actionDamageMultiplier *= 1 + (reapingPassage?.dashStrikeDamageBonus ?? 0);
+      actionDamageMultiplier = Math.min(1 + PROGRESSION_BALANCE_LIMITS.actionDamageBonus, actionDamageMultiplier);
+      let damage = attack.damage * this.player.damageMultiplier * actionDamageMultiplier * (critical ? 1.75 : 1);
+      const executeThreshold = headsman?.executeThreshold ?? 0;
+      if (enemy.type !== "queen" && enemy.health / enemy.maxHealth <= executeThreshold) {
+        damage = Math.max(damage, enemy.health * 2);
+      }
       const chargedPoiseDamage = Number.isFinite(attack.poiseDamage) ? attack.poiseDamage : null;
       const basePoiseDamage = chargedPoiseDamage ?? Math.max(
         NORMAL_ATTACK_POISE.minimum,
@@ -503,33 +527,31 @@ export class Game {
         critical,
         direction: { x: dx / length, z: dz / length },
         knockback: attack.knockback,
-        poiseDamage: basePoiseDamage * woundedPoiseMultiplier
-          + PROGRESSION_TRANSFORMATION_CONFIG.moonwellRenewalRetaliation.poiseDamagePerRank * retaliationRank,
+        poiseDamage: basePoiseDamage
+          * (attack.progressionCombo?.poiseMultiplier ?? 1)
+          * (1 + (reapingPassage?.dashStrikePoiseBonus ?? 0))
+          * (enemy.type === "queen" && attack.progressionLine?.pullEnabled ? 1.2 : 1),
         pullStrength: 0,
         sourcePosition: this.player.position,
         origin: "player",
       };
       const resolution = this.director.resolveCombatHit(enemy, hit);
       if (!resolution.accepted) continue;
-      if (this.eclipseCriticalReady > 0 && this.eclipseCriticalActionId !== actionId) {
-        const rank = this.eclipseCriticalReady;
-        this.eclipseCriticalReady = 0;
-        this.eclipseCriticalActionId = actionId;
-        this.emitTransformationOnce("perfectEclipsePerfectDash", actionId, { consumed: "guaranteedCritical", armedRank: rank });
+      if (state.guaranteedCriticalReady && state.guaranteedCriticalActionId !== actionId) {
+        state.guaranteedCriticalReady = false;
+        state.guaranteedCriticalActionId = actionId;
+        this.emitCombatConditions();
       }
-      if (retaliationRank > 0) {
-        this.moonwellRetaliationReady = 0;
-        this.emitTransformationOnce("moonwellRenewalRetaliation", actionId, { consumed: "retaliation" });
-        retaliationRank = 0;
-      }
-      if (hollowStepRank > 0) {
-        this.emitTransformationOnce("hollowStepAfterimage", actionId, { synchronizedWith: "dashAttack" });
-      }
-      if (reapingPassageRank > 0) this.emitTransformationOnce("reapingPassageDashAttack", actionId);
-      if (royalBloodRank > 0) this.emitTransformationOnce("royalBloodWounded", actionId);
-      this.applySoulSiphon(actionId, resolution.hit.damage);
+      this.recordProgressionHit(
+        actionId,
+        enemy,
+        { ...attack, comboIndex, isDashAttack },
+        critical,
+        resolution,
+        facing,
+      );
       const hitStopReasons = [];
-      if (attack === SCYTHE_ATTACKS[SCYTHE_ATTACKS.length - 1]) hitStopReasons.push("comboFinisher");
+      if (comboIndex === 2) hitStopReasons.push("comboFinisher");
       if (critical) hitStopReasons.push("critical");
       if (attack.chargeQuality) hitStopReasons.push(`charge${attack.chargeQuality[0].toUpperCase()}${attack.chargeQuality.slice(1)}`);
       if (attack.chargeKind === "line") hitStopReasons.push("lineCharge");
@@ -545,9 +567,56 @@ export class Game {
       if (critical) this.applyHarvestGain("critical", eventId);
       if (resolution.defeated) {
         this.applyHarvestGain("kill", eventId);
-        this.applyHealthOnKill(actionId);
       }
     }
+  }
+
+  recordProgressionHit(actionId, enemy, attack, critical, resolution, facing) {
+    const state = this.progressionState;
+    let targets = state.actionHitTargets.get(actionId);
+    if (!targets) {
+      targets = new Set();
+      state.actionHitTargets.set(actionId, targets);
+    }
+    targets.add(enemy.id);
+
+    const pallbearer = modifierTotal(this.player, "pallbearersCadence");
+    if (attack.comboIndex === 2 && pallbearer && targets.size >= pallbearer.minimumWardTargets) {
+      state.aegisRemaining = Math.max(state.aegisRemaining, pallbearer.wardDurationSeconds);
+      state.aegisReduction = Math.max(state.aegisReduction, pallbearer.wardStrength);
+      this.emitCombatConditions();
+    }
+
+    if (attack.bloodOrbit) {
+      const used = state.bloodHealingByAction.get(actionId) ?? 0;
+      const amount = Math.min(attack.bloodOrbit.healPerEnemy, attack.bloodOrbit.healCap - used);
+      if (amount > 0) {
+        state.bloodHealingByAction.set(actionId, used + amount);
+        this.restorePlayerHealth(amount, "bloodOrbit", { sourceActionId: actionId, upgradeId: "blood-orbit" });
+      }
+    }
+
+    if (attack.progressionLine && !resolution.defeated) {
+      if (attack.progressionLine.pullEnabled && enemy.type !== "queen") {
+        const center = {
+          x: this.player.position.x + Math.cos(facing) * attack.range * 0.5,
+          z: this.player.position.z + Math.sin(facing) * attack.range * 0.5,
+        };
+        this.director.pullEnemyToward(enemy, center, 2.4);
+      }
+      if (attack.progressionLine.slow > 0) {
+        this.director.slowEnemy?.(enemy, attack.progressionLine.slow, attack.progressionLine.slowDurationSeconds);
+      }
+    }
+  }
+
+  grantUpgradeHarvest(actionId, source, requestedAmount) {
+    const used = this.progressionState.upgradeHarvestByAction.get(actionId) ?? 0;
+    const amount = Math.min(PROGRESSION_BALANCE_LIMITS.harvestRefundPerAction - used, requestedAmount);
+    if (!Number.isInteger(amount) || amount <= 0) return null;
+    const result = this.applyHarvestGain("upgradeModifier", `${source}:${actionId}`, amount);
+    if (result.accepted) this.progressionState.upgradeHarvestByAction.set(actionId, used + result.delta);
+    return result;
   }
 
   handleCombatEvent(type, detail) {
@@ -556,8 +625,14 @@ export class Game {
       this.emit(type, Object.freeze({ ...detail, actionId }));
       return;
     }
-    if (type === "claimStarted") this.syncHarvestSpend("claim");
-    if (type === "lineChargeReleased") this.syncHarvestSpend("lineCharge", detail.actionId);
+    if (type === "claimStarted") {
+      this.syncHarvestSpend("claim");
+    }
+    if (type === "lineChargeReleased") {
+      this.syncHarvestSpend("lineCharge", detail.actionId);
+    }
+    if (type === "dashEnded" && detail.reason === "ended") this.resolveGraveStepPulse(detail);
+    if (type === "bloodOrbitSpent") this.emitHud();
     if (type === "claimRejected" && detail.reason === "insufficientHarvest") {
       this.emitHarvestRejected("insufficientUnits", `claim:${detail.inputTime ?? "unknown"}`);
     }
@@ -567,89 +642,83 @@ export class Game {
     this.emit(type, detail);
   }
 
+  resolveGraveStepPulse(detail) {
+    const graveStep = modifierTotal(this.player, "graveStep");
+    if (!graveStep || !this.player || this.phase !== "playing") return false;
+    const actionId = `${detail.actionId}:grave-step`;
+    let hit = false;
+    for (const enemy of this.director.enemies) {
+      if (!this.director.isEnemyInteractive(enemy)) continue;
+      const distance = Math.hypot(
+        enemy.position.x - this.player.position.x,
+        enemy.position.z - this.player.position.z,
+      );
+      if (distance > graveStep.pulseRadius + enemy.radius) continue;
+      const resolution = this.director.resolveCombatHit(enemy, {
+        actionId,
+        damage: graveStep.pulseDamage,
+        critical: false,
+        direction: normalizedDirection(this.player.position, enemy.position),
+        knockback: 0,
+        poiseDamage: graveStep.pulsePoiseDamage,
+        pullStrength: 0,
+        sourcePosition: this.player.position,
+        origin: "player",
+      });
+      if (!resolution.accepted) continue;
+      hit = true;
+      this.director.slowEnemy?.(enemy, graveStep.slow, graveStep.slowDurationSeconds);
+    }
+    if (hit) this.requestHitStop(actionId, ["claimRecall"]);
+    return hit;
+  }
+
   nextNormalActionId() {
     this.normalActionSerial += 1;
     this.activeAttackActionId = `attack-${this.normalActionSerial}`;
     return this.activeAttackActionId;
   }
 
-  transformationRank(hookId) {
-    const rank = this.player?.transformationRanks?.[hookId];
-    return Number.isInteger(rank) && rank > 0 ? rank : 0;
+  createProgressionCombatState() {
+    return {
+      aegisRemaining: 0,
+      aegisReduction: 0,
+      guaranteedCriticalReady: false,
+      guaranteedCriticalActionId: null,
+      actionHitTargets: new Map(),
+      claimOutboundTargets: new Map(),
+      claimHarvestRefunds: new Map(),
+      bloodHealingByAction: new Map(),
+      upgradeHarvestByAction: new Map(),
+    };
   }
 
-  resetTransformationCombatState() {
-    this.transformationTriggerKeys.clear();
-    this.harvestCrownActionIds.clear();
-    this.soulSiphonHealingByAction.clear();
-    this.eclipseCriticalReady = 0;
-    this.eclipseCriticalActionId = null;
-    this.moonwellRetaliationReady = 0;
+  resetProgressionCombatState() {
+    this.progressionState = this.createProgressionCombatState();
   }
 
-  rememberBounded(set, value, limit = 256) {
-    if (set.has(value)) return false;
-    set.add(value);
-    if (set.size > limit) set.delete(set.values().next().value);
-    return true;
-  }
-
-  emitTransformationOnce(hookId, actionId, detail = {}) {
-    const key = `${hookId}:${actionId}`;
-    if (!this.rememberBounded(this.transformationTriggerKeys, key, 512)) return false;
-    this.emit("progressionTransformationTriggered", immutableValue({
-      hookId,
-      actionId,
-      rank: this.transformationRank(hookId),
-      floor: this.floor,
-      room: this.room,
-      ...detail,
-    }));
-    return true;
-  }
-
-  isWounded() {
-    const threshold = this.player.maxHealth * PROGRESSION_TRANSFORMATION_CONFIG.royalBloodWounded.healthThreshold;
-    return this.player.health <= threshold + Number.EPSILON * this.player.maxHealth;
-  }
-
-  transformedClaimQuery(query) {
-    const rank = this.transformationRank("farReachClaim");
-    if (rank === 0 || !["recall", "cleave"].includes(query.pass)) return query;
-    const config = PROGRESSION_TRANSFORMATION_CONFIG.farReachClaim;
-    const radiusPerRank = query.pass === "recall" ? config.recallRadiusPerRank : config.cleaveRadiusPerRank;
-    return Object.freeze({ ...query, radius: query.radius * (1 + radiusPerRank * rank) });
-  }
-
-  applyTransformationHarvest(hookId, actionId, rank) {
-    const unitsPerRank = PROGRESSION_TRANSFORMATION_CONFIG[hookId].harvestUnitsPerRank;
-    let granted = 0;
-    for (let index = 0; index < rank; index += 1) {
-      const result = this.applyHarvestGain("upgradeModifier", `${hookId}:${actionId}:${index}`);
-      if (result.accepted) granted += result.delta;
+  tickProgressionState(dt) {
+    const state = this.progressionState;
+    const aegisBefore = state.aegisRemaining;
+    state.aegisRemaining = Math.max(0, state.aegisRemaining - dt);
+    if (aegisBefore > 0 && state.aegisRemaining === 0) {
+      state.aegisReduction = 0;
+      this.emitCombatConditions();
     }
-    this.emitTransformationOnce(hookId, actionId, { harvestRequested: unitsPerRank * rank, harvestGranted: granted });
-    return granted;
   }
 
-  applySoulSiphon(actionId, appliedDamage) {
-    const rank = this.transformationRank("soulSiphonAggressiveHeal");
-    if (rank === 0 || appliedDamage <= 0) return null;
-    const config = PROGRESSION_TRANSFORMATION_CONFIG.soulSiphonAggressiveHeal;
-    const used = this.soulSiphonHealingByAction.get(actionId) ?? 0;
-    const cap = config.actionHealthCapPerRank * rank;
-    const requested = Math.min(cap - used, appliedDamage * config.damageHealingPerRank * rank);
-    if (requested <= 0) return null;
-    this.soulSiphonHealingByAction.set(actionId, used + requested);
-    if (this.soulSiphonHealingByAction.size > 256) {
-      this.soulSiphonHealingByAction.delete(this.soulSiphonHealingByAction.keys().next().value);
-    }
-    const healed = this.restorePlayerHealth(requested, "soulSiphon", {
-      sourceActionId: actionId,
-      upgradeId: "soul-siphon",
-    });
-    if (healed) this.emitTransformationOnce("soulSiphonAggressiveHeal", actionId, { actionHealingCap: cap });
-    return healed;
+  emitCombatConditions() {
+    if (!this.player) return null;
+    const conditions = progressionConditionsSnapshot(this.progressionState, this.player);
+    this.emit("combatConditionsChanged", { conditions });
+    return conditions;
+  }
+
+  emitProgressionState() {
+    const build = progressionBuildSnapshot(this.upgradeRanks);
+    const conditions = this.emitCombatConditions();
+    this.emit("progressionStateChanged", { build, conditions });
+    return build;
   }
 
   requestHitStop(actionId, reasons) {
@@ -689,64 +758,55 @@ export class Game {
     const dx = target.position.x - sourcePosition.x;
     const dz = target.position.z - sourcePosition.z;
     const length = Math.hypot(dx, dz) || 1;
-    const farReachRank = this.transformationRank("farReachClaim");
-    const royalBloodRank = this.isWounded() ? this.transformationRank("royalBloodWounded") : 0;
-    const retaliationRank = this.moonwellRetaliationReady;
-    const woundedConfig = PROGRESSION_TRANSFORMATION_CONFIG.royalBloodWounded;
-    const retaliationConfig = PROGRESSION_TRANSFORMATION_CONFIG.moonwellRenewalRetaliation;
-    const pullStrength = (definition.pullStrength ?? 0) * (
-      pass === "recall"
-        ? 1 + PROGRESSION_TRANSFORMATION_CONFIG.farReachClaim.recallPullPerRank * farReachRank
-        : 1
-    );
+    const state = this.progressionState;
+    const phantom = modifierTotal(this.player, "phantomCircuit");
+    const gravebind = modifierTotal(this.player, "gravebind");
+    let phantomDamage = 0;
+    if (pass === "outbound") {
+      let targets = state.claimOutboundTargets.get(actionId);
+      if (!targets) {
+        targets = new Set();
+        state.claimOutboundTargets.set(actionId, targets);
+      }
+      targets.add(target.id);
+    } else if (pass === "recall" && state.claimOutboundTargets.get(actionId)?.has(target.id)) {
+      phantomDamage = phantom?.doublePassDamage ?? 0;
+    }
+    const damage = definition.damage * this.player.damageMultiplier + phantomDamage;
+    const pullStrength = definition.pullStrength ?? 0;
     const resolution = this.director.resolveCombatHit(target, {
       actionId,
-      damage: definition.damage * this.player.damageMultiplier * (1 + woundedConfig.damagePerRank * royalBloodRank)
-        + retaliationConfig.damagePerRank * retaliationRank,
+      damage,
       critical: false,
       direction: { x: dx / length, z: dz / length },
       knockback: definition.knockback ?? 0,
-      poiseDamage: definition.poiseDamage * (1 + woundedConfig.poisePerRank * royalBloodRank)
-        + retaliationConfig.poiseDamagePerRank * retaliationRank,
+      poiseDamage: definition.poiseDamage * (target.type === "queen" && pullStrength > 0 ? 1.2 : 1),
       pullStrength,
       sourcePosition,
       origin: "player",
     });
-    if (resolution.accepted && retaliationRank > 0) {
-      this.moonwellRetaliationReady = 0;
-      this.emitTransformationOnce("moonwellRenewalRetaliation", actionId, { consumed: "retaliation", pass });
-    }
-    if (resolution.accepted && farReachRank > 0 && ["recall", "cleave"].includes(pass)) {
-      this.emitTransformationOnce("farReachClaim", actionId, { pass });
-    }
-    if (
-      resolution.accepted
-      && pass === "recall"
-      && this.transformationRank("harvestCrownClaim") > 0
-      && this.rememberBounded(this.harvestCrownActionIds, actionId)
-    ) {
-      this.applyTransformationHarvest("harvestCrownClaim", actionId, this.transformationRank("harvestCrownClaim"));
-    }
-    if (resolution.accepted && royalBloodRank > 0) this.emitTransformationOnce("royalBloodWounded", actionId, { pass });
-    if (resolution.accepted) this.applySoulSiphon(actionId, resolution.hit.damage);
+    if (resolution.accepted) this.recordProgressionHit(actionId, target, {}, false, resolution, 0);
     if (resolution.accepted && pass === "recall") this.requestHitStop(actionId, ["claimRecall"]);
     let pull = null;
-    if (pass === "recall" && resolution.accepted && !resolution.defeated && target.active) {
+    if (pass === "recall" && resolution.accepted && !resolution.defeated && target.active && target.type !== "queen") {
       pull = this.director.pullEnemyToward(target, this.combat.claim.snapshot().origin, pullStrength);
+      if (gravebind && pull.applied > 0) {
+        const refunded = state.claimHarvestRefunds.get(actionId) ?? 0;
+        const amount = Math.min(gravebind.harvestPerSurvivor, gravebind.harvestCap - refunded);
+        if (amount > 0) {
+          const harvest = this.grantUpgradeHarvest(actionId, `gravebind:${target.id}`, amount);
+          if (harvest.accepted) state.claimHarvestRefunds.set(actionId, refunded + harvest.delta);
+        }
+      }
     }
     if (resolution.accepted && resolution.defeated) {
       this.applyHarvestGain("kill", `${actionId}:${target.id}:${pass}:claim`);
-      this.applyHealthOnKill(actionId);
     }
     return Object.freeze({
       hit: resolution.hit,
       pull,
       terminatePass: resolution.defeated && target.type === "queen",
     });
-  }
-
-  applyHealthOnKill(sourceActionId = null) {
-    return this.restorePlayerHealth(this.player.healthOnKill, "kill", { sourceActionId });
   }
 
   emitPlayerHeal(previousHealth, requestedAmount, reason, { sourceActionId = null, upgradeId = null } = {}) {
@@ -779,9 +839,9 @@ export class Game {
     return this.emitPlayerHeal(previousHealth, requestedAmount, reason, options);
   }
 
-  applyHarvestGain(source, eventId) {
+  applyHarvestGain(source, eventId, amount = undefined) {
     const previous = this.combat.harvest.snapshot();
-    const result = this.combat.harvest.gain({ type: source, eventId });
+    const result = this.combat.harvest.gain({ type: source, eventId }, amount);
     if (!result.accepted) {
       this.harvestSnapshot = result.snapshot;
       this.emitHarvestRejected(result.reason, eventId, previous, result.snapshot);
@@ -857,7 +917,9 @@ export class Game {
 
   cancelCombatActions(reason) {
     this.activeAttackActionId = null;
-    return this.combat.cancelPlayerActions(reason);
+    const result = this.combat.cancelPlayerActions(reason);
+    this.emit("combatActionsCancelled", result);
+    return result;
   }
 
   damagePlayer(amount, source) {
@@ -888,7 +950,7 @@ export class Game {
         inputTime: qualification.inputTime,
         elapsed: qualification.elapsed,
         windowOpen: PLAYER_CONFIG.dash.perfectOpen,
-        windowClose: PLAYER_CONFIG.dash.perfectClose,
+        windowClose: this.combat.activePerfectDashWindow,
         attemptId: attempt.attemptId,
         sourceActionId: attempt.actionId,
         source: attempt.source,
@@ -904,11 +966,12 @@ export class Game {
       });
       this.emit("perfectDash", detail);
       const harvest = this.applyHarvestGain("perfectDash", qualification.actionId);
-      const eclipseRank = this.transformationRank("perfectEclipsePerfectDash");
-      if (eclipseRank > 0) {
-        this.eclipseCriticalReady = Math.max(this.eclipseCriticalReady, eclipseRank);
-        this.eclipseCriticalActionId = null;
-        this.applyTransformationHarvest("perfectEclipsePerfectDash", qualification.actionId, eclipseRank);
+      const eclipse = modifierTotal(this.player, "perfectEclipse");
+      if (eclipse) {
+        this.grantUpgradeHarvest(qualification.actionId, "eclipse", eclipse.harvestUnits);
+        this.progressionState.guaranteedCriticalReady = true;
+        this.progressionState.guaranteedCriticalActionId = null;
+        this.emitCombatConditions();
       }
       return Object.freeze({
         accepted: true,
@@ -930,6 +993,13 @@ export class Game {
     if (this.player.invulnerable > 0) {
       return Object.freeze({ accepted: false, reason: "invulnerable", damaged: false, perfectDash: false });
     }
+    const requestedAmount = amount;
+    if (this.progressionState.aegisRemaining > 0 && this.progressionState.aegisReduction > 0) {
+      amount = Math.max(0, amount - this.progressionState.aegisReduction);
+      this.progressionState.aegisRemaining = 0;
+      this.progressionState.aegisReduction = 0;
+      this.emitCombatConditions();
+    }
     const previousHealth = this.player.health;
     this.player.health = Math.max(0, this.player.health - amount);
     const appliedAmount = previousHealth - this.player.health;
@@ -940,6 +1010,7 @@ export class Game {
     const detail = {
       damageId,
       amount,
+      requestedAmount,
       appliedAmount,
       source,
       health: this.player.health,
@@ -964,11 +1035,6 @@ export class Game {
     const frozenDetail = immutableValue(detail);
     this.emit("playerHit", frozenDetail);
     this.emitHud();
-    const moonwellRank = this.transformationRank("moonwellRenewalRetaliation");
-    if (moonwellRank > 0 && (this.player.health > 0 || this.player.deathDefiance > 0)) {
-      this.moonwellRetaliationReady = moonwellRank;
-      this.emitTransformationOnce("moonwellRenewalRetaliation", damageId, { armed: "retaliation", sourceActionId: attempt?.actionId ?? null });
-    }
     if (this.player.health <= 0) {
       if (this.player.deathDefiance > 0) {
         this.cancelClaim("deathDefiance");
@@ -1036,9 +1102,6 @@ export class Game {
 
   handleDirectorEvent(type, detail) {
     this.emit(type, detail);
-    if (type === "enemyDefeated") {
-      if (this.player.healthOnKill > 0) this.emitHud();
-    }
     if (type === "enemyHit" && detail.type === "queen") {
       this.emit("bossHealth", { health: detail.health, maxHealth: detail.maxHealth });
     }
@@ -1057,8 +1120,10 @@ export class Game {
       this.clearTimer += dt;
       if (this.clearTimer >= RUN_CONFIG.roomClearDelay) {
         this.roomClearResolved = true;
-        const recoveryPercent = RUN_CONFIG.roomRecoveryPercent + this.player.roomRecoveryBonus;
-        const recovery = Math.max(1, Math.round(this.player.maxHealth * recoveryPercent));
+        const recovery = Math.max(1, Math.round(this.player.maxHealth * Math.min(
+          PROGRESSION_BALANCE_LIMITS.automaticRoomRecovery,
+          RUN_CONFIG.roomRecoveryPercent,
+        )));
         const healed = this.restorePlayerHealth(recovery, "roomRecovery", {
           sourceActionId: `room:${this.floor}:${this.room}`,
         });
@@ -1081,7 +1146,6 @@ export class Game {
     if (
       this.portalActive ||
       !this.roomClearResolved ||
-      this.roomRewardPending ||
       this.portalTraversal?.active
     ) return false;
 
@@ -1098,7 +1162,6 @@ export class Game {
     if (
       this.phase !== "playing" ||
       !this.portalActive ||
-      this.roomRewardPending ||
       this.portalTraversal?.active
     ) return false;
 
@@ -1160,110 +1223,6 @@ export class Game {
     this.advanceRoom();
   }
 
-  offerRoomReward() {
-    if (
-      this.showcaseMode !== "reward"
-      && (!this.roomClearResolved || !this.portalTraversal?.completed)
-    ) return false;
-    if (this.roomRewardPending) return false;
-    this.presentRoomReward();
-    return true;
-  }
-
-  presentRoomReward() {
-    this.pendingRoomRewards = offerUpgradeChoices(
-      this.rng.fork(`reward-${this.floor}-${this.room}`),
-      this.upgradeRanks,
-      RUN_UPGRADES,
-      3,
-      CHAMBER_FALLBACK,
-      this.player,
-    );
-    this.roomRewardPending = true;
-    this.setPhase("reward");
-    this.emit("roomRewardOffered", {
-      floor: this.floor,
-      room: this.room,
-      choices: Object.freeze(this.pendingRoomRewards.map(publicUpgradeChoice)),
-      rerollAvailable: this.rerollAvailableFor(this.pendingRoomRewards, RUN_UPGRADES),
-    });
-  }
-
-  rerollAvailableFor(choices, pool) {
-    if (
-      this.rerollsUsedByFloor[this.floor - 1] === 1
-      || choices.length === 0
-      || choices.some((choice) => choice.fallback === true)
-    ) return false;
-    const currentIds = new Set(choices.map((choice) => choice.id));
-    return pool.some((definition) => (
-      !currentIds.has(definition.id)
-      && isUpgradeEligible(definition, this.upgradeRanks, this.player)
-      && choices.some((choice) => choice.path === definition.path)
-    ));
-  }
-
-  rerollUpgradeOffer() {
-    const reward = this.phase === "reward" && this.roomRewardPending;
-    const blessing = this.phase === "blessing";
-    if (!reward && !blessing) return false;
-    const current = reward ? this.pendingRoomRewards : this.pendingBlessings;
-    const pool = reward ? RUN_UPGRADES : BLESSINGS;
-    if (!this.rerollAvailableFor(current, pool)) return false;
-    const previousChoiceIds = current.map((choice) => choice.id);
-    const seedLabel = reward
-      ? `reward-${this.floor}-${this.room}-reroll-1`
-      : `blessing-${this.floor}-reroll-1`;
-    const replacements = reward
-      ? offerUpgradeChoices(
-        this.rng.fork(seedLabel),
-        this.upgradeRanks,
-        RUN_UPGRADES,
-        3,
-        CHAMBER_FALLBACK,
-        this.player,
-        { avoidIds: previousChoiceIds },
-      )
-      : chooseBlessings(
-        this.rng.fork(seedLabel),
-        this.upgradeRanks,
-        3,
-        this.player,
-        { avoidIds: previousChoiceIds },
-      );
-    const previousIdSet = new Set(previousChoiceIds);
-    if (replacements.every((choice) => previousIdSet.has(choice.id))) return false;
-    this.rerollsUsedByFloor[this.floor - 1] = 1;
-    if (reward) this.pendingRoomRewards = replacements;
-    else this.pendingBlessings = replacements;
-    this.emit("upgradeRerolled", immutableValue({
-      tier: reward ? "chamber" : "blessing",
-      floor: this.floor,
-      room: this.room,
-      previousChoiceIds,
-      choices: replacements.map(publicUpgradeChoice),
-      rerollAvailable: false,
-    }));
-    return true;
-  }
-
-  chooseRoomReward(id) {
-    if (this.phase !== "reward" || !this.roomRewardPending) return;
-    const reward = this.pendingRoomRewards.find((choice) => choice.id === id);
-    const previousHealth = this.player.health;
-    const result = applyRunUpgrade(reward, this.player, this.upgradeRanks);
-    if (!result) return;
-    this.emitPlayerHeal(previousHealth, this.player.health - previousHealth, "roomUpgrade", {
-      upgradeId: result.id,
-    });
-    this.pendingRoomRewards = [];
-    this.roomRewardPending = false;
-    this.upgradeSelections.push({ upgradeId: result.id, rankAfter: result.rank });
-    this.emit("roomRewardChosen", { ...result, floor: this.floor, room: this.room });
-    this.room += 1;
-    this.loadRoom();
-  }
-
   advanceRoom() {
     if (
       !this.benchmarkMode
@@ -1271,9 +1230,6 @@ export class Game {
       && !this.portalTraversal?.completed
     ) return false;
     if (this.room < RUN_CONFIG.roomsPerFloor) {
-      if (!this.benchmarkMode) {
-        return this.offerRoomReward();
-      }
       this.room += 1;
       this.loadRoom();
       return true;
@@ -1285,18 +1241,29 @@ export class Game {
       this.upgradeRanks,
       3,
       this.player,
+      {
+        floor: this.floor,
+        ownedOathIds: this.ownedBlessings,
+        slotOrder: oathSlotOrderForSeed(this.seed),
+      },
     );
     this.presentBlessings();
     return true;
   }
 
   presentBlessings() {
+    const slotId = this.floor <= 5
+      ? techniqueSlotForOathFloor(oathSlotOrderForSeed(this.seed), this.floor)
+      : null;
     this.setPhase("blessing");
     this.emit("blessingOffered", {
       floor: this.floor,
       room: this.room,
       choices: Object.freeze(this.pendingBlessings.map(publicUpgradeChoice)),
-      rerollAvailable: this.rerollAvailableFor(this.pendingBlessings, BLESSINGS),
+      techniqueSlot: slotId,
+      techniqueLabel: slotId ? TECHNIQUE_SLOTS[slotId].label : "Oath Mastery",
+      selectionMode: this.floor <= 5 ? "choose" : "mastery",
+      build: progressionBuildSnapshot(this.upgradeRanks),
     });
   }
 
@@ -1326,7 +1293,7 @@ export class Game {
     const blessing = this.pendingBlessings.find((choice) => choice.id === id);
     if (!blessing) return;
     const previousHealth = this.player.health;
-    const result = applyRunUpgrade(blessing, this.player, this.upgradeRanks);
+    const result = applyProgressionChoice(blessing, this.player, this.upgradeRanks);
     if (!result) return;
     this.emitPlayerHeal(previousHealth, this.player.health - previousHealth, "blessing", {
       upgradeId: result.id,
@@ -1334,17 +1301,8 @@ export class Game {
     this.ownedBlessings.add(blessing.id);
     this.blessingIds.push(blessing.id);
     this.pendingBlessings = [];
-    if (result.deathDefianceGranted > 0) {
-      this.emit("deathDefianceGranted", immutableValue({
-        amount: result.deathDefianceGranted,
-        grantedTotal: result.deathDefianceGrantedTotal,
-        chargesRemaining: result.deathDefianceRemaining,
-        upgradeId: result.id,
-        floor: this.floor,
-        room: this.room,
-      }));
-    }
     this.emit("blessingChosen", result);
+    this.emitProgressionState();
     this.floor += 1;
     this.room = 1;
     this.restorePlayerHealth(
@@ -1376,15 +1334,31 @@ export class Game {
       && this.runType === "normal"
       && this.floor === 1
       && this.room === 1;
-    if (!shouldShowIntro) {
-      this.requestRoomPlay();
+    if (shouldShowIntro) {
+      this.startBookend("intro", () => {
+        this.introCompleted = true;
+        this.requestRoomPlay();
+      });
+      this.emit("introStarted", { seed: this.seed });
       return;
     }
-    this.startBookend("intro", () => {
-      this.introCompleted = true;
-      this.requestRoomPlay();
-    });
-    this.emit("introStarted", { seed: this.seed });
+
+    const shouldShowBossConfrontation = !this.benchmarkMode
+      && !this.showcaseMode
+      && this.runType === "normal"
+      && this.arena?.boss === true
+      && this.flags.bossConfrontationCompleted !== true;
+    if (shouldShowBossConfrontation) {
+      this.startBookend("boss.confrontation", () => {
+        this.flags.bossConfrontationCompleted = true;
+        this.emit("bossConfrontationCompleted", { floor: this.floor, room: this.room });
+        this.requestRoomPlay();
+      });
+      this.emit("bossConfrontationStarted", { floor: this.floor, room: this.room });
+      return;
+    }
+
+    this.requestRoomPlay();
   }
 
   startBookend(sequenceId, onComplete) {
@@ -1424,6 +1398,14 @@ export class Game {
     this.flushGameplayActions();
     this.endingPresentationStage = "witchDeath";
     this.emit("endingSequenceStarted", { floor: this.floor, room: this.room, runType: this.runType });
+    if (this.runType === "speedrun") {
+      this.revealPrincessForEnding();
+      return;
+    }
+    this.startBookend("ending.witch-death", () => this.revealPrincessForEnding());
+  }
+
+  revealPrincessForEnding() {
     const dismissed = this.director.dismissStableOrigin();
     this.endingPresentationStage = "revealHuman";
     this.emit("witchMagicCeased", { dismissed });
@@ -1432,7 +1414,7 @@ export class Game {
       this.beginEndingDecision();
       return;
     }
-    this.startBookend("ending.plea", () => this.beginEndingDecision());
+    return this.startBookend("ending.plea", () => this.beginEndingDecision());
   }
 
   beginEndingDecision(nowMs = performance.now()) {
@@ -1499,13 +1481,15 @@ export class Game {
       return;
     }
 
-    this.startBookend("ending.timeout", () => {
-      this.flags.princeKilledByPrincess = true;
-      this.player.health = 0;
-      this.emitHud();
-      this.emit("playerKilledByPrincess", { ending });
-      this.beginEndingFade();
-    });
+    this.startBookend("ending.timeout", () => this.completeTimeoutStrike(ending));
+  }
+
+  completeTimeoutStrike(ending = "timeout") {
+    this.flags.princeKilledByPrincess = true;
+    this.player.health = 0;
+    this.emitHud();
+    this.emit("playerKilledByPrincess", { ending });
+    return this.startBookend("ending.timeout-final", () => this.beginEndingFade());
   }
 
   beginEndingStrike() {
@@ -1559,13 +1543,13 @@ export class Game {
     this.endingPresentationStage = "kill";
     if (this.runType === "speedrun") {
       this.emit("princessKilled", { ending: "kill" });
-      this.emit("corruptionDestroyed", { ending: "kill" });
+      this.emit("corruptionDestroyed", { ending: "kill", method: "pairedRingBond" });
       this.beginEndingFade();
       return;
     }
     this.startBookend("ending.kill", () => {
       this.emit("princessKilled", { ending: "kill" });
-      this.emit("corruptionDestroyed", { ending: "kill" });
+      this.emit("corruptionDestroyed", { ending: "kill", method: "pairedRingBond" });
       this.beginEndingFade();
     });
   }
@@ -1605,7 +1589,7 @@ export class Game {
 
   togglePause(nowMs = performance.now()) {
     this.endingTimeMs = Math.max(this.endingTimeMs, nowMs);
-    if (["playing", "reward", "blessing", "endingChoice", "endingStrike"].includes(this.phase)) {
+    if (["playing", "blessing", "endingChoice", "endingStrike"].includes(this.phase)) {
       this.pausedPhase = this.phase;
       if (this.phase === "endingChoice") {
         const snapshot = this.ending.pause(this.endingTimeMs);
@@ -1658,13 +1642,15 @@ export class Game {
       this.cancelClaim(`phase:${phase}`);
       this.cancelCombatActions(`phase:${phase}`);
       this.flushGameplayActions();
-      this.resetTransformationCombatState();
+      this.resetProgressionCombatState();
     }
     this.emit("phaseChanged", { phase });
   }
 
   emitHud() {
     if (!this.player) return;
+    const build = progressionBuildSnapshot(this.upgradeRanks);
+    const conditions = progressionConditionsSnapshot(this.progressionState, this.player);
     this.emit("hudChanged", {
       floor: this.floor,
       room: this.room,
@@ -1675,7 +1661,10 @@ export class Game {
       harvest: this.combat.harvest.snapshot(),
       claim: this.claimSnapshots.current,
       claimSnapshots: this.claimSnapshots,
-      paths: summarizeUpgradePaths(this.upgradeRanks, [...RUN_UPGRADES, ...BLESSINGS]),
+      build,
+      progressionState: build,
+      conditions,
+      combatConditions: conditions,
     });
   }
 
@@ -1683,7 +1672,7 @@ export class Game {
     let best = null;
     let bestScore = Infinity;
     for (const enemy of this.director.enemies) {
-      if (!enemy.active) continue;
+      if (!this.director.isEnemyInteractive(enemy)) continue;
       const dx = enemy.position.x - this.player.position.x;
       const dz = enemy.position.z - this.player.position.z;
       const distance = Math.hypot(dx, dz);
@@ -1712,15 +1701,26 @@ export class Game {
     this.emit("showcaseStarted", { mode: this.showcaseMode, seed });
   }
 
-  enterRewardShowcase(seed = "SHOWCASE-REWARD") {
+  enterOathShowcase(seed = "SHOWCASE-OATH") {
     this.startRun(seed);
-    this.showcaseMode = "reward";
+    this.showcaseMode = "oath";
     this.introCompleted = true;
     this.resetPresentationState();
-    for (const enemy of this.director.enemies) enemy.active = false;
-    this.director.pendingWaves.length = 0;
-    this.roomClearResolved = true;
-    this.offerRoomReward();
+    this.director.clearEncounter("oathShowcase");
+    this.floor = 1;
+    this.room = RUN_CONFIG.roomsPerFloor;
+    this.pendingBlessings = chooseBlessings(
+      this.rng.fork("oath-showcase"),
+      this.upgradeRanks,
+      3,
+      this.player,
+      {
+        floor: this.floor,
+        ownedOathIds: this.ownedBlessings,
+        slotOrder: oathSlotOrderForSeed(this.seed),
+      },
+    );
+    this.presentBlessings();
     this.emit("showcaseStarted", { mode: this.showcaseMode, seed });
   }
 
@@ -1732,12 +1732,11 @@ export class Game {
     this.room = RUN_CONFIG.roomsPerFloor;
     this.resetPresentationState();
     this.loadRoom();
-    for (const enemy of this.director.enemies) enemy.active = false;
-    this.director.pendingWaves.length = 0;
+    this.director.clearEncounter("endingShowcase");
     this.flags.queenDefeated = true;
-    this.endingPresentationStage = "revealHuman";
+    this.endingPresentationStage = "witchDeath";
     this.player.invulnerable = Number.POSITIVE_INFINITY;
-    this.startBookend("ending.plea", () => this.beginEndingDecision());
+    this.startBookend("ending.witch-death", () => this.revealPrincessForEnding());
     this.emit("showcaseStarted", { mode: this.showcaseMode, seed });
   }
 

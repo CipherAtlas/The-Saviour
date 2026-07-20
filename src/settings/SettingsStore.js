@@ -54,6 +54,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
       dash: Object.freeze(["ShiftLeft", "Space", "Mouse2", "Gamepad:A"]),
       claim: Object.freeze(["KeyR", "Gamepad:RB"]),
       interact: Object.freeze(["KeyE", "Gamepad:B"]),
+      build: Object.freeze(["KeyB", "Gamepad:Back"]),
       pause: Object.freeze(["Escape", "Gamepad:Menu"]),
     }),
   }),

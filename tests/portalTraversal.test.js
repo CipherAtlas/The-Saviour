@@ -30,8 +30,7 @@ function startGame(seed, options = {}) {
 }
 
 function clearEncounter(game) {
-  for (const enemy of game.director.enemies) enemy.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
   game.checkRoomProgress(RUN_CONFIG.roomClearDelay);
 }
 
@@ -40,19 +39,22 @@ function advanceFixedTime(game, seconds) {
   for (let index = 0; index < steps; index += 1) game.updateFixed(RUN_CONFIG.fixedStep);
 }
 
-test("portal entry gates the mandatory reward before the next chamber", () => {
+test("portal entry continues directly into the next chamber", () => {
   const { game, input } = startGame("CENTER-PORTAL", { requireRoomReady: true });
   const events = [];
   game.on((event) => events.push(event));
   clearEncounter(game);
 
-  assert.deepEqual(game.arena.portal, { x: 0, z: 0 });
+  assert.equal(Number.isFinite(game.arena.portal.x) && Number.isFinite(game.arena.portal.z), true);
   assert.equal(game.phase, "playing");
   assert.equal(game.portalActive, true);
   assert.ok(events.some((event) => event.type === "portalOpened"));
   assert.equal(events.some((event) => event.type === "bookendStarted"), false);
   assert.equal(events.some((event) => event.type === "roomRewardOffered"), false);
-  game.player.position = { x: 0, z: PORTAL_CONFIG.interactionRadius - 0.15 };
+  game.player.position = {
+    x: game.arena.portal.x,
+    z: game.arena.portal.z + PORTAL_CONFIG.interactionRadius - 0.15,
+  };
   game.player.previousPosition = { ...game.player.position };
   game.updateFixed(RUN_CONFIG.fixedStep);
 
@@ -65,25 +67,22 @@ test("portal entry gates the mandatory reward before the next chamber", () => {
   advanceFixedTime(game, PORTAL_CONFIG.traversalDuration * 0.4);
   assert.equal(game.room, 1);
   assert.ok(game.portalTraversal.visualHeight > 0.6);
-  assert.ok(Math.hypot(game.player.position.x, game.player.position.z) < 0.1);
+  assert.ok(Math.hypot(
+    game.player.position.x - game.arena.portal.x,
+    game.player.position.z - game.arena.portal.z,
+  ) < 0.1);
 
   advanceFixedTime(game, PORTAL_CONFIG.traversalDuration * 0.44);
   assert.equal(game.room, 1);
   assert.ok(game.portalTraversal.visualHeight < 0);
 
   advanceFixedTime(game, PORTAL_CONFIG.traversalDuration * 0.2);
-  assert.equal(game.room, 1);
-  assert.equal(game.phase, "reward");
-  assert.equal(game.activeBookend, null);
-  assert.equal(events.filter((event) => event.type === "portalTraversalCompleted").length, 1);
-  assert.equal(events.some((event) => event.type === "roomRewardOffered"), true);
-  assert.equal(game.room, 1);
-  assert.equal(game.portalActive, false);
-  assert.ok(events.some((event) => event.type === "roomRewardOffered"));
-
-  game.chooseRoomReward(game.pendingRoomRewards[0].id);
   assert.equal(game.room, 2);
   assert.equal(game.phase, "roomLoading");
+  assert.equal(game.activeBookend, null);
+  assert.equal(events.filter((event) => event.type === "portalTraversalCompleted").length, 1);
+  assert.equal(events.some((event) => event.type === "roomRewardOffered"), false);
+  assert.equal(game.portalActive, false);
   assert.equal(game.roomReady, false);
 
   const eventTypes = events.map(({ type }) => type);
@@ -92,8 +91,6 @@ test("portal entry gates the mandatory reward before the next chamber", () => {
     "portalOpened",
     "portalTraversalStarted",
     "portalTraversalCompleted",
-    "roomRewardOffered",
-    "roomRewardChosen",
     "arenaChanged",
   ];
   for (let index = 1; index < orderedTypes.length; index += 1) {
@@ -117,7 +114,7 @@ test("the third chamber portal completes once and opens the floor blessing", () 
   game.room = RUN_CONFIG.roomsPerFloor;
   game.loadRoom();
   clearEncounter(game);
-  game.player.position = { x: 0, z: 1.2 };
+  game.player.position = { x: game.arena.portal.x, z: game.arena.portal.z + 1.2 };
   game.player.previousPosition = { ...game.player.position };
   game.updateFixed(RUN_CONFIG.fixedStep);
   advanceFixedTime(game, PORTAL_CONFIG.traversalDuration * 1.2);

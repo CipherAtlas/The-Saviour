@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { createWalkableShape } from "../src/game/arenaGeometry.js";
 import { BLESSINGS } from "../src/game/blessings.js";
 import { Game } from "../src/game/Game.js";
 import { ENDING_TIMING, PLAYER_CONFIG, RUN_CONFIG, SCYTHE_ATTACKS } from "../src/game/gameConfig.js";
-import { RUN_UPGRADES } from "../src/game/runUpgrades.js";
 
 function createInput() {
   const pressed = new Map();
@@ -53,6 +53,12 @@ function createGame(seed) {
   game.on((event) => events.push(event));
   game.startRun(seed);
   while (game.phase === "bookend") game.continueBookend();
+  game.arena.width = 30;
+  game.arena.depth = 22;
+  game.arena.walkableShape = createWalkableShape({
+    regions: [{ id: "combat-test", role: "combat", x: 0, z: 0, width: 30, depth: 22 }],
+  });
+  game.arena.obstacles = [];
   return { game, input, events };
 }
 
@@ -83,8 +89,7 @@ test("actor-facing timing and hit severity thresholds are deeply frozen and orde
 
 test("playerHit is deeply frozen with applied severity, position, and live incoming direction", () => {
   const { game, events } = createGame("PLAYER-HIT-ACTOR-CONTRACT");
-  for (const enemy of game.director.enemies) enemy.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
   game.player.position = { x: 0, z: 0 };
   const enemy = game.director.spawnEnemy("reaver", { x: 4, z: 0 }, 1);
   enemy.speed = 0;
@@ -110,40 +115,11 @@ test("playerHit is deeply frozen with applied severity, position, and live incom
   assert.equal(events.filter((event) => event.type === "playerHit").at(-1).detail.severity, "heavy");
 });
 
-test("positive kill, room, upgrade, blessing, and floor recovery each emit one playerHealed event", () => {
-  const kill = createGame("PLAYER-HEAL-KILL");
-  kill.events.length = 0;
-  kill.game.player.health -= 20;
-  kill.game.player.healthOnKill = 7;
-  kill.game.applyHealthOnKill("attack-heal-source");
-  kill.game.applyHealthOnKill("attack-full-source");
-  const killHeals = kill.events.filter((event) => event.type === "playerHealed");
-  assert.equal(killHeals.length, 2);
-  assert.deepEqual(killHeals[0].detail, {
-    healingId: "player-heal-1",
-    targetId: "player",
-    amount: 7,
-    requestedAmount: 7,
-    reason: "kill",
-    position: kill.game.player.position,
-    health: PLAYER_CONFIG.maxHealth - 13,
-    maxHealth: PLAYER_CONFIG.maxHealth,
-    sourceActionId: "attack-heal-source",
-    upgradeId: null,
-    floor: 1,
-    room: 1,
-  });
-  assert.equal(Object.isFrozen(killHeals[0].detail), true);
-  assert.equal(Object.isFrozen(killHeals[0].detail.position), true);
-  kill.game.player.health = kill.game.player.maxHealth;
-  kill.game.applyHealthOnKill("attack-at-full-health");
-  assert.equal(kill.events.filter((event) => event.type === "playerHealed").length, 2);
-
+test("automatic chamber and floor recovery each emit one playerHealed event", () => {
   const room = createGame("PLAYER-HEAL-ROOM");
   room.events.length = 0;
   room.game.player.health = 40;
-  room.game.director.enemies.length = 0;
-  room.game.director.pendingWaves.length = 0;
+  room.game.director.clearEncounter("testSetup");
   room.game.checkRoomProgress(RUN_CONFIG.roomClearDelay);
   const roomHeal = room.events.filter((event) => event.type === "playerHealed");
   assert.equal(roomHeal.length, 1);
@@ -157,31 +133,17 @@ test("positive kill, room, upgrade, blessing, and floor recovery each emit one p
   assert.equal(roomHeal[0].detail.upgradeId, null);
   assert.equal(room.events.filter((event) => event.type === "roomRecovered").length, 1);
 
-  const upgrade = createGame("PLAYER-HEAL-UPGRADE");
-  upgrade.events.length = 0;
-  upgrade.game.player.health -= 30;
-  upgrade.game.phase = "reward";
-  upgrade.game.roomRewardPending = true;
-  upgrade.game.pendingRoomRewards = [RUN_UPGRADES.find(({ id }) => id === "marrow-vigor")];
-  upgrade.game.chooseRoomReward("marrow-vigor");
-  const upgradeHeals = upgrade.events.filter((event) => event.type === "playerHealed");
-  assert.equal(upgradeHeals.length, 1);
-  assert.equal(upgradeHeals[0].detail.reason, "roomUpgrade");
-  assert.equal(upgradeHeals[0].detail.requestedAmount, 10);
-  assert.equal(upgradeHeals[0].detail.sourceActionId, null);
-  assert.equal(upgradeHeals[0].detail.upgradeId, "marrow-vigor");
-
   const blessing = createGame("PLAYER-HEAL-BLESSING");
   blessing.events.length = 0;
   blessing.game.player.health -= 60;
   blessing.game.phase = "blessing";
-  blessing.game.pendingBlessings = [BLESSINGS.find(({ id }) => id === "royal-blood")];
-  blessing.game.chooseBlessing("royal-blood");
+  blessing.game.pendingBlessings = [BLESSINGS.find(({ id }) => id === "blood-orbit")];
+  blessing.game.chooseBlessing("blood-orbit");
   const blessingHeals = blessing.events.filter((event) => event.type === "playerHealed");
-  assert.deepEqual(blessingHeals.map((event) => event.detail.reason), ["blessing", "floorRecovery"]);
-  assert.deepEqual(blessingHeals.map((event) => event.detail.healingId), ["player-heal-1", "player-heal-2"]);
-  assert.deepEqual(blessingHeals.map((event) => event.detail.upgradeId), ["royal-blood", null]);
-  assert.deepEqual(blessingHeals.map((event) => event.detail.floor), [1, 2]);
+  assert.deepEqual(blessingHeals.map((event) => event.detail.reason), ["floorRecovery"]);
+  assert.deepEqual(blessingHeals.map((event) => event.detail.healingId), ["player-heal-1"]);
+  assert.deepEqual(blessingHeals.map((event) => event.detail.upgradeId), [null]);
+  assert.deepEqual(blessingHeals.map((event) => event.detail.floor), [2]);
   assert.ok(blessingHeals.every((event) => Object.isFrozen(event.detail) && Object.isFrozen(event.detail.position)));
 });
 

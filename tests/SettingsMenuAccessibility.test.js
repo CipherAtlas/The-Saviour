@@ -2,13 +2,31 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { InputController } from "../src/game/InputController.js";
-import { adjustFocusedMenuControl } from "../src/ui/GameUi.js";
-import { SettingsMenu } from "../src/ui/SettingsMenu.js";
+import {
+  adjustFocusedMenuControl,
+  GameUi,
+  menuActionForKeyboardEvent,
+} from "../src/ui/GameUi.js";
+import {
+  fromRangeDisplayValue,
+  SettingsMenu,
+  toRangeDisplayValue,
+} from "../src/ui/SettingsMenu.js";
 
 const settingsSource = readFileSync(new URL("../src/ui/SettingsMenu.js", import.meta.url), "utf8");
 
 test("bookend text is unconditional and Settings has no misleading subtitles toggle", () => {
   assert.doesNotMatch(settingsSource, /accessibility\.subtitles|Subtitles/);
+});
+
+test("Settings range controls use whole-number percentage presentation without changing stored values", () => {
+  assert.equal(toRangeDisplayValue(0), 0);
+  assert.equal(toRangeDisplayValue(0.5), 50);
+  assert.equal(toRangeDisplayValue(1), 100);
+  assert.equal(toRangeDisplayValue(1.25), 125);
+  assert.equal(fromRangeDisplayValue(35), 0.35);
+  assert.equal(fromRangeDisplayValue(150), 1.5);
+  assert.doesNotMatch(settingsSource, /toFixed\(2\)/);
 });
 
 test("Settings exposes linked tablist, tab, and tabpanel semantics", () => {
@@ -24,9 +42,10 @@ test("Settings exposes linked tablist, tab, and tabpanel semantics", () => {
   assert.match(settingsSource, /this\.contentElement\.setAttribute\("aria-labelledby", `settings-tab-\$\{this\.activeTab\}`\)/);
 });
 
-test("Settings tabs support arrow, Home, and End navigation with focus following selection", () => {
+test("Settings tabs support arrows, A/D, Home, and End with focus following selection", () => {
   assert.match(settingsSource, /ArrowUp: -1,[\s\S]*ArrowLeft: -1,[\s\S]*ArrowDown: 1,[\s\S]*ArrowRight: 1/);
   assert.match(settingsSource, /Home: "first",[\s\S]*End: "last"/);
+  assert.match(settingsSource, /KeyA: -1,[\s\S]*KeyD: 1/);
   assert.match(settingsSource, /event\.preventDefault\(\);[\s\S]*event\.stopPropagation\(\);[\s\S]*this\.moveTab/);
   assert.match(settingsSource, /this\.selectTab\(tabs\[nextIndex\], true\)/);
 
@@ -38,6 +57,84 @@ test("Settings tabs support arrow, Home, and End navigation with focus following
   SettingsMenu.prototype.moveTab.call(menu, -1);
   SettingsMenu.prototype.moveTab.call(menu, "last");
   assert.deepEqual(selections, [["controls", true], ["controls", true]]);
+});
+
+test("shared menu focus skips inactive roving-tab controls", () => {
+  const available = [
+    { tabIndex: 0, closest: () => null, getAttribute: () => null },
+    { tabIndex: -1, closest: () => null, getAttribute: () => null },
+    { tabIndex: 0, closest: () => null, getAttribute: () => null },
+  ];
+  const scope = { querySelectorAll: () => available };
+  assert.deepEqual(GameUi.prototype.focusableControls.call({}, scope), [available[0], available[2]]);
+});
+
+test("menu keyboard actions map WASD navigation and Space, Enter, or E confirmation", () => {
+  for (const [code, action] of [
+    ["KeyW", "menuUp"],
+    ["KeyA", "menuLeft"],
+    ["KeyS", "menuDown"],
+    ["KeyD", "menuRight"],
+    ["Space", "menuConfirm"],
+    ["Enter", "menuConfirm"],
+    ["NumpadEnter", "menuConfirm"],
+    ["KeyE", "menuConfirm"],
+  ]) assert.equal(menuActionForKeyboardEvent({ code }), action);
+
+  assert.equal(menuActionForKeyboardEvent({ code: "KeyW", repeat: true }), null);
+  assert.equal(menuActionForKeyboardEvent({ code: "KeyE", ctrlKey: true }), null);
+});
+
+test("menu actions move focus and activate the focused control once", () => {
+  const previousDocument = globalThis.document;
+  const fakeDocument = { activeElement: null };
+  globalThis.document = fakeDocument;
+  try {
+    const activations = [];
+    const control = (name) => ({
+      focus() { fakeDocument.activeElement = this; },
+      click() { activations.push(name); },
+      matches(selector) { return selector.startsWith("button:not(:disabled)"); },
+    });
+    const first = control("first");
+    const second = control("second");
+    const scope = { contains: (candidate) => [first, second].includes(candidate) };
+    const ui = {
+      game: { phase: "title" },
+      focusableControls: () => [first, second],
+    };
+
+    first.focus();
+    assert.equal(GameUi.prototype.handleMenuAction.call(ui, "menuDown", scope), true);
+    assert.equal(fakeDocument.activeElement, second);
+    assert.equal(GameUi.prototype.handleMenuAction.call(ui, "menuConfirm", scope), true);
+    assert.deepEqual(activations, ["second"]);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("shared horizontal menu actions keep Settings categories reachable by controller", () => {
+  const previousDocument = globalThis.document;
+  const tab = { matches: (selector) => selector === "[role='tab']" };
+  globalThis.document = { activeElement: tab };
+  try {
+    const movements = [];
+    const ui = {
+      game: { phase: "title" },
+      settingsMenu: {
+        isOpen: true,
+        moveTab: (direction) => movements.push(direction),
+      },
+    };
+    const scope = { contains: (candidate) => candidate === tab };
+    assert.equal(GameUi.prototype.handleMenuAction.call(ui, "menuRight", scope), true);
+    assert.deepEqual(movements, [1]);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
 });
 
 test("Settings close cancels capture, invokes its callback, and restores the exact trigger", () => {

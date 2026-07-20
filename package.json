@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "node --test",
+    "test:refinement": "node --test tests/refinementContracts.test.js tests/refinementRuntime.test.js tests/refinementPresentation.test.js tests/refinementBalanceModel.test.js tests/encounterPatterns.test.js tests/encounterScheduler.test.js tests/playtestReporterRefinement.test.js tests/difficultyProfiles.test.js tests/attackCoordinator.test.js tests/enemyDirector.test.js tests/autoplayAgent.test.js tests/harnessRefinement.test.js tests/biomes.test.js && node --test --test-name-pattern='arena generation is deterministic|global layout pool|all eight normal families|Witch court' tests/arenaGenerator.test.js",
     "check": "find src tests -name '*.js' -print0 | xargs -0 -n1 node --check"
   },
   "dependencies": {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AutoplayAgent, findNavigationPath } from "../src/playtest/AutoplayAgent.js";
+import { createWalkableShape, isCircleWalkable, isWalkableSegment } from "../src/game/arenaGeometry.js";
+import { AutoplayAgent, createAutoplayState, findNavigationPath } from "../src/playtest/AutoplayAgent.js";
 import { PlaytestReporter } from "../src/playtest/PlaytestReporter.js";
 
 function createState(overrides = {}) {
@@ -46,6 +47,15 @@ function createAgent(initialState, options = {}) {
   };
 }
 
+const lShape = createWalkableShape({
+  regions: [
+    { id: "vertical", role: "combat", x: -4, z: 0, width: 8, depth: 24 },
+    { id: "horizontal", role: "combat", x: 4, z: 8, width: 16, depth: 8 },
+  ],
+  majorRegionIds: ["vertical", "horizontal"],
+  connectors: [{ id: "elbow", from: "vertical", to: "horizontal", width: 8 }],
+});
+
 test("navigation routes around expanded obstacle footprints", () => {
   const arena = {
     width: 18,
@@ -60,6 +70,119 @@ test("navigation routes around expanded obstacle footprints", () => {
     const insideObstacle = Math.abs(point.x) <= 2.05 && Math.abs(point.z) <= 4.28;
     assert.equal(insideObstacle, false);
   }
+});
+
+test("navigation crosses connected lobes without stepping through a concave void", () => {
+  const arena = { width: 20, depth: 24, walkableShape: lShape, obstacles: [] };
+  const path = findNavigationPath({ x: -4, z: -8 }, { x: 7, z: 8 }, arena);
+
+  assert.ok(path.length > 2);
+  assert.ok(path.every((point) => isCircleWalkable(arena, point, 0.58)));
+  for (let index = 1; index < path.length; index += 1) {
+    assert.equal(isWalkableSegment(arena, path[index - 1], path[index], 0.58), true);
+  }
+});
+
+test("shape-aware final steering keeps orbit movement inside a concave boundary", () => {
+  const arena = { width: 20, depth: 24, walkableShape: lShape, portal: { x: -4, z: 0 }, obstacles: [] };
+  const player = { position: { x: 0.7, z: 4.8 }, radius: 0.58, health: 140, maxHealth: 140 };
+  const state = createState({
+    player,
+    arena,
+    enemies: [{ id: 8, type: "reaver", active: true, interactive: true, position: { x: 4.7, z: 4.8 }, health: 90, maxHealth: 90 }],
+  });
+  const { agent, intents } = createAgent(state);
+
+  agent.tick(1 / 60);
+
+  const movement = intents[0].worldMove;
+  const end = { x: player.position.x + movement.x * 2.4, z: player.position.z + movement.z * 2.4 };
+  assert.equal(isWalkableSegment(arena, player.position, end, player.radius), true);
+});
+
+test("emerging enemies are never selected as targets or treated as attack threats", () => {
+  const state = createState({
+    player: { position: { x: 0, z: 0 }, radius: 0.58, health: 140, maxHealth: 140 },
+    enemies: [
+      {
+        id: 1, type: "bombardier", active: true, interactive: false, lifecycleState: "emerging",
+        position: { x: 1, z: 0 }, health: 100, maxHealth: 100, attackPending: true, attackWindup: 0.1,
+      },
+      { id: 2, type: "thrall", active: true, interactive: true, lifecycleState: "active", position: { x: 4, z: 0 }, health: 70, maxHealth: 70 },
+    ],
+  });
+  const { agent, intents } = createAgent(state);
+
+  agent.tick(1 / 60);
+
+  assert.equal(intents[0].mode, "fight");
+  assert.equal(intents[0].targetId, 2);
+});
+
+test("autoplay state exposes authoritative shape, objectives, recipe, and enemy lifecycle", () => {
+  const emerging = {
+    id: 4,
+    type: "hexer",
+    origin: "volatile",
+    active: true,
+    lifecycle: { state: "emerging", remainingSeconds: 0.31 },
+    emergenceDurationSeconds: 0.56,
+    position: { x: -2, z: 4 },
+    radius: 0.6,
+    health: 80,
+    maxHealth: 80,
+  };
+  const game = {
+    phase: "playing",
+    runType: "speedrun",
+    difficultyId: "ruthless",
+    floor: 7,
+    room: 2,
+    portalActive: false,
+    portalTraversal: null,
+    player: { position: { x: -4, z: -8 }, radius: 0.58, health: 120, maxHealth: 140 },
+    combat: {
+      dashCooldown: 0,
+      heavyCooldown: 0,
+      harvest: { snapshot: () => ({ units: 0 }) },
+      claim: { snapshot: () => ({ phase: "idle" }) },
+    },
+    arena: {
+      width: 20,
+      depth: 24,
+      layoutFamily: "lShape",
+      walkableShape: lShape,
+      portal: { x: 7, z: 8 },
+      rewardPosition: { x: 5, z: 8 },
+      combatZones: [{ id: "north", x: 4, z: 8 }],
+      obstacles: [],
+    },
+    director: {
+      encounterPlan: { id: "7-2-hybrid", type: "hybrid", totalPopulation: 13, threat: 18, roleCounts: { ranged: 2 } },
+      encounterScheduler: { snapshot: () => ({ living: 7, spawning: 2, pending: 4, maximumSimultaneous: 9 }) },
+      enemies: [emerging],
+      projectiles: [],
+      isEnemyInteractive: (enemy) => enemy.lifecycle.state === "active",
+    },
+    ending: { snapshot: () => ({ stage: "idle" }) },
+    bookend: { snapshot: () => null },
+    pendingBlessings: [],
+    pendingRoomRewards: [],
+  };
+
+  const state = createAutoplayState(game);
+
+  assert.equal(state.runType, "speedrun");
+  assert.equal(state.arena.layoutFamily, "lShape");
+  assert.equal(state.arena.walkableShape, lShape);
+  assert.deepEqual(state.arena.portal, { x: 7, z: 8 });
+  assert.deepEqual(state.arena.rewardPosition, { x: 5, z: 8 });
+  assert.equal(state.encounter.recipeType, "hybrid");
+  assert.deepEqual({ living: state.encounter.living, spawning: state.encounter.spawning, pending: state.encounter.pending }, {
+    living: 7, spawning: 2, pending: 4,
+  });
+  assert.equal(state.enemies[0].interactive, false);
+  assert.equal(state.enemies[0].lifecycleState, "emerging");
 });
 
 test("the combat policy aims at visible enemies and uses the long-range scythe", () => {
@@ -183,7 +306,7 @@ test("projectile evasion is redirected away from an arena corner", () => {
   assert.ok(intents[0].worldMove.z > 0.1);
 });
 
-test("bookend, reward, blessing, and portal phases use only their public action contracts", () => {
+test("bookend, Oath, and portal phases use only their public action contracts", () => {
   const bookend = createAgent(createState({
     phase: "bookend",
     bookend: { active: true },
@@ -205,17 +328,6 @@ test("bookend, reward, blessing, and portal phases use only their public action 
   }));
   blessing.agent.tick(1 / 60);
   assert.deepEqual(blessing.intents[0].uiAction, { type: "chooseBlessing", id: "health" });
-
-  const reward = createAgent(createState({
-    phase: "reward",
-    player: { position: { x: 0, z: 0 }, health: 30, maxHealth: 140 },
-    reward: { choices: [
-      { id: "reaper", path: "Reaper", description: "Damage increases.", rank: 0 },
-      { id: "grave", path: "Grave", description: "Gain maximum health and heal.", rank: 0 },
-    ] },
-  }));
-  reward.agent.tick(1 / 60);
-  assert.deepEqual(reward.intents[0].uiAction, { type: "chooseRoomReward", id: "grave" });
 
   const portal = createAgent(createState({
     player: { position: { x: 0, z: 1.4 }, radius: 0.58, health: 100, maxHealth: 140 },
@@ -239,6 +351,28 @@ test("repeated failed movement produces a bounded, observable stuck recovery", (
   assert.equal(diagnostics.length, 1);
   assert.equal(diagnostics[0].type, "stuckRecovery");
   assert.ok(intents.some((intent) => intent.mode === "recover"));
+});
+
+test("an impossible route fails closed and emits one reproducible diagnostic", () => {
+  const state = createState({
+    player: { position: { x: -4, z: 0 }, radius: 0.58, health: 140, maxHealth: 140 },
+    arena: {
+      width: 12,
+      depth: 8,
+      portal: { x: 0, z: 0 },
+      obstacles: [{ x: 0, z: 0, width: 12, depth: 8 }],
+    },
+    enemies: [{ id: 9, type: "thrall", active: true, position: { x: 4, z: 0 }, health: 70, maxHealth: 70 }],
+  });
+  const { agent, intents, diagnostics } = createAgent(state);
+
+  agent.tick(1 / 60);
+  agent.tick(1 / 60);
+
+  assert.deepEqual(intents[0].worldMove, { x: 0, z: 0 });
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].type, "navigationUnreachable");
+  assert.deepEqual(diagnostics[0].target, { x: 4, z: 0 });
 });
 
 test("the reporter emits a serializable full-run assessment", () => {
@@ -267,13 +401,11 @@ test("the reporter emits a serializable full-run assessment", () => {
   reporter.recordEvent({ type: "enemyDefeated", detail: { type: "wraith" } });
   reporter.recordEvent({ type: "playerHit", detail: { amount: 12, source: "wraith" } });
   reporter.recordEvent({ type: "bookendStarted", detail: { sequenceId: "intro" } });
-  reporter.recordEvent({ type: "roomRewardOffered", detail: {} });
   reporter.recordEvent({ type: "blessingOffered", detail: {} });
   reporter.recordEvent({ type: "roomCleared", detail: { floor: 1, room: 1 } }, 24);
-  reporter.recordEvent({ type: "roomRewardChosen", detail: {
-    floor: 1, room: 1, id: "whetted-crescent", name: "Whetted Crescent", path: "Reaper", rank: 1,
+  reporter.recordEvent({ type: "blessingChosen", detail: {
+    id: "falling-moon", name: "Falling Moon", path: "Reaper", rank: 1,
   } });
-  reporter.recordEvent({ type: "blessingChosen", detail: { id: "grave-edge", name: "Grave-Tempered Edge" } });
   reporter.recordEvent({
     type: "endingDecisionStarted",
     detail: { decision: { startedAtMs: 10_000 } },
@@ -303,7 +435,6 @@ test("the reporter emits a serializable full-run assessment", () => {
   assert.equal(report.combat.killsByType.wraith, 1);
   assert.equal(report.combat.encounteredByType.wraith, 1);
   assert.equal(report.progression.rooms[0].clearSeconds, 24);
-  assert.equal(report.progression.chamberRewards.length, 1);
   assert.equal(report.progression.pathRanks.Reaper, 1);
   assert.deepEqual(report.progression.bookendSequences, ["intro"]);
   assert.equal(report.performance.fpsP05, 72);

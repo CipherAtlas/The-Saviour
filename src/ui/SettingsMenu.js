@@ -48,11 +48,22 @@ const TABS = Object.freeze({
     ["dash", "Dash", "Primary binding.", "binding"],
     ["claim", "Reaper's Claim", "Primary binding.", "binding"],
     ["interact", "Interact", "Primary binding.", "binding"],
+    ["build", "Build ledger", "Open the current run build.", "binding"],
   ],
 });
 
 function titleCase(value) {
   return value.replace(/([A-Z])/g, " $1").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+const RANGE_DISPLAY_SCALE = 100;
+
+export function toRangeDisplayValue(value) {
+  return Number(value) * RANGE_DISPLAY_SCALE;
+}
+
+export function fromRangeDisplayValue(value) {
+  return Number(value) / RANGE_DISPLAY_SCALE;
 }
 
 export class SettingsMenu {
@@ -149,14 +160,17 @@ export class SettingsMenu {
       button.textContent = titleCase(tab);
       button.addEventListener("click", () => this.selectTab(tab));
       button.addEventListener("keydown", (event) => {
-        const direction = {
+        const direction = ({
           ArrowUp: -1,
           ArrowLeft: -1,
           ArrowDown: 1,
           ArrowRight: 1,
           Home: "first",
           End: "last",
-        }[event.key];
+        }[event.key] ?? {
+          KeyA: -1,
+          KeyD: 1,
+        }[event.code]);
         if (direction === undefined) return;
         event.preventDefault();
         event.stopPropagation();
@@ -207,12 +221,12 @@ export class SettingsMenu {
       const input = document.createElement("input");
       const output = document.createElement("output");
       input.type = "range";
-      [input.min, input.max, input.step] = options.map(String);
-      input.value = this.settings.get(path);
-      output.textContent = Number(input.value).toFixed(2);
+      [input.min, input.max, input.step] = options.map((value) => String(toRangeDisplayValue(value)));
+      input.value = toRangeDisplayValue(this.settings.get(path));
+      output.textContent = input.value;
       input.addEventListener("input", () => {
-        output.textContent = Number(input.value).toFixed(2);
-        this.settings.set(path, Number(input.value));
+        output.textContent = input.value;
+        this.settings.set(path, fromRangeDisplayValue(input.value));
       });
       control.append(input, output);
     }

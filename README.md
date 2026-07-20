@@ -9,8 +9,9 @@ Princess Elowen is missing. Guided by the bond between their paired rings, Princ
 Every run is a fast, build-driven journey through ten increasingly dangerous floors.
 
 - Clear three generated combat chambers on each floor.
-- Enter the portal after a fight and choose an upgrade for the current run.
-- Complete a floor to claim a powerful blessing and shape your build.
+- Recover health automatically after a cleared chamber, then enter its portal immediately.
+- On floors 1–5, swear one of three Oaths for a new core technique.
+- On floors 6–9, master one of your five owned Oaths to Rank II.
 - Adapt to new biomes, enemy combinations, and volatile variants.
 - Reach the final chamber, defeat the Witch, and decide how the story ends.
 
@@ -18,7 +19,7 @@ Choose **New Descent** for the complete story with your preferred difficulty, or
 
 ## Fight with the scythe
 
-Stay aggressive to build **Harvest** through close-range hits, critical strikes, kills, perfect charges, and well-timed dashes. The meter holds three segments; spend a filled segment on **Grave Line** or **Reaper's Claim**.
+Stay aggressive to build **Harvest** through close-range hits, critical strikes, kills, perfect charges, and Perfect Dashes. A Perfect Dash means starting a dash just before an enemy attack connects. The meter holds three segments; spend a filled segment on **Grave Line** or **Reaper's Claim**.
 
 | Technique | Input | How it works |
 | --- | --- | --- |
@@ -37,6 +38,7 @@ Stay aggressive to build **Harvest** through close-range hits, critical strikes,
 | Dash | `Shift`, `Space`, or `Right Mouse` |
 | Enter the next chamber | Walk into the center portal |
 | Act during the final decision | `Left Mouse` or `E` |
+| Navigate menus | `WASD` or arrow keys; `Space`, `Enter`, or `E` to select |
 | Pause | `Escape` |
 
 Bindings can be changed in **Settings**. Controller and touch controls are also supported.

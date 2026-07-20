@@ -237,6 +237,16 @@ test("focused buttons retain native activation and focus-navigation keys without
   }
 });
 
+test("binding capture exposes its active state to menu input", () => {
+  const input = createInput();
+  assert.equal(input.isCapturingBinding, false);
+  const pending = input.captureNextBinding();
+  assert.equal(input.isCapturingBinding, true);
+  input.cancelCapture();
+  assert.equal(input.isCapturingBinding, false);
+  return pending;
+});
+
 test("select and editing controls keep all keyboard behavior native", () => {
   for (const selector of ["select", "input", "textarea", "contenteditable"]) {
     const input = createInput({ moveUp: ["KeyW"] });

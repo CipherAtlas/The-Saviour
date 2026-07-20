@@ -1,4 +1,5 @@
 import { AdaptiveMusic } from "./AdaptiveMusic.js";
+import { CombatSfx } from "./CombatSfx.js";
 import { LicensedSoundtrack, SOUNDTRACK_CUES } from "./LicensedSoundtrack.js";
 import { scheduleEqualPowerFade } from "./gainAutomation.js";
 import { BIOME_PALETTES, normalizeBiome } from "./musicScore.js";
@@ -34,6 +35,77 @@ function biomeForArena(detail) {
   return "forgottenKeep";
 }
 
+function playerAttackSample(detail) {
+  if (detail.line === true) return { cue: "playerLineRelease", volume: 0.98 };
+  if (detail.heavy === true) {
+    const quality = ["partial", "full", "perfect"].includes(detail.chargeQuality)
+      ? detail.chargeQuality
+      : "full";
+    return {
+      cue: `playerQ${quality[0].toUpperCase()}${quality.slice(1)}`,
+      volume: quality === "perfect" ? 1.08 : quality === "full" ? 1 : 0.9,
+    };
+  }
+  if (detail.dash === true) return { cue: "playerDashAttack", volume: 0.82 };
+  const comboIndex = Math.max(0, Math.min(2, Number(detail.comboIndex) || 0));
+  return { cue: `playerBasic${comboIndex + 1}`, volume: 0.7 + comboIndex * 0.08 };
+}
+
+function enemyAttackSample(detail) {
+  const attack = String(detail.attack ?? "").toLowerCase();
+  if (["lunge", "dashlane", "guardcharge", "royaldash"].includes(attack)) {
+    return { cue: "enemyDash", volume: detail.type === "queen" ? 0.62 : 0.54 };
+  }
+  if (detail.type === "queen") {
+    if (["teleport", "summon"].includes(attack)) return null;
+    if (attack === "voidwell") return { cue: "enemyMagicArea", volume: 0.58 };
+    return { cue: "enemyQueen", volume: 0.64 };
+  }
+  if (detail.type === "reaver") return { cue: "enemyMelee", volume: 0.5 };
+  if (detail.type === "boneguard") return { cue: "enemyShield", volume: 0.58 };
+  if (detail.type === "hexer") {
+    return attack === "rune"
+      ? { cue: "enemyMagicArea", volume: 0.48 }
+      : { cue: "enemyMagicBolt", volume: 0.52 };
+  }
+  if (detail.type === "wraith") {
+    return attack.includes("blink")
+      ? { cue: "enemyBlink", volume: 0.52 }
+      : { cue: "enemyWraithSweep", volume: 0.52 };
+  }
+  if (detail.type === "bombardier") {
+    return { cue: attack === "lobbedbomb" ? "enemyMagicBolt" : "enemyMagicArea", volume: 0.52 };
+  }
+  if (detail.type === "thrall") return { cue: "enemyMelee", volume: 0.48 };
+  if (detail.shape === "blink") return { cue: "enemyBlink", volume: 0.5 };
+  if (["circle", "ring"].includes(detail.shape)) return { cue: "enemyMagicArea", volume: 0.48 };
+  return { cue: "enemyMelee", volume: 0.48 };
+}
+
+function projectileImpactSample(detail) {
+  const kind = String(detail.kind ?? "").toLowerCase();
+  if (detail.sourceType === "bombardier" || kind === "cinderbomb") {
+    return { cue: "enemyBomb", volume: 0.68 };
+  }
+  return { cue: "enemyMagicArea", volume: detail.sourceType === "queen" ? 0.64 : 0.56 };
+}
+
+function playerDamageSample(detail) {
+  const source = String(detail.source ?? "").toLowerCase();
+  // Area projectiles emit projectileImpact immediately after damage; that event
+  // owns the explosion so a successful hit does not double the same sample.
+  if (detail.family === "areaProjectile") return null;
+  if (detail.family === "directProjectile") {
+    return { cue: "enemyMagicBolt", volume: 0.58, playbackRate: 0.82 };
+  }
+  if (detail.family === "blink") return { cue: "enemyBlink", volume: 0.58, playbackRate: 0.8 };
+  if (detail.family === "dash") return { cue: "enemyDash", volume: 0.6, playbackRate: 0.78 };
+  if (detail.enemyType === "boneguard" || source === "shieldslam") {
+    return { cue: "enemyShield", volume: 0.64, playbackRate: 0.82 };
+  }
+  return { cue: "enemyMelee", volume: 0.58, playbackRate: 0.8 };
+}
+
 export class AudioSystem {
   constructor(settings, { contextFactory = createDefaultContext } = {}) {
     this.settings = settings;
@@ -44,6 +116,7 @@ export class AudioSystem {
     this.instruments = null;
     this.music = null;
     this.soundtrack = null;
+    this.combatSfx = null;
     this.musicState = "exploration";
     this.musicCue = "title";
     this.licensedPlaybackActive = false;
@@ -101,6 +174,8 @@ export class AudioSystem {
           this.preloadFollowingCue(cueKey);
         },
       });
+      this.combatSfx = new CombatSfx(this.context, sfx);
+      void this.combatSfx.preload();
     }
     this.applySettings(this.settings.getAll());
   }
@@ -121,6 +196,26 @@ export class AudioSystem {
     if (!this.instruments) return false;
     const colorVariation = 1 + (Math.random() - 0.5) * 0.16;
     return this.instruments.playNoise(duration, volume, destination, startAt, frequency * colorVariation);
+  }
+
+  playCombatSample(cueKey, volume, {
+    destination = this.buses?.sfx,
+    startAt = this.context?.currentTime ?? 0,
+    playbackRate = 1,
+    detune = 0,
+  } = {}) {
+    return this.combatSfx?.play(cueKey, {
+      destination,
+      volume,
+      startAt,
+      playbackRate,
+      detune,
+    }) === true;
+  }
+
+  stopChargeSamples() {
+    this.combatSfx?.stopCue("playerQCharge");
+    this.combatSfx?.stopCue("playerLineCharge");
   }
 
   setMusicState(state) {
@@ -261,10 +356,20 @@ export class AudioSystem {
     const comboFinisher = detail.phase === 3 && detail.comboStep === 2;
     this.duckMusicForCriticalSfx(comboFinisher ? 0.38 : 0.28);
     if (detail.action === "teleport") {
+      this.playCombatSample("enemyBlink", comboFinisher ? 0.68 : 0.56, {
+        destination: cue.gain,
+        startAt: now,
+        playbackRate: pitch,
+      });
       this.playNoise(0.13, comboFinisher ? 0.085 : 0.068, cue.gain, now, 1280 * pitch);
       this.playTone(783.99 * pitch, 0.18, comboFinisher ? 0.092 : 0.072, cue.gain, now, "sine", (comboFinisher ? 196 : 329.63) * pitch);
       return;
     }
+    this.playCombatSample("enemyMagicArea", comboFinisher ? 0.68 : 0.56, {
+      destination: cue.gain,
+      startAt: now,
+      playbackRate: pitch,
+    });
     this.playNoise(0.2, 0.082, cue.gain, now, 260 * pitch);
     this.playTone(98 * pitch, 0.3, 0.088, cue.gain, now, "sawtooth", 246.94 * pitch);
   }
@@ -327,6 +432,24 @@ export class AudioSystem {
     );
   }
 
+  playEnemySampleFallback(cueKey, now, scale = 1) {
+    if (["enemyMagicBolt", "enemyBlink", "enemyWraithSweep"].includes(cueKey)) {
+      const frequency = cueKey === "enemyBlink" ? 1450 : cueKey === "enemyWraithSweep" ? 980 : 1720;
+      this.playNoise(0.11, 0.06 * scale, this.buses.sfx, now, frequency);
+      this.playTone(cueKey === "enemyMagicBolt" ? 392 : 293.66, 0.14, 0.045 * scale, this.buses.sfx, now, "triangle", cueKey === "enemyBlink" ? 783.99 : 196);
+      return;
+    }
+    if (["enemyMagicArea", "enemyBomb", "enemyQueen"].includes(cueKey)) {
+      const heavy = cueKey === "enemyBomb";
+      this.playNoise(heavy ? 0.22 : 0.17, (heavy ? 0.095 : 0.072) * scale, this.buses.sfx, now, heavy ? 260 : 390);
+      this.playTone(heavy ? 73.42 : 110, heavy ? 0.26 : 0.2, (heavy ? 0.085 : 0.065) * scale, this.buses.sfx, now, "sawtooth", heavy ? 36.71 : 164.81);
+      return;
+    }
+    const shielded = cueKey === "enemyShield";
+    this.playNoise(0.1, (shielded ? 0.075 : 0.06) * scale, this.buses.sfx, now, shielded ? 430 : 720);
+    this.playTone(shielded ? 98 : 130.81, 0.12, (shielded ? 0.06 : 0.045) * scale, this.buses.sfx, now, shielded ? "square" : "triangle", shielded ? 55 : 82.41);
+  }
+
   handleEvent({ type, detail = {} } = {}) {
     if (!this.context || this.context.state !== "running") return;
     detail ??= {};
@@ -334,10 +457,16 @@ export class AudioSystem {
 
     if (type === "attack") {
       const line = detail.line === true;
-      this.playNoise(line ? 0.18 : 0.09, line ? 0.26 : detail.heavy ? 0.22 : 0.11, this.buses.sfx, now, line ? 920 : detail.heavy ? 520 : 860);
-      this.playTone(line ? 73.42 : detail.heavy ? 95 : 145, line ? 0.22 : 0.1, line ? 0.11 : 0.075, this.buses.sfx, now, "sawtooth", line ? 36.71 : detail.heavy ? 48 : 88);
+      const sample = playerAttackSample(detail);
+      const sampled = this.playCombatSample(sample.cue, sample.volume, { startAt: now });
+      const synthScale = sampled ? (line || detail.heavy ? 0.09 : 0.24) : 1;
+      this.playNoise(line ? 0.18 : 0.09, (line ? 0.26 : detail.heavy ? 0.22 : 0.11) * synthScale, this.buses.sfx, now, line ? 920 : detail.heavy ? 520 : 860);
+      this.playTone(line ? 73.42 : detail.heavy ? 95 : 145, line ? 0.22 : 0.1, (line ? 0.11 : 0.075) * synthScale, this.buses.sfx, now, "sawtooth", line ? 36.71 : detail.heavy ? 48 : 88);
     }
-    if (type === "enemyHit") this.playTone(detail.critical ? 760 : 480, 0.075, detail.critical ? 0.13 : 0.075, this.buses.sfx);
+    if (type === "enemyHit") {
+      const sampled = this.playCombatSample("scytheHit", detail.critical ? 0.78 : 0.52, { startAt: now });
+      this.playTone(detail.critical ? 760 : 480, 0.075, (detail.critical ? 0.13 : 0.075) * (sampled ? 0.28 : 1), this.buses.sfx);
+    }
     if (type === "harvestChanged" && Number(detail.delta) > 0) {
       this.playTone(523.25, 0.1, 0.045, this.buses.ui, now, "triangle", 659.25);
       this.playTone(783.99, 0.12, 0.035, this.buses.ui, now + 0.045, "sine", 880);
@@ -347,63 +476,100 @@ export class AudioSystem {
       this.playNoise(0.055, 0.028, this.buses.ui, now, 520);
     }
     if (type === "claimStarted") {
-      this.playNoise(0.12, 0.085, this.buses.sfx, now, 1480);
-      this.playTone(174.61, 0.16, 0.072, this.buses.sfx, now, "sawtooth", 82.41);
+      const releaseDelay = Number.isFinite(detail.releaseAt) ? Math.max(0, detail.releaseAt) : 0.08;
+      const releaseAt = now + releaseDelay;
+      const sampled = this.playCombatSample("playerClaimOut", 0.88, { startAt: releaseAt });
+      if (!sampled) {
+        this.playNoise(0.12, 0.085, this.buses.sfx, releaseAt, 1480);
+        this.playTone(174.61, 0.16, 0.072, this.buses.sfx, releaseAt, "sawtooth", 82.41);
+      }
     }
     if (type === "claimRecallStarted") {
-      this.playNoise(0.14, 0.055, this.buses.sfx, now, 960);
-      this.playTone(164.81, 0.2, 0.065, this.buses.sfx, now, "triangle", 440);
+      const sampled = this.playCombatSample("playerClaimReturn", 0.86, { startAt: now });
+      if (!sampled) {
+        this.playNoise(0.14, 0.055, this.buses.sfx, now, 960);
+        this.playTone(164.81, 0.2, 0.065, this.buses.sfx, now, "triangle", 440);
+      }
     }
     if (type === "claimCaught") {
-      this.playNoise(0.045, 0.075, this.buses.sfx, now, 260);
-      this.playTone(110, 0.11, 0.085, this.buses.sfx, now, "square", 73.42);
+      const sampled = this.playCombatSample("playerClaimCatch", 0.9, { startAt: now });
+      if (!sampled) {
+        this.playNoise(0.045, 0.075, this.buses.sfx, now, 260);
+        this.playTone(110, 0.11, 0.085, this.buses.sfx, now, "square", 73.42);
+      }
     }
-    if (type === "claimFollowupReady") {
-      this.playTone(392, 0.12, 0.052, this.buses.ui, now, "triangle", 523.25);
-      this.playTone(587.33, 0.16, 0.045, this.buses.ui, now + 0.07, "sine", 783.99);
+    if (type === "claimFollowupConsumed") {
+      const activeDelay = Number.isFinite(detail.activeStart) ? Math.max(0, detail.activeStart) : 0.08;
+      const activeAt = now + activeDelay;
+      const sampled = this.playCombatSample("playerClaimCleave", 1, { startAt: activeAt });
+      if (!sampled) {
+        this.playNoise(0.16, 0.12, this.buses.sfx, activeAt, 520);
+        this.playTone(82.41, 0.22, 0.1, this.buses.sfx, activeAt, "sawtooth", 41.2);
+      }
+    }
+    if (type === "claimFollowupReady" && detail.buffered !== true) {
+      this.playTone(523.25, 0.1, 0.026, this.buses.ui, now, "triangle", 659.25);
     }
     if (type === "claimHit" && detail.pass === "outbound") {
-      this.playTone(293.66, 0.075, 0.052, this.buses.sfx, now, "triangle", 196);
+      this.playTone(293.66, 0.065, 0.025, this.buses.sfx, now, "triangle", 196);
     }
     if (type === "claimHit" && detail.pass === "recall") {
-      this.playTone(329.63, 0.085, 0.055, this.buses.sfx, now, "triangle", 493.88);
+      this.playTone(329.63, 0.075, 0.027, this.buses.sfx, now, "triangle", 493.88);
     }
     if (type === "enemyStaggered") {
       this.playNoise(0.1, 0.09, this.buses.sfx, now, 190);
       this.playTone(73.42, 0.18, 0.105, this.buses.sfx, now, "square", 43.65);
     }
     if (type === "chargeReleased" && ["partial", "full", "perfect"].includes(detail.quality)) {
-      const fullCharge = detail.quality !== "partial";
-      this.playTone(fullCharge ? 196 : 130.81, 0.11, fullCharge ? 0.055 : 0.038, this.buses.sfx, now, "sawtooth", fullCharge ? 146.83 : 98);
-      if (detail.quality === "perfect") {
-        this.playTone(783.99, 0.18, 0.062, this.buses.sfx, now + 0.045, "sine", 1046.5);
-      }
+      this.combatSfx?.stopCue("playerQCharge");
     }
     if (type === "chargeStart") {
-      this.playTone(146.83, 0.16, 0.035, this.buses.sfx, now, "triangle", 196);
+      const sampled = this.playCombatSample("playerQCharge", 0.7, { startAt: now });
+      if (!sampled) this.playTone(146.83, 0.16, 0.035, this.buses.sfx, now, "triangle", 196);
     }
     if (type === "lineChargeStart") {
-      this.playNoise(0.16, 0.032, this.buses.sfx, now, 1280);
-      this.playTone(110, 0.38, 0.045, this.buses.sfx, now, "triangle", 440);
+      const sampled = this.playCombatSample("playerLineCharge", 0.74, { startAt: now });
+      if (!sampled) {
+        this.playNoise(0.16, 0.032, this.buses.sfx, now, 1280);
+        this.playTone(110, 0.38, 0.045, this.buses.sfx, now, "triangle", 440);
+      }
     }
     if (type === "lineChargeReleased") {
+      this.combatSfx?.stopCue("playerLineCharge");
       this.duckMusicForCriticalSfx(detail.forced ? 0.4 : 0.32);
-      this.playNoise(0.24, detail.forced ? 0.14 : 0.11, this.buses.sfx, now, 420);
-      this.playTone(65.41, 0.34, detail.forced ? 0.14 : 0.11, this.buses.sfx, now, "sawtooth", 32.7);
-      this.playTone(523.25, 0.2, 0.055, this.buses.sfx, now + 0.035, "triangle", detail.forced ? 1046.5 : 783.99);
     }
     if (type === "lineChargeRejected") {
+      this.combatSfx?.stopCue("playerLineCharge");
       this.playTone(116.54, 0.12, 0.04, this.buses.ui, now, "square", 82.41);
     }
+    if (type === "combatActionsCancelled" && detail.chargeCancelled === true) {
+      this.stopChargeSamples();
+    }
     if (type === "enemyDefeated") {
+      if (detail.type === "queen") this.clearQueenActionCues();
       this.playTone(detail.type === "queen" ? 92 : 220, detail.type === "queen" ? 0.8 : 0.18, 0.11, this.buses.sfx, now, "triangle", detail.type === "queen" ? 46 : 110);
     }
-    if (type === "dash") this.playNoise(0.12, 0.085, this.buses.sfx, now, 1120);
+    if (type === "dash") {
+      // Grave Line intentionally survives its first dash allowance.
+      this.combatSfx?.stopCue("playerQCharge");
+      const sampled = this.playCombatSample("playerDash", 0.62, { startAt: now });
+      this.playNoise(0.12, 0.085 * (sampled ? 0.22 : 1), this.buses.sfx, now, 1120);
+    }
     if (type === "perfectDash") {
       this.playTone(659.25, 0.12, 0.052, this.buses.ui, now, "triangle", 880);
       this.playTone(1046.5, 0.16, 0.04, this.buses.ui, now + 0.05, "sine", 1318.51);
     }
-    if (type === "playerHit") this.playTone(88, 0.22, 0.15, this.buses.sfx, now, "square", 44);
+    if (type === "playerHit") {
+      const sample = playerDamageSample(detail);
+      const sampled = sample
+        ? this.playCombatSample(sample.cue, detail.severity === "heavy" ? sample.volume * 1.12 : sample.volume, {
+          startAt: now,
+          playbackRate: sample.playbackRate,
+        })
+        : true;
+      if (sample && !sampled) this.playEnemySampleFallback(sample.cue, now, 0.82);
+      this.playTone(88, 0.22, 0.15 * (sampled ? 0.32 : 1), this.buses.sfx, now, "square", 44);
+    }
     if (type === "playerHealed" && Number(detail.amount) > 0) {
       const revived = detail.reason === "deathDefiance";
       this.playTone(revived ? 196 : 440, revived ? 0.38 : 0.16, revived ? 0.075 : 0.035, this.buses.ui, now, "triangle", revived ? 783.99 : 554.37);
@@ -423,6 +589,7 @@ export class AudioSystem {
     }
     if (type === "arenaChanged") {
       this.clearQueenActionCues();
+      this.stopChargeSamples();
       this.setBiome(biomeForArena(detail));
       this.setMusicState(detail.boss ? "boss" : "combat");
     }
@@ -436,8 +603,21 @@ export class AudioSystem {
     if (type === "queenSpecialCancelled") this.cancelQueenActionCue(detail.actionId);
     if (type === "queenGuardsDismissed") this.playQueenGuardDismissal(detail, now);
     if (type === "enemyAttack") {
+      const sample = enemyAttackSample(detail);
+      if (sample) {
+        const sampled = this.playCombatSample(sample.cue, sample.volume, {
+          startAt: now,
+          detune: detail.comboStep === 2 ? -70 : detail.continuesCombo ? 45 : 0,
+        });
+        if (!sampled) this.playEnemySampleFallback(sample.cue, now);
+      }
       this.playQueenComboAccent(detail, now);
       this.playEnemyComboAccent(detail, now);
+    }
+    if (type === "projectileImpact") {
+      const sample = projectileImpactSample(detail);
+      const sampled = this.playCombatSample(sample.cue, sample.volume, { startAt: now });
+      if (!sampled) this.playEnemySampleFallback(sample.cue, now);
     }
     if (type === "encounterWaveStarted") {
       const volatileCount = detail.originCounts?.volatile ?? 0;
@@ -449,6 +629,8 @@ export class AudioSystem {
       }
     }
     if (type === "endingSequenceStarted") {
+      this.clearQueenActionCues();
+      this.stopChargeSamples();
       this.playTone(73.42, 1.1, 0.12, this.buses.sfx, now, "triangle", 36.71);
       this.setMusicState("exploration");
     }
@@ -483,10 +665,12 @@ export class AudioSystem {
     }
     if (type === "runStarted") {
       this.clearQueenActionCues();
+      this.stopChargeSamples();
       this.setMusicState("exploration");
     }
     if (type === "runEnded") {
       this.clearQueenActionCues();
+      this.stopChargeSamples();
       if (detail.completed !== true) this.setMusicState("exploration");
     }
     if (type === "phaseChanged") {
@@ -527,6 +711,7 @@ export class AudioSystem {
       cue: this.musicCue,
       licensed: this.licensedPlaybackActive,
       soundtrack: this.soundtrack?.metrics() ?? null,
+      combatSfx: this.combatSfx?.metrics() ?? null,
     });
   }
 
@@ -534,6 +719,7 @@ export class AudioSystem {
     if (!this.context) return;
     this.clearQueenActionCues();
     this.soundtrack?.dispose();
+    this.combatSfx?.dispose();
     this.instruments.stopAll();
     this.context.close();
     this.context = null;
@@ -542,6 +728,7 @@ export class AudioSystem {
     this.instruments = null;
     this.music = null;
     this.soundtrack = null;
+    this.combatSfx = null;
     this.licensedPlaybackActive = false;
   }
 }

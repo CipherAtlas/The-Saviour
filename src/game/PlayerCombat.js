@@ -4,12 +4,20 @@ import {
   DASH_ATTACK,
   HEAVY_ATTACK,
   PLAYER_CONFIG,
-  PROGRESSION_TRANSFORMATION_CONFIG,
+  PROGRESSION_BALANCE_LIMITS,
   SCYTHE_ATTACKS,
   STRAIGHT_CHARGE_ATTACK,
   STRAIGHT_CHARGE_CONFIG,
 } from "./gameConfig.js";
 import { HarvestState } from "./HarvestState.js";
+import {
+  chargedReapProfile,
+  claimConfigOverrides,
+  comboProfile,
+  dashProfile,
+  graveLineProfile,
+  modifierTotal,
+} from "./progressionRuntime.js";
 import { ReapersClaim } from "./ReapersClaim.js";
 
 function normalize(x, z, fallbackAngle) {
@@ -62,10 +70,14 @@ export class PlayerCombat {
     this.dashRewardResolved = false;
     this.dashInheritedInvulnerability = 0;
     this.dashCooldown = 0;
+    this.dashCooldownDuration = PLAYER_CONFIG.dash.cooldown;
     this.dashDirection = { x: 0, z: 1 };
     this.dashMomentum = { x: 0, z: 0 };
     this.dashMomentumTime = 0;
     this.dashSteeringSuppressed = 0;
+    this.activeDashDistanceMultiplier = 1;
+    this.activePerfectDashWindow = PLAYER_CONFIG.dash.perfectClose;
+    this.comboBridgeDuration = 0;
     this.heavyCooldown = 0;
     this.heavyCharge = 0;
     this.chargingHeavy = false;
@@ -82,6 +94,8 @@ export class PlayerCombat {
   }
 
   update(dt, input, player, movement, callbacks) {
+    this.currentPlayer = player;
+    this.claim.setConfig(claimConfigOverrides(player, CLAIM_CONFIG));
     const attackWasActive = Boolean(this.attack);
     this.tickTimers(dt);
     this.captureInput(input);
@@ -287,6 +301,7 @@ export class PlayerCombat {
   }
 
   updatePrimaryInput(dt, input, player) {
+    const buildupDuration = this.lineBuildupDuration(player);
     if (this.primaryReleaseRequest) {
       const release = this.primaryReleaseRequest;
       this.primaryReleaseRequest = null;
@@ -318,7 +333,7 @@ export class PlayerCombat {
         }
         const overflow = Math.max(0, this.primaryHoldTime - STRAIGHT_CHARGE_CONFIG.holdThreshold);
         this.startPrimaryCharge(player, this.primaryChargeRequest?.timeStamp ?? performance.now(), overflow);
-        if (this.primaryCharge >= STRAIGHT_CHARGE_CONFIG.buildupDuration) {
+        if (this.primaryCharge >= buildupDuration) {
           this.releasePrimaryCharge(player, true);
         }
         return;
@@ -330,13 +345,13 @@ export class PlayerCombat {
     }
 
     if (!this.chargingPrimary) return;
-    this.primaryCharge = Math.min(STRAIGHT_CHARGE_CONFIG.buildupDuration, this.primaryCharge + dt);
-    if (this.primaryCharge >= STRAIGHT_CHARGE_CONFIG.buildupDuration) {
+    this.primaryCharge = Math.min(buildupDuration, this.primaryCharge + dt);
+    if (this.primaryCharge >= buildupDuration) {
       this.releasePrimaryCharge(
         player,
         true,
         (this.primaryChargeRequest?.timeStamp ?? performance.now())
-          + (STRAIGHT_CHARGE_CONFIG.holdThreshold + STRAIGHT_CHARGE_CONFIG.buildupDuration) * 1000,
+          + (STRAIGHT_CHARGE_CONFIG.holdThreshold + buildupDuration) * 1000,
       );
     }
   }
@@ -346,7 +361,7 @@ export class PlayerCombat {
     this.primaryChargeActionId = `line-charge-${this.primaryChargeActionSerial}`;
     this.primaryHoldArmed = false;
     this.chargingPrimary = true;
-    this.primaryCharge = Math.min(STRAIGHT_CHARGE_CONFIG.buildupDuration, Math.max(0, initialCharge));
+    this.primaryCharge = Math.min(this.lineBuildupDuration(player), Math.max(0, initialCharge));
     this.emit("lineChargeStart", Object.freeze({
       actionId: this.primaryChargeActionId,
       inputTime,
@@ -357,7 +372,7 @@ export class PlayerCombat {
   }
 
   primaryChargeValues() {
-    const rawRatio = Math.min(1, this.primaryCharge / STRAIGHT_CHARGE_CONFIG.buildupDuration);
+    const rawRatio = Math.min(1, this.primaryCharge / this.lineBuildupDuration(this.currentPlayer));
     const easedRatio = 1 - (1 - rawRatio) ** 3;
     const power = STRAIGHT_CHARGE_CONFIG.minimumPower
       + (1 - STRAIGHT_CHARGE_CONFIG.minimumPower) * easedRatio;
@@ -382,15 +397,21 @@ export class PlayerCombat {
       this.cancelPrimaryCharge();
       return false;
     }
+    const profile = graveLineProfile(player);
     const chargedAttack = Object.freeze({
       ...STRAIGHT_CHARGE_ATTACK,
       range: STRAIGHT_CHARGE_ATTACK.range * values.rangeScale,
-      width: STRAIGHT_CHARGE_ATTACK.width * values.widthScale,
-      damage: STRAIGHT_CHARGE_ATTACK.damage * values.power,
-      poiseDamage: STRAIGHT_CHARGE_ATTACK.poiseDamage * values.power,
+      width: STRAIGHT_CHARGE_ATTACK.width * values.widthScale * profile.widthMultiplier,
+      damage: STRAIGHT_CHARGE_ATTACK.damage * values.power * profile.damageMultiplier,
+      poiseDamage: STRAIGHT_CHARGE_ATTACK.poiseDamage * values.power * profile.poiseMultiplier,
+      duration: STRAIGHT_CHARGE_ATTACK.duration * profile.recoveryMultiplier,
+      activeStart: STRAIGHT_CHARGE_ATTACK.activeStart * profile.recoveryMultiplier,
+      activeEnd: STRAIGHT_CHARGE_ATTACK.activeEnd * profile.recoveryMultiplier,
+      cancelToDashAt: STRAIGHT_CHARGE_ATTACK.cancelToDashAt * profile.recoveryMultiplier,
       chargeKind: "line",
       chargeRatio: values.rawRatio,
       lineChargeActionId: this.primaryChargeActionId,
+      progressionLine: profile,
     });
     const actionId = this.primaryChargeActionId;
     const dashesUsed = this.primaryChargeDashesUsed;
@@ -402,7 +423,7 @@ export class PlayerCombat {
       actionId,
       inputTime,
       releaseTime,
-      elapsed: STRAIGHT_CHARGE_CONFIG.holdThreshold + values.rawRatio * STRAIGHT_CHARGE_CONFIG.buildupDuration,
+      elapsed: STRAIGHT_CHARGE_CONFIG.holdThreshold + values.rawRatio * this.lineBuildupDuration(player),
       ratio: values.rawRatio,
       forced,
       range: chargedAttack.range,
@@ -460,7 +481,7 @@ export class PlayerCombat {
     }
 
     if (!this.chargingHeavy) return;
-    const timing = CHARGE_CONFIG.timing;
+    const timing = this.chargeTiming(player);
     this.heavyCharge = Math.min(timing.forcedRelease, this.heavyCharge + dt);
     if (this.chargeState === "releaseQueued") {
       const capturedElapsed = Math.max(0, (this.chargeReleaseTime - this.chargeStartTime) / 1000);
@@ -501,7 +522,7 @@ export class PlayerCombat {
 
   releaseHeavy(player, forced = this.chargeReleaseForced === true) {
     if (!this.chargingHeavy || this.chargeState !== "releaseQueued") return false;
-    const timing = CHARGE_CONFIG.timing;
+    const timing = this.chargeTiming(player);
     const capturedElapsed = Math.max(0, (this.chargeReleaseTime - this.chargeStartTime) / 1000);
     const elapsed = forced
       ? timing.forcedRelease
@@ -511,22 +532,36 @@ export class PlayerCombat {
         : elapsed >= timing.fullThreshold ? "full" : "partial";
     const values = CHARGE_CONFIG.qualities[quality];
     const ratio = Math.min(1, elapsed / timing.forcedRelease);
-    const graveEdgeRank = player.transformationRanks?.graveEdgeCharge ?? 0;
-    const chargedPoiseDamage = values.poiseDamage * (
-      1 + PROGRESSION_TRANSFORMATION_CONFIG.graveEdgeCharge.poiseDamagePerRank * graveEdgeRank
-    );
+    const profile = chargedReapProfile(player, quality);
+    const bloodEmpowered = profile.healthCost > 0 && player.health > profile.healthCost;
+    const bloodDamageMultiplier = bloodEmpowered ? 1 : 1 / (1 + (modifierTotal(player, "bloodOrbit")?.damageBonus ?? 0));
+    if (bloodEmpowered) {
+      player.health -= profile.healthCost;
+      this.emit("bloodOrbitSpent", Object.freeze({
+        actionId: this.chargeActionId,
+        amount: profile.healthCost,
+        health: player.health,
+        maxHealth: player.maxHealth,
+      }));
+    }
+    const recoveryMultiplier = profile.recoveryMultiplier;
     const chargedAttack = Object.freeze({
       ...HEAVY_ATTACK,
       range: HEAVY_ATTACK.range * values.rangeMultiplier,
-      damage: HEAVY_ATTACK.damage * values.damageMultiplier,
-      poiseDamage: chargedPoiseDamage,
+      damage: HEAVY_ATTACK.damage * values.damageMultiplier * profile.damageMultiplier * bloodDamageMultiplier,
+      poiseDamage: values.poiseDamage * profile.poiseMultiplier,
+      duration: HEAVY_ATTACK.duration * recoveryMultiplier,
+      activeStart: HEAVY_ATTACK.activeStart * recoveryMultiplier,
+      activeEnd: HEAVY_ATTACK.activeEnd * recoveryMultiplier,
+      cancelToDashAt: HEAVY_ATTACK.cancelToDashAt * recoveryMultiplier,
       harvestUnits: values.harvestUnits,
       chargeRatio: ratio,
       chargeQuality: quality,
       chargeActionId: this.chargeActionId,
+      bloodOrbit: bloodEmpowered ? Object.freeze({ healPerEnemy: profile.healPerEnemy, healCap: profile.healCap }) : null,
     });
     this.chargingHeavy = false;
-    this.heavyCooldown = HEAVY_ATTACK.cooldown;
+    this.heavyCooldown = HEAVY_ATTACK.cooldown * profile.cooldownMultiplier;
     this.chargeState = quality;
     this.emit("chargeReleased", Object.freeze({
       actionId: this.chargeActionId,
@@ -563,6 +598,8 @@ export class PlayerCombat {
   }
 
   startDash(player, movement, request = this.dashRequest) {
+    const profile = dashProfile(player);
+    const ghost = modifierTotal(player, "ghostCadence");
     this.dashActionSerial += 1;
     this.dashActionId = `dash-${this.dashActionSerial}`;
     this.dashInputTime = Number.isFinite(request?.timeStamp) ? request.timeStamp : null;
@@ -571,19 +608,34 @@ export class PlayerCombat {
     this.dashInheritedInvulnerability = Math.max(0, player.invulnerable);
     this.dashDirection = normalize(movement.x, movement.y, player.aimAngle);
     this.dashTime = PLAYER_CONFIG.dash.duration;
-    this.dashCooldown = PLAYER_CONFIG.dash.cooldown * player.dashCooldownMultiplier;
+    this.dashCooldownDuration = Math.max(PROGRESSION_BALANCE_LIMITS.dashCooldownSeconds, PLAYER_CONFIG.dash.cooldown
+      * player.dashCooldownMultiplier
+      * profile.cooldownMultiplier);
+    this.dashCooldown = this.dashCooldownDuration;
+    this.activeDashDistanceMultiplier = profile.distanceMultiplier;
+    this.activePerfectDashWindow = profile.perfectWindowSeconds ?? PLAYER_CONFIG.dash.perfectClose;
+    this.comboBridgeDuration = Math.max(
+      this.comboBridgeDuration,
+      ghost ? PLAYER_CONFIG.combat.comboGrace + PLAYER_CONFIG.dash.duration : 0,
+    );
+    if (this.comboWindow > 0 && this.comboBridgeDuration > 0) {
+      this.comboWindow = Math.max(this.comboWindow, this.comboBridgeDuration);
+    }
     this.dashMomentum.x = 0;
     this.dashMomentum.z = 0;
     this.dashMomentumTime = 0;
     this.dashRequest = null;
-    player.invulnerable = Math.max(player.invulnerable, PLAYER_CONFIG.dash.invulnerability);
+    player.invulnerable = Math.max(
+      player.invulnerable,
+      profile.invulnerabilitySeconds ?? PLAYER_CONFIG.dash.invulnerability,
+    );
     this.emit("dash", Object.freeze({
       actionId: this.dashActionId,
       inputTime: this.dashInputTime,
       elapsed: this.dashElapsed,
       duration: PLAYER_CONFIG.dash.duration,
       perfectOpen: PLAYER_CONFIG.dash.perfectOpen,
-      perfectClose: PLAYER_CONFIG.dash.perfectClose,
+      perfectClose: this.activePerfectDashWindow,
       inheritedInvulnerability: this.dashInheritedInvulnerability,
       position: Object.freeze({ ...player.position }),
       direction: Object.freeze({ ...this.dashDirection }),
@@ -608,7 +660,7 @@ export class PlayerCombat {
     }
     if (
       this.dashElapsed < PLAYER_CONFIG.dash.perfectOpen
-      || this.dashElapsed >= PLAYER_CONFIG.dash.perfectClose
+      || this.dashElapsed >= this.activePerfectDashWindow
     ) {
       return Object.freeze({ accepted: false, reason: "outsideWindow", ...base });
     }
@@ -682,7 +734,26 @@ export class PlayerCombat {
   }
 
   startAttack(definition, comboIndex, isDashAttack = false, facing = 0) {
-    this.attack = definition;
+    const combo = comboIndex >= 0 ? comboProfile(this.currentPlayer, comboIndex) : null;
+    const transformedCombo = combo && (
+      combo.damageMultiplier !== 1
+      || combo.poiseMultiplier !== 1
+      || combo.reachMultiplier !== 1
+      || combo.timingMultiplier !== 1
+    );
+    this.attack = transformedCombo ? Object.freeze({
+      ...definition,
+      duration: definition.duration * combo.timingMultiplier,
+      activeStart: definition.activeStart * combo.timingMultiplier,
+      activeEnd: definition.activeEnd * combo.timingMultiplier,
+      queueOpen: (definition.queueOpen ?? definition.activeEnd) * combo.timingMultiplier,
+      chainAt: Number.isFinite(definition.chainAt) ? definition.chainAt * combo.timingMultiplier : definition.chainAt,
+      cancelToDashAt: definition.cancelToDashAt * combo.timingMultiplier,
+      range: definition.range * combo.reachMultiplier,
+      comboIndex,
+      progressionCombo: combo,
+      isDashAttack: false,
+    }) : definition;
     this.attackTime = 0;
     this.attackHitIds.clear();
     this.attackFacing = facing;
@@ -692,26 +763,26 @@ export class PlayerCombat {
     this.comboNextIndex = definition.nextComboIndex;
     this.queuedAttack = false;
     this.emit("attack", Object.freeze({
-      name: definition.name,
-      range: definition.range,
-      arc: definition.arc,
-      swing: definition.swing ?? 1,
-      duration: definition.duration,
-      activeStart: definition.activeStart,
-      activeEnd: definition.activeEnd,
-      chainAt: definition.chainAt ?? null,
+      name: this.attack.name,
+      range: this.attack.range,
+      arc: this.attack.arc,
+      swing: this.attack.swing ?? 1,
+      duration: this.attack.duration,
+      activeStart: this.attack.activeStart,
+      activeEnd: this.attack.activeEnd,
+      chainAt: this.attack.chainAt ?? null,
       comboIndex,
       facing,
       heavy: comboIndex < 0 && !isDashAttack,
       line: definition.shape === "line",
-      shape: definition.shape ?? "arc",
-      width: definition.width ?? null,
+      shape: this.attack.shape ?? "arc",
+      width: this.attack.width ?? null,
       dash: isDashAttack,
-      chargeActionId: definition.chargeActionId ?? null,
-      chargeQuality: definition.chargeQuality ?? null,
-      poiseDamage: definition.poiseDamage ?? null,
-      harvestUnits: definition.harvestUnits ?? 0,
-      lineChargeActionId: definition.lineChargeActionId ?? null,
+      chargeActionId: this.attack.chargeActionId ?? null,
+      chargeQuality: this.attack.chargeQuality ?? null,
+      poiseDamage: this.attack.poiseDamage ?? null,
+      harvestUnits: this.attack.harvestUnits ?? 0,
+      lineChargeActionId: this.attack.lineChargeActionId ?? null,
     }));
   }
 
@@ -744,7 +815,8 @@ export class PlayerCombat {
 
     if (Number.isInteger(nextCombo)) {
       this.comboNextIndex = nextCombo;
-      this.comboWindow = PLAYER_CONFIG.combat.comboGrace;
+      this.comboWindow = Math.max(PLAYER_CONFIG.combat.comboGrace, this.comboBridgeDuration);
+      this.comboBridgeDuration = 0;
     } else {
       this.comboIndex = -1;
       this.comboNextIndex = 0;
@@ -783,8 +855,8 @@ export class PlayerCombat {
   movementVelocity(dt, movement) {
     if (this.dashTime > 0) {
       return {
-        x: this.dashDirection.x * PLAYER_CONFIG.dash.speed,
-        z: this.dashDirection.z * PLAYER_CONFIG.dash.speed,
+        x: this.dashDirection.x * PLAYER_CONFIG.dash.speed * this.activeDashDistanceMultiplier,
+        z: this.dashDirection.z * PLAYER_CONFIG.dash.speed * this.activeDashDistanceMultiplier,
       };
     }
 
@@ -799,6 +871,32 @@ export class PlayerCombat {
     const carryZ = this.dashMomentum.z;
     this.decayDashMomentum(dt, movement);
     return { x: desiredX + carryX, z: desiredZ + carryZ };
+  }
+
+  lineBuildupDuration(player = this.currentPlayer) {
+    return STRAIGHT_CHARGE_CONFIG.buildupDuration * graveLineProfile(player).buildupMultiplier;
+  }
+
+  chargeTiming(player = this.currentPlayer) {
+    const profile = chargedReapProfile(player, "partial");
+    const timingMultiplier = profile.timingMultiplier;
+    const base = CHARGE_CONFIG.timing;
+    const center = ((base.perfectOpen + base.perfectClose) / 2) * timingMultiplier;
+    const width = profile.perfectWindowSeconds ?? (base.perfectClose - base.perfectOpen) * timingMultiplier;
+    const normalizeBoundary = (seconds) => Math.round(seconds * 1_000_000) / 1_000_000;
+    return Object.freeze({
+      minimumRelease: normalizeBoundary(base.minimumRelease * timingMultiplier),
+      fullThreshold: normalizeBoundary(base.fullThreshold * timingMultiplier),
+      perfectOpen: normalizeBoundary(center - width / 2),
+      perfectClose: normalizeBoundary(center + width / 2),
+      forcedRelease: normalizeBoundary(base.forcedRelease * timingMultiplier),
+    });
+  }
+
+  reduceChargedReapCooldown(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) return this.heavyCooldown;
+    this.heavyCooldown = Math.max(0, this.heavyCooldown - seconds);
+    return this.heavyCooldown;
   }
 
   decayDashMomentum(dt, movement) {

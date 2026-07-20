@@ -3,7 +3,7 @@ import { RunStatsAccumulator } from "./RunStatsAccumulator.js";
 import { deriveStatisticsView } from "../settings/StatisticsStore.js";
 import { SpeedrunRecordsStore } from "../settings/SpeedrunRecordsStore.js";
 
-const SPEEDRUN_TIMED_PHASES = new Set(["playing", "portalTraversal", "reward", "blessing"]);
+const SPEEDRUN_TIMED_PHASES = new Set(["playing", "portalTraversal", "blessing"]);
 
 let runSerial = 0;
 
@@ -126,7 +126,11 @@ export class RunSessionController {
           speedrunFinished: this.speedrunTimer.finished,
         });
         const record = this.speedrunRecords.recordRun(speedrunSummary);
-        this.lastCompletedRun = Object.freeze({ ...speedrunSummary, isPersonalBest: record.newBest });
+        this.lastCompletedRun = Object.freeze({
+          ...speedrunSummary,
+          isPersonalBest: record.newBest,
+          leaderboardRank: record.leaderboardRank,
+        });
       } else {
         this.lastCompletedRun = Object.freeze({ ...summary, runType: "normal" });
         this.statistics.recordCompletedRun(summary);

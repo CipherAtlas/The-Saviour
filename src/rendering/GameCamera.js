@@ -9,7 +9,6 @@ export class GameCamera {
     this.trauma = 0;
     this.time = 0;
     this.aspect = 1;
-    this.arena = null;
     this.raycaster = new THREE.Raycaster();
     this.groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     this.intersection = new THREE.Vector3();
@@ -32,10 +31,6 @@ export class GameCamera {
     this.camera.updateProjectionMatrix();
   }
 
-  setArena(arena) {
-    this.arena = arena;
-  }
-
   snapTo(position) {
     this.focus.set(position.x, 0, position.z);
     this.positionCamera(this.focus, 0, 0);
@@ -46,7 +41,15 @@ export class GameCamera {
     this.trauma = Math.min(1, this.trauma + amount * this.settings.get("camera.shake"));
   }
 
-  update(dt, playerPosition, aimPoint, bossActive, portalTraversal = null, endingUrgency = 0) {
+  update(
+    dt,
+    playerPosition,
+    aimPoint,
+    bossActive,
+    portalTraversal = null,
+    endingUrgency = 0,
+    lowHealthUrgency = 0,
+  ) {
     this.time += dt;
     const lookAheadSetting = this.settings.get("camera.aimLookAhead");
     const dx = aimPoint.x - playerPosition.x;
@@ -57,20 +60,20 @@ export class GameCamera {
     const targetZ = portalTraversal?.target?.z ?? playerPosition.z + (dz / length) * lookAhead + 0.9;
     const target = new THREE.Vector3(targetX, 0, targetZ);
 
-    if (this.arena) {
-      target.x = THREE.MathUtils.clamp(target.x, -this.arena.width / 2 + 5, this.arena.width / 2 - 5);
-      target.z = THREE.MathUtils.clamp(target.z, -this.arena.depth / 2 + 4, this.arena.depth / 2 - 4);
-    }
-
     const followRate = portalTraversal ? CAMERA_CONFIG.followRate * 1.75 : CAMERA_CONFIG.followRate;
     const smoothing = 1 - Math.exp(-followRate * dt);
     this.focus.lerp(target, smoothing);
     this.trauma = Math.max(0, this.trauma - dt * 2.4);
-    const endingShake = this.settings.get("camera.reducedMotion")
-      ? 0
-      : Math.max(0, Math.min(1, endingUrgency)) * this.settings.get("camera.shake");
-    const shake = Math.max(this.trauma * this.trauma, endingShake * endingShake * 0.92);
-    const frequency = 1 + endingShake * 0.72;
+    const reducedMotion = this.settings.get("camera.reducedMotion");
+    const shakeSetting = reducedMotion ? 0 : this.settings.get("camera.shake");
+    const endingShake = Math.max(0, Math.min(1, endingUrgency)) * shakeSetting;
+    const lowHealthShake = Math.max(0, Math.min(1, lowHealthUrgency)) * shakeSetting * 0.46;
+    const shake = Math.max(
+      this.trauma * this.trauma,
+      endingShake * endingShake * 0.92,
+      lowHealthShake,
+    );
+    const frequency = 1 + endingShake * 0.72 + lowHealthShake * 0.38;
     const shakeX = Math.sin(this.time * 43.7 * frequency) * shake * 0.32;
     const shakeZ = Math.sin(this.time * 37.1 * frequency + 1.7) * shake * 0.25;
     let dynamicMultiplier = this.settings.get("camera.dynamicZoom") && bossActive ? CAMERA_CONFIG.bossZoomMultiplier : 1;

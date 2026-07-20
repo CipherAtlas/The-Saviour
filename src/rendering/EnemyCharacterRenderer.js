@@ -2,6 +2,10 @@ import * as THREE from "three";
 import { clone as cloneSkeleton } from "three/addons/utils/SkeletonUtils.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { ENEMY_ARCHETYPES } from "../game/enemyArchetypes.js";
+import {
+  ENEMY_EMERGENCE,
+  ENEMY_LIFECYCLE_STATES,
+} from "../game/encounterContracts.js";
 import { createEnemyEquipment } from "./createEnemyEquipment.js";
 import {
   detailedEnemyLimit,
@@ -13,7 +17,6 @@ import {
   getEnemyVisualProfile,
 } from "./enemyVisualProfiles.js";
 
-const SPAWN_DURATION = 0.56;
 const SPAWN_START_SCALE_XZ = 0.94;
 const SPAWN_START_SCALE_Y = 0.86;
 const SPAWN_RISE_DEPTH = 0.16;
@@ -114,6 +117,36 @@ export function createEnemyProxyGeometry(type) {
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
+}
+
+export function sampleEnemyEmergencePresentation(enemy, fallbackElapsedSeconds = 0) {
+  const durationSeconds = ENEMY_EMERGENCE.durationSeconds;
+  const lifecycle = enemy?.lifecycle;
+  const lifecycleState = lifecycle?.state ?? enemy?.lifecycleState;
+  if (lifecycleState != null) {
+    if (lifecycleState !== ENEMY_LIFECYCLE_STATES.EMERGING) {
+      return { emerging: false, elapsedSeconds: durationSeconds, progress: 1, durationSeconds };
+    }
+    const elapsedSeconds = Number.isFinite(lifecycle?.elapsedSeconds)
+      ? lifecycle.elapsedSeconds
+      : Number.isFinite(lifecycle?.remainingSeconds)
+        ? durationSeconds - lifecycle.remainingSeconds
+        : fallbackElapsedSeconds;
+    const boundedElapsed = Math.max(0, Math.min(durationSeconds, elapsedSeconds));
+    return {
+      emerging: true,
+      elapsedSeconds: boundedElapsed,
+      progress: clamp01(boundedElapsed / durationSeconds),
+      durationSeconds,
+    };
+  }
+  const boundedElapsed = Math.max(0, Math.min(durationSeconds, fallbackElapsedSeconds));
+  return {
+    emerging: boundedElapsed < durationSeconds,
+    elapsedSeconds: boundedElapsed,
+    progress: clamp01(boundedElapsed / durationSeconds),
+    durationSeconds,
+  };
 }
 
 function normalizedPresentationProgress(state) {
@@ -614,6 +647,7 @@ export class EnemyCharacterRenderer {
     const profile = getEnemyVisualProfile(enemy.type);
     const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "stable");
     record.age += dt;
+    const emergence = sampleEnemyEmergencePresentation(enemy, record.age);
     if (!enemy.active) record.deathAge = record.deathAge < 0 ? 0 : record.deathAge + dt;
     const index = this.proxyCounts.get(enemy.type) ?? 0;
     const mesh = this.proxyMeshes.get(enemy.type);
@@ -635,15 +669,14 @@ export class EnemyCharacterRenderer {
     let roll = stride * (moving ? 0.045 : 0.018) + originPulse * originProfile.sway;
     let y = (profile.floatHeight ?? 0) + (moving ? Math.abs(stride) * 0.055 : 0);
 
-    if (record.age < SPAWN_DURATION) {
-      const progress = clamp01(record.age / SPAWN_DURATION);
-      const spawnScale = easeOutBack(progress);
+    if (emergence.emerging) {
+      const spawnScale = easeOutBack(emergence.progress);
       const spawnScaleXZ = SPAWN_START_SCALE_XZ + spawnScale * (1 - SPAWN_START_SCALE_XZ);
       scaleX *= spawnScaleXZ;
       scaleY *= SPAWN_START_SCALE_Y + spawnScale * (1 - SPAWN_START_SCALE_Y);
       scaleZ *= spawnScaleXZ;
-      y -= (1 - progress) ** 2 * SPAWN_RISE_DEPTH;
-      roll += (1 - progress) * originProfile.spawnLean * Math.sign(Math.sin((enemy.originPhase ?? 0) + 0.5));
+      y -= (1 - emergence.progress) ** 2 * SPAWN_RISE_DEPTH;
+      roll += (1 - emergence.progress) * originProfile.spawnLean * Math.sign(Math.sin((enemy.originPhase ?? 0) + 0.5));
     }
     if (enemy.attackPending || record.releaseTime > 0) {
       const attack = getEnemyAttackVisual(enemy.type, enemy.attackKind ?? record.releaseKind);
@@ -750,13 +783,13 @@ export class EnemyCharacterRenderer {
   syncActor(record, enemy, alpha, dt) {
     const profile = getEnemyVisualProfile(enemy.type);
     record.age += dt;
+    const emergence = sampleEnemyEmergencePresentation(enemy, record.age);
     if (!enemy.active) record.deathAge = record.deathAge < 0 ? 0 : record.deathAge + dt;
     const x = interpolated(enemy.previousPosition.x, enemy.position.x, alpha);
     const z = interpolated(enemy.previousPosition.z, enemy.position.z, alpha);
     let y = profile.floatHeight ? Math.sin(this.clockTime * 3.2 + enemy.id) * 0.06 : 0;
-    if (record.age < SPAWN_DURATION) {
-      const progress = clamp01(record.age / SPAWN_DURATION);
-      y -= (1 - progress) ** 2 * SPAWN_RISE_DEPTH;
+    if (emergence.emerging) {
+      y -= (1 - emergence.progress) ** 2 * SPAWN_RISE_DEPTH;
     }
     record.root.position.set(x, y, z);
     const facingX = enemy.facing?.x ?? 0;
@@ -767,10 +800,13 @@ export class EnemyCharacterRenderer {
       enemy.position.x - enemy.previousPosition.x,
       enemy.position.z - enemy.previousPosition.z,
     );
-    const animation = this.resolveAnimation(record, enemy, movement > 0.002);
+    const animation = this.resolveAnimation(record, enemy, movement > 0.002, emergence);
     this.playAnimation(record, animation);
     record.mixer.update(dt);
-    this.syncPose(record, enemy);
+    if (emergence.emerging && record.stateKey === "spawn" && record.currentAction) {
+      record.currentAction.time = record.currentAction.getClip().duration * emergence.progress;
+    }
+    this.syncPose(record, enemy, emergence);
     this.syncMaterials(record, enemy);
 
     this.advancePresentationTimers(record, dt);
@@ -818,7 +854,7 @@ export class EnemyCharacterRenderer {
     return this.clips.has(profile.idleClip) ? profile.idleClip : null;
   }
 
-  resolveAnimation(record, enemy, moving) {
+  resolveAnimation(record, enemy, moving, emergence = sampleEnemyEmergencePresentation(enemy, record.age)) {
     const profile = getEnemyVisualProfile(enemy.type);
     if (!enemy.active && enemy.dismissed && record.dismissalTime > 0) {
       return {
@@ -864,7 +900,14 @@ export class EnemyCharacterRenderer {
         };
       }
     }
-    if (record.age < SPAWN_DURATION) return { clip: profile.spawnClip, once: true, duration: SPAWN_DURATION, key: "spawn" };
+    if (emergence.emerging) {
+      return {
+        clip: profile.spawnClip,
+        once: true,
+        duration: ENEMY_EMERGENCE.durationSeconds,
+        key: "spawn",
+      };
+    }
     if (enemy.hitFlash > HIT_DURATION * 0.38) return { clip: profile.hitClip, once: true, duration: 0.24, key: `hit:${record.eventSerial}` };
     if (record.forcedClip) return { clip: record.forcedClip, once: true, duration: Math.max(0.2, record.forcedTime), key: `forced:${record.eventSerial}` };
     if (enemy.state === "dash" && profile.dashClip) {
@@ -900,7 +943,7 @@ export class EnemyCharacterRenderer {
     record.stateKey = animation.key;
   }
 
-  syncPose(record, enemy) {
+  syncPose(record, enemy, emergence = sampleEnemyEmergencePresentation(enemy, record.age)) {
     const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "stable");
     const originPulse = Math.sin(this.clockTime * originProfile.pulseSpeed + (enemy.originPhase ?? 0));
     let scaleX = 1;
@@ -908,9 +951,8 @@ export class EnemyCharacterRenderer {
     let scaleZ = 1;
     let queenPose = null;
     record.root.rotation.x = 0;
-    if (record.age < SPAWN_DURATION) {
-      const progress = clamp01(record.age / SPAWN_DURATION);
-      const scale = easeOutBack(progress);
+    if (emergence.emerging) {
+      const scale = easeOutBack(emergence.progress);
       scaleX = SPAWN_START_SCALE_XZ + scale * (1 - SPAWN_START_SCALE_XZ);
       scaleY = SPAWN_START_SCALE_Y + scale * (1 - SPAWN_START_SCALE_Y);
     }
@@ -930,9 +972,8 @@ export class EnemyCharacterRenderer {
       if (record.deathAge >= duration) record.root.visible = false;
     } else {
       record.root.rotation.z = originPulse * originProfile.sway;
-      if (record.age < SPAWN_DURATION) {
-        const progress = clamp01(record.age / SPAWN_DURATION);
-        record.root.rotation.z += (1 - progress) * originProfile.spawnLean * Math.sign(Math.sin((enemy.originPhase ?? 0) + 0.5));
+      if (emergence.emerging) {
+        record.root.rotation.z += (1 - emergence.progress) * originProfile.spawnLean * Math.sign(Math.sin((enemy.originPhase ?? 0) + 0.5));
       }
       if (enemy.hitFlash > 0) {
         const impact = clamp01(enemy.hitFlash / HIT_DURATION);

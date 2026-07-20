@@ -24,6 +24,36 @@ export const BOOKEND_CHARACTER_ASSETS = deepFreeze({
     characterId: "prince",
     path: publicAssetUrl("assets/vn/characters/zephyr-c-devastated.png"),
   },
+  "witch.clinical": {
+    id: "witch.clinical",
+    characterId: "witch",
+    path: publicAssetUrl("assets/vn/witch-b-clinical.png"),
+  },
+  "witch.warning": {
+    id: "witch.warning",
+    characterId: "witch",
+    path: publicAssetUrl("assets/vn/witch-b-containment-gesture.png"),
+  },
+  "witch.combat": {
+    id: "witch.combat",
+    characterId: "witch",
+    path: publicAssetUrl("assets/vn/characters/witch-b-combat.png"),
+  },
+  "witch.wounded": {
+    id: "witch.wounded",
+    characterId: "witch",
+    path: publicAssetUrl("assets/vn/characters/witch-b-wounded.png"),
+  },
+  "witch.acceptance": {
+    id: "witch.acceptance",
+    characterId: "witch",
+    path: publicAssetUrl("assets/vn/characters/witch-b-acceptance.png"),
+  },
+  "princess.human": {
+    id: "princess.human",
+    characterId: "princess",
+    path: publicAssetUrl("assets/vn/characters/elowen-a-human.png"),
+  },
   "princess.corrupt-full": {
     id: "princess.corrupt-full",
     characterId: "princess",
@@ -49,6 +79,7 @@ export const BOOKEND_CHARACTER_ASSETS = deepFreeze({
 export const BOOKEND_BACKGROUND_ASSETS = deepFreeze(Object.fromEntries(
   [
     "containment-heart-broken",
+    "containment-heart",
     "prison-collapse-quiet",
     "prison-collapse-violent",
     "prison-open-unstable",

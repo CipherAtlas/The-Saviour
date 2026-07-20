@@ -1,4 +1,5 @@
 import { findNavigationPath, hasLineOfSight } from "../game/navigation.js";
+import { isWalkableSegment, nearestWalkablePoint } from "../game/arenaGeometry.js";
 
 export { findNavigationPath } from "../game/navigation.js";
 
@@ -25,6 +26,7 @@ const DEFAULT_CONFIG = Object.freeze({
   edgeSteeringDistance: 2.4,
   edgeSteeringStrength: 1.25,
   endingPolicy: "kill",
+  preferredPath: null,
 });
 
 const TYPE_PRIORITY = Object.freeze({
@@ -56,7 +58,35 @@ function addWeighted(target, direction, weight) {
   target.z += direction.z * weight;
 }
 
+function steerWithinWalkableShape(movement, player, arena, config) {
+  if (!arena?.walkableShape) return null;
+  const magnitude = Math.hypot(movement.x, movement.z);
+  if (magnitude <= 0.0001) return { ...movement };
+  const desired = normalize(movement);
+  const radius = Math.max(0, player.radius ?? 0.6);
+  const lookahead = Math.max(radius + 0.35, config.edgeSteeringDistance);
+  const baseAngle = Math.atan2(desired.z, desired.x);
+  const offsets = [0, Math.PI / 8, -Math.PI / 8, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, Math.PI];
+  for (const offset of offsets) {
+    const direction = { x: Math.cos(baseAngle + offset), z: Math.sin(baseAngle + offset) };
+    const end = {
+      x: player.position.x + direction.x * lookahead,
+      z: player.position.z + direction.z * lookahead,
+    };
+    if (isWalkableSegment(arena, player.position, end, radius)) return direction;
+  }
+
+  const repaired = nearestWalkablePoint(arena, player.position, radius);
+  return normalize({
+    x: repaired.x - player.position.x,
+    z: repaired.z - player.position.z,
+  });
+}
+
 function steerFromArenaEdges(movement, player, arena, config) {
+  if (Math.hypot(movement.x, movement.z) <= 0.0001) return { x: 0, z: 0 };
+  const shapedMovement = steerWithinWalkableShape(movement, player, arena, config);
+  if (shapedMovement) return shapedMovement;
   if (!arena || !Number.isFinite(arena.width) || !Number.isFinite(arena.depth)) return { ...movement };
   const steeringDistance = Math.max(0, config.edgeSteeringDistance);
   if (steeringDistance <= 0) return { ...movement };
@@ -97,7 +127,14 @@ function defaultIntent(mode = "idle") {
 }
 
 function visibleEnemies(state) {
-  return (state.enemies ?? []).filter((enemy) => enemy.active !== false && enemy.position);
+  return (state.enemies ?? []).filter((enemy) => {
+    const lifecycleState = enemy.lifecycle?.state ?? enemy.lifecycleState;
+    return enemy.active !== false
+      && enemy.interactive !== false
+      && lifecycleState !== "emerging"
+      && lifecycleState !== "defeated"
+      && enemy.position;
+  });
 }
 
 function selectTarget(player, enemies) {
@@ -179,7 +216,8 @@ function collectThreats(state, config) {
     if (threat) threats.push(threat);
   }
   for (const enemy of state.enemies ?? []) {
-    if (!enemy.active || !enemy.attackPending) continue;
+    const lifecycleState = enemy.lifecycle?.state ?? enemy.lifecycleState;
+    if (!enemy.active || enemy.interactive === false || lifecycleState === "emerging" || !enemy.attackPending) continue;
     const threat = areaThreat({
       position: enemy.position,
       radius: enemy.telegraphRadius ?? enemy.attackRange,
@@ -200,9 +238,10 @@ function collectThreats(state, config) {
   return { direction: normalize(direction, threats[0].direction), severity, soonest };
 }
 
-function scoreUpgrade(choice, player) {
+function scoreUpgrade(choice, player, preferredPath = null) {
   const text = `${choice.id ?? ""} ${choice.name ?? ""} ${choice.description ?? ""}`.toLowerCase();
   let score = 0;
+  if (preferredPath && choice.path === preferredPath) score += 100;
   if (/damage|critical|edge|mercy/.test(text)) score += 5;
   if (/reach|range|moon/.test(text)) score += 4;
   if (/dash|step|cooldown/.test(text)) score += 3.5;
@@ -214,17 +253,119 @@ function scoreUpgrade(choice, player) {
   return score;
 }
 
-function chooseUpgrade(choices, player) {
+function chooseUpgrade(choices, player, preferredPath = null) {
   let best = null;
   let bestScore = -Infinity;
   for (const choice of choices) {
-    const score = scoreUpgrade(choice, player);
+    const score = scoreUpgrade(choice, player, preferredPath);
     if (score > bestScore) {
       best = choice;
       bestScore = score;
     }
   }
   return best;
+}
+
+function copyPoint(point) {
+  return point && Number.isFinite(point.x) && Number.isFinite(point.z) ? { x: point.x, z: point.z } : null;
+}
+
+export function createAutoplayState(game, telegraphs = []) {
+  const arena = game.arena;
+  const encounterPlan = game.director.encounterPlan;
+  const scheduler = game.director.encounterScheduler?.snapshot?.() ?? null;
+  return {
+    phase: game.phase,
+    runType: game.runType,
+    difficulty: game.difficultyId,
+    floor: game.floor,
+    room: game.room,
+    portalActive: game.portalActive,
+    portalTraversal: game.portalTraversal ? {
+      active: game.portalTraversal.active,
+      progress: game.portalTraversal.progress,
+    } : null,
+    player: game.player ? {
+      position: { ...game.player.position },
+      radius: game.player.radius,
+      health: game.player.health,
+      maxHealth: game.player.maxHealth,
+      cooldowns: {
+        dashReady: game.combat.dashCooldown <= 0,
+        heavyReady: game.combat.heavyCooldown <= 0,
+      },
+      harvest: game.combat.harvest.snapshot(),
+      claim: game.combat.claim.snapshot(),
+    } : null,
+    arena: arena ? {
+      width: arena.width,
+      depth: arena.depth,
+      layoutFamily: arena.layoutFamily,
+      walkableShape: arena.walkableShape,
+      portal: copyPoint(arena.portal),
+      rewardPosition: copyPoint(arena.rewardPosition),
+      combatZones: (arena.combatZones ?? []).map((zone) => ({ ...zone })),
+      obstacles: (arena.obstacles ?? []).map((obstacle) => ({ ...obstacle })),
+    } : null,
+    encounter: encounterPlan || scheduler ? {
+      recipeId: encounterPlan?.id ?? scheduler?.recipeId ?? null,
+      recipeType: encounterPlan?.type ?? scheduler?.recipeType ?? null,
+      totalPopulation: encounterPlan?.totalPopulation ?? scheduler?.totalPopulation ?? 0,
+      threat: encounterPlan?.threat ?? 0,
+      roles: encounterPlan?.roleCounts ?? {},
+      specialistCounts: encounterPlan?.specialistCounts ?? {},
+      living: scheduler?.living ?? game.director.enemies.filter((enemy) => game.director.isEnemyInteractive?.(enemy) ?? enemy.active).length,
+      spawning: scheduler?.spawning ?? 0,
+      pending: scheduler?.pending ?? 0,
+      maximumSimultaneous: scheduler?.maximumSimultaneous ?? 0,
+    } : null,
+    enemies: game.director.enemies.map((enemy) => {
+      const lifecycleState = enemy.lifecycle?.state ?? enemy.lifecycleState ?? (enemy.active ? "active" : "defeated");
+      const interactive = typeof game.director.isEnemyInteractive === "function"
+        ? game.director.isEnemyInteractive(enemy)
+        : Boolean(enemy.active && lifecycleState === "active");
+      return {
+        id: enemy.id,
+        type: enemy.type,
+        origin: enemy.origin,
+        active: enemy.active,
+        interactive,
+        lifecycleState,
+        lifecycle: enemy.lifecycle ? { ...enemy.lifecycle } : { state: lifecycleState },
+        emergenceDurationSeconds: enemy.emergenceDurationSeconds ?? null,
+        position: { ...enemy.position },
+        radius: enemy.radius,
+        health: enemy.health,
+        maxHealth: enemy.maxHealth,
+        attackPending: enemy.attackPending,
+        attackWindup: enemy.attackWindup,
+        attackRange: enemy.attackRange,
+        attackLeaseFamily: enemy.attackLeaseFamily,
+      };
+    }),
+    projectiles: game.director.projectiles.filter((projectile) => projectile.active).map((projectile) => ({
+      active: true,
+      kind: projectile.kind,
+      mode: projectile.mode,
+      position: { ...projectile.position },
+      velocity: { ...projectile.velocity },
+      radius: projectile.radius,
+      areaRadius: projectile.areaRadius,
+      target: { ...projectile.target },
+      timeRemaining: projectile.life,
+    })),
+    telegraphs: telegraphs.map((telegraph) => ({
+      ...telegraph,
+      ...(telegraph.position ? { position: { ...telegraph.position } } : {}),
+    })),
+    bookend: game.phase === "bookend" ? { active: Boolean(game.bookend.snapshot()) } : null,
+    ending: game.ending.snapshot(),
+    blessing: game.phase === "blessing" ? {
+      choices: game.pendingBlessings.map(({ id, name, description, path, rank, nextRank, maxRank }) => ({
+        id, name, description, path, rank, nextRank, maxRank,
+      })),
+    } : null,
+  };
 }
 
 export class AutoplayAgent {
@@ -257,6 +398,7 @@ export class AutoplayAgent {
     this.recoveryRemaining = 0;
     this.recoveryDirection = { x: 1, z: 0 };
     this.recoveryCount = 0;
+    this.lastUnreachableSignature = null;
   }
 
   tick(dt) {
@@ -325,7 +467,6 @@ export class AutoplayAgent {
 
   decide(state) {
     if (state.phase === "bookend") return this.decideBookend(state);
-    if (state.phase === "reward") return this.decideRoomReward(state);
     if (state.phase === "blessing") return this.decideBlessing(state);
     if (state.phase === "endingChoice") {
       return this.config.endingPolicy === "timeout"
@@ -350,8 +491,10 @@ export class AutoplayAgent {
     if (state.portalActive && state.arena?.portal) return this.decidePortal(state);
 
     const intent = defaultIntent("await-clear");
-    const center = { x: 0, z: 0 };
-    if (distance(state.player.position, center) > 2.5) intent.worldMove = this.navigate(state, center, "center");
+    const stagingPoint = state.arena?.portal ?? state.arena?.rewardPosition ?? { x: 0, z: 0 };
+    if (distance(state.player.position, stagingPoint) > 2.5) {
+      intent.worldMove = this.navigate(state, stagingPoint, "clear-staging");
+    }
     return intent;
   }
 
@@ -370,16 +513,13 @@ export class AutoplayAgent {
 
   decideBlessing(state) {
     const choices = state.blessing?.choices ?? state.blessingChoices ?? [];
-    const choice = chooseUpgrade(choices, state.player ?? { health: 1, maxHealth: 1 });
+    const choice = chooseUpgrade(
+      choices,
+      state.player ?? { health: 1, maxHealth: 1 },
+      this.config.preferredPath,
+    );
     if (!choice) return defaultIntent("blessing-wait");
     return this.decideUiAction("chooseBlessing", { id: choice.id });
-  }
-
-  decideRoomReward(state) {
-    const choices = state.reward?.choices ?? [];
-    const choice = chooseUpgrade(choices, state.player ?? { health: 1, maxHealth: 1 });
-    if (!choice) return defaultIntent("reward-wait");
-    return this.decideUiAction("chooseRoomReward", { id: choice.id });
   }
 
   decideEvade(state, threat, enemies) {
@@ -485,20 +625,41 @@ export class AutoplayAgent {
     const position = state.player.position;
     if (hasLineOfSight(position, target, state.arena, this.config.obstaclePadding)) {
       this.invalidatePath();
+      this.lastUnreachableSignature = null;
       return normalize({ x: target.x - position.x, z: target.z - position.z });
     }
 
+    const effectiveKey = `${state.floor ?? 0}:${state.room ?? 0}:${state.arena?.layoutFamily ?? "arena"}:${key}`;
     const targetMoved = !this.pathTarget || distance(this.pathTarget, target) > 1.2;
-    if (this.pathTimer <= 0 || this.pathKey !== key || targetMoved || this.path.length === 0) {
+    if (this.pathTimer <= 0 || this.pathKey !== effectiveKey || targetMoved || this.path.length === 0) {
       this.path = findNavigationPath(position, target, state.arena, {
         cellSize: this.config.pathCellSize,
         padding: this.config.obstaclePadding,
       });
       this.pathIndex = this.path.length > 1 ? 1 : 0;
       this.pathTarget = { ...target };
-      this.pathKey = key;
+      this.pathKey = effectiveKey;
       this.pathTimer = this.config.pathRefreshSeconds;
     }
+
+    if (this.path.length === 0) {
+      const signature = `${effectiveKey}:${target.x.toFixed(2)}:${target.z.toFixed(2)}`;
+      if (signature !== this.lastUnreachableSignature) {
+        this.lastUnreachableSignature = signature;
+        this.onDiagnostic({
+          type: "navigationUnreachable",
+          atSeconds: this.elapsed,
+          floor: state.floor,
+          room: state.room,
+          layoutFamily: state.arena?.layoutFamily ?? null,
+          key,
+          position: { ...position },
+          target: { ...target },
+        });
+      }
+      return { x: 0, z: 0 };
+    }
+    this.lastUnreachableSignature = null;
 
     while (this.pathIndex < this.path.length - 1 && distance(position, this.path[this.pathIndex]) <= this.config.waypointRadius) {
       this.pathIndex += 1;

@@ -1,10 +1,9 @@
-import { BLESSINGS, BLESSING_FALLBACK } from "../game/blessings.js";
-import { HARVEST_CONFIG, RUN_CONFIG } from "../game/gameConfig.js";
-import { CHAMBER_FALLBACK, RUN_UPGRADES } from "../game/runUpgrades.js";
+import { BLESSINGS, oathSlotOrderForSeed } from "../game/blessings.js";
+import { HARVEST_CONFIG, PLAYER_CONFIG, RUN_CONFIG } from "../game/gameConfig.js";
 import { validateRunStatisticsDraft } from "../game/RunStatsAccumulator.js";
 
 export const SUSPENDED_RUN_KEY = "hollow-crown-suspended-run";
-export const SUSPENDED_RUN_VERSION = 3;
+export const SUSPENDED_RUN_VERSION = 5;
 
 const DIFFICULTY_IDS = new Set(["relaxed", "standard", "ruthless"]);
 const RUN_TYPE_IDS = new Set(["normal", "speedrun"]);
@@ -21,20 +20,37 @@ const TOP_LEVEL_KEYS = new Set([
   "player",
   "harvestUnits",
   "deathDefiance",
-  "upgradeSelections",
-  "upgradeRanks",
   "blessingIds",
-  "rerollsUsedByFloor",
   "runFlags",
   "statisticsDraft",
 ]);
-const V2_TOP_LEVEL_KEYS = new Set([
+const LEGACY_TOP_LEVEL_KEYS = new Set([
   ...TOP_LEVEL_KEYS,
+  "upgradeSelections",
+  "upgradeRanks",
+  "rerollsUsedByFloor",
+]);
+const V2_TOP_LEVEL_KEYS = new Set([
+  ...LEGACY_TOP_LEVEL_KEYS,
   "seenRunSequenceIds",
   "completedUpgradeSequenceIds",
 ]);
 const V1_TOP_LEVEL_KEYS = new Set([...V2_TOP_LEVEL_KEYS]
   .filter((key) => !["runType", "speedrun"].includes(key)));
+
+const LEGACY_PATH_BY_ID = Object.freeze({
+  "far-reach": "Reaper",
+  "grave-edge": "Reaper",
+  "harvest-crown": "Reaper",
+  "hollow-step": "Shade",
+  "perfect-eclipse": "Shade",
+  "reaping-passage": "Shade",
+  "royal-blood": "Grave",
+  "final-mercy": "Grave",
+  "soul-siphon": "Grave",
+  "moonwell-renewal": "Grave",
+});
+const OATH_BY_ID = new Map(BLESSINGS.map((definition) => [definition.id, definition]));
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -58,66 +74,25 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-function validId(value, ids) {
-  return typeof value === "string" && ids.has(value);
-}
-
-function maxRankFor(definition, selectionLimit) {
-  return Number.isFinite(definition.maxRank) ? definition.maxRank : selectionLimit;
-}
-
 function createDefaultCatalog() {
   return Object.freeze({
-    upgradeRanks: new Map(
-      [...RUN_UPGRADES, CHAMBER_FALLBACK].map((definition) => [
-        definition.id,
-        maxRankFor(definition, RUN_CONFIG.totalFloors * RUN_CONFIG.roomsPerFloor),
-      ]),
-    ),
-    blessingRanks: new Map(
-      [...BLESSINGS, BLESSING_FALLBACK].map((definition) => [
-        definition.id,
-        maxRankFor(definition, RUN_CONFIG.totalFloors - 1),
-      ]),
-    ),
+    blessingRanks: new Map(BLESSINGS.map((definition) => [definition.id, definition.maxRank])),
   });
 }
 
-function normalizeUpgradeState(candidate, catalog) {
-  if (!Array.isArray(candidate.upgradeSelections) || candidate.upgradeSelections.length > 29) return null;
-  const computedRanks = new Map();
-  const upgradeSelections = [];
-  for (const selection of candidate.upgradeSelections) {
-    if (!hasExactKeys(selection, new Set(["upgradeId", "rankAfter"]))) return null;
-    const maximum = catalog.upgradeRanks.get(selection.upgradeId);
-    const expected = (computedRanks.get(selection.upgradeId) ?? 0) + 1;
-    if (!maximum || selection.rankAfter !== expected || selection.rankAfter > maximum) return null;
-    computedRanks.set(selection.upgradeId, selection.rankAfter);
-    upgradeSelections.push({ upgradeId: selection.upgradeId, rankAfter: selection.rankAfter });
-  }
-
-  if (!Array.isArray(candidate.upgradeRanks) || candidate.upgradeRanks.length !== computedRanks.size) return null;
-  const rankEntries = [];
-  const seen = new Set();
-  for (const entry of candidate.upgradeRanks) {
-    if (!Array.isArray(entry) || entry.length !== 2) return null;
-    const [upgradeId, rank] = entry;
-    if (seen.has(upgradeId) || computedRanks.get(upgradeId) !== rank) return null;
-    seen.add(upgradeId);
-    rankEntries.push([upgradeId, rank]);
-  }
-  rankEntries.sort(([left], [right]) => left.localeCompare(right));
-  return { upgradeSelections, upgradeRanks: rankEntries };
-}
-
-function normalizeBlessings(candidate, catalog) {
+function normalizeBlessings(candidate, catalog, seed) {
   if (!Array.isArray(candidate.blessingIds) || candidate.blessingIds.length > RUN_CONFIG.totalFloors - 1) return null;
   const counts = new Map();
   const blessingIds = [];
-  for (const id of candidate.blessingIds) {
+  const slotOrder = oathSlotOrderForSeed(seed);
+  for (let index = 0; index < candidate.blessingIds.length; index += 1) {
+    const id = candidate.blessingIds[index];
     const maximum = catalog.blessingRanks.get(id);
     const next = (counts.get(id) ?? 0) + 1;
-    if (!maximum || next > maximum) return null;
+    const oath = OATH_BY_ID.get(id);
+    if (!maximum || !oath || next > maximum) return null;
+    if (index < 5 && (next !== 1 || oath.techniqueSlot !== slotOrder[index])) return null;
+    if (index >= 5 && (next !== 2 || !blessingIds.slice(0, 5).includes(id))) return null;
     counts.set(id, next);
     blessingIds.push(id);
   }
@@ -134,12 +109,61 @@ function normalizeFlags(candidate) {
   return runFlags;
 }
 
-function migrateCandidate(candidate) {
-  if (!isRecord(candidate)) return candidate;
-  if (candidate.version === SUSPENDED_RUN_VERSION) return candidate;
-  if (candidate.version === 1 && !hasExactKeys(candidate, V1_TOP_LEVEL_KEYS)) return candidate;
-  if (candidate.version === 2 && !hasExactKeys(candidate, V2_TOP_LEVEL_KEYS)) return candidate;
-  if (![1, 2].includes(candidate.version)) return candidate;
+function legacyProgressionPath(id) {
+  return OATH_BY_ID.get(id)?.path ?? LEGACY_PATH_BY_ID[id] ?? "Grave";
+}
+
+function migrateBlessingIds(ids, seed) {
+  if (!Array.isArray(ids)) throw new TypeError("Legacy Oath selections must be an array");
+  const slotOrder = oathSlotOrderForSeed(seed);
+  const ranks = new Map();
+  const owned = [];
+  return ids.map((legacyId, index) => {
+    const existing = OATH_BY_ID.get(legacyId);
+    const desiredPath = legacyProgressionPath(legacyId);
+    let definition;
+    if (index < 5) {
+      definition = existing?.techniqueSlot === slotOrder[index]
+        ? existing
+        : BLESSINGS.find((candidate) => (
+          candidate.techniqueSlot === slotOrder[index] && candidate.path === desiredPath
+        ));
+    } else {
+      definition = existing && owned.includes(existing.id) && (ranks.get(existing.id) ?? 0) === 1
+        ? existing
+        : owned
+          .map((id) => OATH_BY_ID.get(id))
+          .find((candidate) => candidate.path === desiredPath && (ranks.get(candidate.id) ?? 0) === 1);
+      definition ??= owned
+        .map((id) => OATH_BY_ID.get(id))
+        .find((candidate) => (ranks.get(candidate.id) ?? 0) === 1);
+    }
+    if (!definition) throw new TypeError("Unable to migrate Oath progression");
+    ranks.set(definition.id, (ranks.get(definition.id) ?? 0) + 1);
+    if (!owned.includes(definition.id)) owned.push(definition.id);
+    return definition.id;
+  });
+}
+
+function rebuildStatisticsProgression(statisticsDraft, blessingIds) {
+  const draft = clone(statisticsDraft);
+  const ranks = {};
+  const pathTotals = { Reaper: 0, Shade: 0, Grave: 0 };
+  draft.selections = blessingIds.map((id) => {
+    const definition = OATH_BY_ID.get(id);
+    const rankAfter = (ranks[id] ?? 0) + 1;
+    ranks[id] = rankAfter;
+    pathTotals[definition.path] += 1;
+    return { id, path: definition.path, tier: "blessing", rankAfter };
+  });
+  draft.finalRanks = ranks;
+  draft.pathTotals = pathTotals;
+  draft.rerollsUsed = 0;
+  draft.deathDefiance = { granted: 0, consumed: 0 };
+  return draft;
+}
+
+function normalizeLegacyMetadata(candidate) {
   const migrated = clone(candidate);
   delete migrated.seenRunSequenceIds;
   delete migrated.completedUpgradeSequenceIds;
@@ -158,18 +182,35 @@ function migrateCandidate(candidate) {
     if (stable > 0) migrated.statisticsDraft.enemiesKilled.byOrigin.stable = stable;
     if (volatile > 0) migrated.statisticsDraft.enemiesKilled.byOrigin.volatile = volatile;
   }
+  return migrated;
+}
+
+function migrateCandidate(candidate) {
+  if (!isRecord(candidate) || candidate.version === SUSPENDED_RUN_VERSION) return candidate;
+  if (candidate.version === 1 && !hasExactKeys(candidate, V1_TOP_LEVEL_KEYS)) return candidate;
+  if (candidate.version === 2 && !hasExactKeys(candidate, V2_TOP_LEVEL_KEYS)) return candidate;
+  if ([3, 4].includes(candidate.version) && !hasExactKeys(candidate, LEGACY_TOP_LEVEL_KEYS)) return candidate;
+  if (![1, 2, 3, 4].includes(candidate.version)) return candidate;
+
+  const migrated = normalizeLegacyMetadata(candidate);
+  const blessingIds = migrateBlessingIds(migrated.blessingIds, migrated.seed);
+  migrated.blessingIds = blessingIds;
+  migrated.statisticsDraft = rebuildStatisticsProgression(migrated.statisticsDraft, blessingIds);
+  migrated.deathDefiance = { granted: 0, remaining: 0 };
+  migrated.player.health = Math.min(PLAYER_CONFIG.maxHealth, migrated.player.health);
+  delete migrated.upgradeSelections;
+  delete migrated.upgradeRanks;
+  delete migrated.rerollsUsedByFloor;
   migrated.version = SUSPENDED_RUN_VERSION;
   return migrated;
 }
 
 function normalizeCandidate(rawCandidate, catalog) {
   const candidate = migrateCandidate(rawCandidate);
-  if (!hasExactKeys(candidate, TOP_LEVEL_KEYS)) return null;
-  if (candidate.version !== SUSPENDED_RUN_VERSION) return null;
+  if (!hasExactKeys(candidate, TOP_LEVEL_KEYS) || candidate.version !== SUSPENDED_RUN_VERSION) return null;
   if (!Number.isFinite(candidate.savedAt) || candidate.savedAt < 0) return null;
   if (typeof candidate.seed !== "string" || candidate.seed.length === 0 || candidate.seed.length > 256) return null;
-  if (!DIFFICULTY_IDS.has(candidate.difficultyId)) return null;
-  if (!RUN_TYPE_IDS.has(candidate.runType)) return null;
+  if (!DIFFICULTY_IDS.has(candidate.difficultyId) || !RUN_TYPE_IDS.has(candidate.runType)) return null;
   if (candidate.runType === "speedrun" && candidate.difficultyId !== "ruthless") return null;
   if (!hasExactKeys(candidate.speedrun, new Set(["elapsedSeconds", "finished"]))) return null;
   if (!Number.isFinite(candidate.speedrun.elapsedSeconds) || candidate.speedrun.elapsedSeconds < 0) return null;
@@ -178,53 +219,26 @@ function normalizeCandidate(rawCandidate, catalog) {
   if (!Number.isInteger(candidate.nextFloor) || candidate.nextFloor < 1 || candidate.nextFloor > RUN_CONFIG.totalFloors) return null;
   if (!Number.isInteger(candidate.nextRoom) || candidate.nextRoom < 1 || candidate.nextRoom > RUN_CONFIG.roomsPerFloor) return null;
   if (!hasExactKeys(candidate.player, new Set(["health"]))) return null;
-  if (!Number.isFinite(candidate.player.health) || candidate.player.health <= 0 || candidate.player.health > 10_000) return null;
+  if (!Number.isFinite(candidate.player.health) || candidate.player.health <= 0 || candidate.player.health > PLAYER_CONFIG.maxHealth) return null;
   if (!Number.isInteger(candidate.harvestUnits) || candidate.harvestUnits < 0 || candidate.harvestUnits > HARVEST_CONFIG.maxUnits) return null;
   if (!hasExactKeys(candidate.deathDefiance, new Set(["granted", "remaining"]))) return null;
-  if (
-    !Number.isInteger(candidate.deathDefiance.granted)
-    || !Number.isInteger(candidate.deathDefiance.remaining)
-    || candidate.deathDefiance.granted < 0
-    || candidate.deathDefiance.granted > 2
-    || candidate.deathDefiance.remaining < 0
-    || candidate.deathDefiance.remaining > candidate.deathDefiance.granted
-  ) return null;
-  if (
-    !Array.isArray(candidate.rerollsUsedByFloor)
-    || candidate.rerollsUsedByFloor.length !== RUN_CONFIG.totalFloors
-    || !candidate.rerollsUsedByFloor.every((count) => count === 0 || count === 1)
-  ) return null;
+  if (candidate.deathDefiance.granted !== 0 || candidate.deathDefiance.remaining !== 0) return null;
 
-  const upgrades = normalizeUpgradeState(candidate, catalog);
-  const blessingIds = normalizeBlessings(candidate, catalog);
+  const blessingIds = normalizeBlessings(candidate, catalog, candidate.seed);
   const runFlags = normalizeFlags(candidate);
   const statisticsDraft = validateRunStatisticsDraft(candidate.statisticsDraft);
-  if (!upgrades || !blessingIds || !runFlags || !statisticsDraft || statisticsDraft.finalized) return null;
+  if (!blessingIds || !runFlags || !statisticsDraft || statisticsDraft.finalized) return null;
   if (statisticsDraft.seed !== candidate.seed || statisticsDraft.difficultyId !== candidate.difficultyId) return null;
-  const expectedChamberSelections = (candidate.nextFloor - 1) * (RUN_CONFIG.roomsPerFloor - 1) + (candidate.nextRoom - 1);
-  const expectedBlessings = candidate.nextFloor - 1;
-  if (upgrades.upgradeSelections.length !== expectedChamberSelections || blessingIds.length !== expectedBlessings) return null;
+  if (blessingIds.length !== candidate.nextFloor - 1) return null;
 
-  const draftChambers = statisticsDraft.selections
-    .filter(({ tier }) => tier === "chamber")
-    .map(({ id, rankAfter }) => ({ upgradeId: id, rankAfter }));
-  const draftBlessings = statisticsDraft.selections
-    .filter(({ tier }) => tier === "blessing")
-    .map(({ id }) => id);
-  if (
-    JSON.stringify(draftChambers) !== JSON.stringify(upgrades.upgradeSelections)
-    || JSON.stringify(draftBlessings) !== JSON.stringify(blessingIds)
-  ) return null;
-
-  const mergedRanks = Object.fromEntries(upgrades.upgradeRanks);
-  for (const id of blessingIds) mergedRanks[id] = (mergedRanks[id] ?? 0) + 1;
-  const sortedRankEntries = (record) => Object.entries(record).sort(([left], [right]) => left.localeCompare(right));
-  if (JSON.stringify(sortedRankEntries(mergedRanks)) !== JSON.stringify(sortedRankEntries(statisticsDraft.finalRanks))) return null;
-  if (
-    statisticsDraft.deathDefiance.granted !== candidate.deathDefiance.granted
-    || statisticsDraft.deathDefiance.consumed !== candidate.deathDefiance.granted - candidate.deathDefiance.remaining
-    || statisticsDraft.rerollsUsed !== candidate.rerollsUsedByFloor.reduce((total, used) => total + used, 0)
-  ) return null;
+  const draftBlessings = statisticsDraft.selections.map(({ id, tier }) => tier === "blessing" ? id : null);
+  if (draftBlessings.includes(null) || JSON.stringify(draftBlessings) !== JSON.stringify(blessingIds)) return null;
+  const ranks = {};
+  for (const id of blessingIds) ranks[id] = (ranks[id] ?? 0) + 1;
+  const sortedEntries = (record) => Object.entries(record).sort(([left], [right]) => left.localeCompare(right));
+  if (JSON.stringify(sortedEntries(ranks)) !== JSON.stringify(sortedEntries(statisticsDraft.finalRanks))) return null;
+  if (statisticsDraft.deathDefiance.granted !== 0 || statisticsDraft.deathDefiance.consumed !== 0) return null;
+  if (statisticsDraft.rerollsUsed !== 0) return null;
 
   return deepFreeze({
     version: SUSPENDED_RUN_VERSION,
@@ -237,10 +251,8 @@ function normalizeCandidate(rawCandidate, catalog) {
     nextRoom: candidate.nextRoom,
     player: { health: candidate.player.health },
     harvestUnits: candidate.harvestUnits,
-    deathDefiance: { ...candidate.deathDefiance },
-    ...upgrades,
+    deathDefiance: { granted: 0, remaining: 0 },
     blessingIds,
-    rerollsUsedByFloor: [...candidate.rerollsUsedByFloor],
     runFlags,
     statisticsDraft,
   });

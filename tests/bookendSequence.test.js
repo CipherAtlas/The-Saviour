@@ -16,11 +16,29 @@ test("the bookend reader advances one complete line at a time", () => {
   assert.equal(reader.snapshot(), null);
 });
 
-test("bookend content is deeply frozen and limited to the intro and ending branches", () => {
-  assert.deepEqual(Object.keys(BOOKEND_SEQUENCES), ["intro", "ending.plea", "ending.kill", "ending.timeout"]);
-  assert.deepEqual(Object.values(BOOKEND_SEQUENCES).map(({ beats }) => beats.length), [3, 3, 2, 3]);
+test("bookend content is deeply frozen and limited to the intro, boss confrontation, and ending branches", () => {
+  assert.deepEqual(Object.keys(BOOKEND_SEQUENCES), [
+    "intro",
+    "boss.confrontation",
+    "ending.witch-death",
+    "ending.plea",
+    "ending.kill",
+    "ending.timeout",
+    "ending.timeout-final",
+  ]);
+  assert.deepEqual(Object.values(BOOKEND_SEQUENCES).map(({ beats }) => beats.length), [3, 21, 16, 17, 10, 9, 3]);
   assert.ok(Object.values(BOOKEND_SEQUENCES).every(Object.isFrozen));
   assert.ok(Object.values(BOOKEND_SEQUENCES).flatMap(({ beats }) => beats).every(Object.isFrozen));
+});
+
+test("the ending explains why only Zephyr's paired-ring strike can destroy the corruption", () => {
+  const witchDeath = BOOKEND_SEQUENCES["ending.witch-death"].beats.map(({ text }) => text).join(" ");
+  const plea = BOOKEND_SEQUENCES["ending.plea"].beats.map(({ text }) => text).join(" ");
+
+  assert.match(witchDeath, /ordinary death would not end the corruption/i);
+  assert.match(witchDeath, /rings carry more than presence/i);
+  assert.match(witchDeath, /No one else can make the strike carry your bond/i);
+  assert.match(plea, /Our bond will hold the necromancy to me when I die/i);
 });
 
 test("unknown and overlapping bookends fail explicitly", () => {

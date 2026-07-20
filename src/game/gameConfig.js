@@ -128,22 +128,21 @@ export const CLAIM_CONFIG = Object.freeze({
   recoveryDuration: 0.18,
 });
 
-export const DEATH_DEFIANCE_GRANT_CAP = 2;
+export const PROGRESSION_BALANCE_LIMITS = Object.freeze({
+  actionDamageBonus: 0.9,
+  criticalChance: 0.3,
+  dashCooldownSeconds: 0.48,
+  maxHealth: 180,
+  automaticRoomRecovery: 0.25,
+  harvestRefundPerAction: 25,
+  harvestRefundPerTechnique: 50,
+});
 
-export const PROGRESSION_TRANSFORMATION_CONFIG = Object.freeze({
-  farReachClaim: Object.freeze({
-    recallRadiusPerRank: 0.25,
-    recallPullPerRank: 0.35,
-    cleaveRadiusPerRank: 0.15,
-  }),
-  graveEdgeCharge: Object.freeze({ poiseDamagePerRank: 0.35 }),
-  harvestCrownClaim: Object.freeze({ harvestUnitsPerRank: HARVEST_CONFIG.gainUnits.upgradeModifier }),
-  hollowStepAfterimage: Object.freeze({ damagePerRank: 0.45 }),
-  perfectEclipsePerfectDash: Object.freeze({ harvestUnitsPerRank: HARVEST_CONFIG.gainUnits.upgradeModifier }),
-  reapingPassageDashAttack: Object.freeze({ damagePerRank: 0.35, arcPerRank: 0.2 }),
-  royalBloodWounded: Object.freeze({ healthThreshold: 0.4, damagePerRank: 0.25, poisePerRank: 0.2 }),
-  soulSiphonAggressiveHeal: Object.freeze({ damageHealingPerRank: 0.03, actionHealthCapPerRank: 10 }),
-  moonwellRenewalRetaliation: Object.freeze({ damagePerRank: 28, poiseDamagePerRank: 32 }),
+export const OATH_PROGRESSION_CONFIG = Object.freeze({
+  techniqueChoiceFloors: Object.freeze([1, 2, 3, 4, 5]),
+  oathRankUpFloors: Object.freeze([6, 7, 8, 9]),
+  oathMaxRank: 2,
+  techniqueSlotCount: 5,
 });
 
 export const CHARGE_CONFIG = Object.freeze({
@@ -291,6 +290,39 @@ export const DIFFICULTY_IDS = Object.freeze(["relaxed", "standard", "ruthless"])
 export const DEFAULT_RUN_TYPE = "normal";
 export const RUN_TYPE_IDS = Object.freeze(["normal", "speedrun"]);
 
+export const ENEMY_FLOOR_BAND_STAT_SCALARS = Object.freeze({
+  early: Object.freeze({
+    floorStart: 1,
+    floorEnd: 3,
+    healthByFloor: Object.freeze([1, 1.078, 1.156]),
+    damage: 1,
+    speed: 1,
+  }),
+  middle: Object.freeze({
+    floorStart: 4,
+    floorEnd: 6,
+    healthByFloor: Object.freeze([1.234, 1.312, 1.39]),
+    damage: 1.005,
+    speed: 1.004,
+  }),
+  late: Object.freeze({
+    floorStart: 7,
+    floorEnd: 10,
+    healthByFloor: Object.freeze([1.468, 1.546, 1.624, 1.702]),
+    damage: 1.01,
+    speed: 1.008,
+  }),
+});
+
+export const ENEMY_FAMILY_STAT_SCALARS = Object.freeze({
+  thrall: Object.freeze({ health: 0.97, damage: 0.99, speed: 1.01 }),
+  reaver: Object.freeze({ health: 1, damage: 1, speed: 1 }),
+  boneguard: Object.freeze({ health: 1.035, damage: 1.02, speed: 0.99 }),
+  hexer: Object.freeze({ health: 0.97, damage: 1, speed: 1 }),
+  wraith: Object.freeze({ health: 1, damage: 1.01, speed: 1.01 }),
+  bombardier: Object.freeze({ health: 1.02, damage: 1.02, speed: 0.99 }),
+});
+
 /**
  * Immutable scalar and behavioral rules copied into a run when difficulty is confirmed.
  * Attack budgets are simultaneous committed actions, not enemy population caps.
@@ -299,6 +331,8 @@ function difficultyProfile(definition) {
   return Object.freeze({
     ...definition,
     attackBudgets: Object.freeze({ ...definition.attackBudgets }),
+    nonBossStats: Object.freeze({ ...definition.nonBossStats }),
+    bossStats: Object.freeze({ ...definition.bossStats }),
   });
 }
 
@@ -310,6 +344,9 @@ export const DIFFICULTY = Object.freeze({
     enemyHealth: 0.82,
     enemyDamage: 0.76,
     enemySpeed: 0.94,
+    populationMultiplier: 0.8,
+    nonBossStats: { health: 0.82, damage: 0.76, speed: 0.94 },
+    bossStats: { health: 0.82, damage: 0.76, speed: 0.94 },
     windupMultiplier: 1.18,
     cooldownMultiplier: 1.18,
     attackBudgets: { total: 3, melee: 2, ranged: 1, area: 1 },
@@ -324,9 +361,12 @@ export const DIFFICULTY = Object.freeze({
     enemyHealth: 1,
     enemyDamage: 1,
     enemySpeed: 1,
+    populationMultiplier: 1,
+    nonBossStats: { health: 1.2, damage: 1.075, speed: 1.06 },
+    bossStats: { health: 1, damage: 1, speed: 1 },
     windupMultiplier: 1,
     cooldownMultiplier: 1,
-    attackBudgets: { total: 5, melee: 3, ranged: 2, area: 1 },
+    attackBudgets: { total: 7, melee: 4, ranged: 3, area: 2 },
     compositionPressure: 1,
     poiseMultiplier: 1,
     bossCadenceMultiplier: 1,
@@ -338,9 +378,12 @@ export const DIFFICULTY = Object.freeze({
     enemyHealth: 1.15,
     enemyDamage: 1.14,
     enemySpeed: 1.08,
+    populationMultiplier: 1.15,
+    nonBossStats: { health: 1.4, damage: 1.22, speed: 1.14 },
+    bossStats: { health: 1.15, damage: 1.14, speed: 1.08 },
     windupMultiplier: 0.88,
     cooldownMultiplier: 0.84,
-    attackBudgets: { total: 6, melee: 3, ranged: 3, area: 2 },
+    attackBudgets: { total: 10, melee: 5, ranged: 4, area: 3 },
     compositionPressure: 1.24,
     poiseMultiplier: 1.14,
     bossCadenceMultiplier: 1.2,
@@ -352,4 +395,33 @@ export function getDifficultyProfile(id, { fallback = true } = {}) {
   if (profile) return profile;
   if (fallback) return DIFFICULTY[DEFAULT_DIFFICULTY_ID];
   throw new RangeError(`Unknown difficulty ID: ${id}`);
+}
+
+function statBandForFloor(floor) {
+  if (!Number.isInteger(floor) || floor < 1 || floor > 10) throw new RangeError("Enemy stat floor must be from 1 to 10.");
+  if (floor <= 3) return ENEMY_FLOOR_BAND_STAT_SCALARS.early;
+  if (floor <= 6) return ENEMY_FLOOR_BAND_STAT_SCALARS.middle;
+  return ENEMY_FLOOR_BAND_STAT_SCALARS.late;
+}
+
+export function resolveEnemyStatScalars({ type, floor, difficulty = DEFAULT_DIFFICULTY_ID }) {
+  if (!Number.isInteger(floor) || floor < 1 || floor > 10) throw new RangeError("Enemy stat floor must be from 1 to 10.");
+  const profile = typeof difficulty === "string" ? getDifficultyProfile(difficulty) : difficulty;
+  if (!profile || !profile.nonBossStats || !profile.bossStats) throw new TypeError("Enemy stat scaling requires a complete difficulty profile.");
+  if (type === "queen") {
+    return Object.freeze({
+      health: profile.bossStats.health * (1 + Math.max(0, floor - 1) * 0.02),
+      damage: profile.bossStats.damage,
+      speed: profile.bossStats.speed,
+    });
+  }
+  const family = ENEMY_FAMILY_STAT_SCALARS[type];
+  if (!family) throw new RangeError(`Unknown non-boss enemy family: ${type}`);
+  const band = statBandForFloor(floor);
+  const floorHealth = band.healthByFloor[floor - band.floorStart];
+  return Object.freeze({
+    health: floorHealth * profile.nonBossStats.health * family.health,
+    damage: band.damage * profile.nonBossStats.damage * family.damage,
+    speed: band.speed * profile.nonBossStats.speed * family.speed,
+  });
 }

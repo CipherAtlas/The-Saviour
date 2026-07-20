@@ -17,9 +17,19 @@ function clamp01(value) {
   return Math.max(0, Math.min(1, value));
 }
 
-function outboundTravelProgress(elapsed) {
-  const travelDuration = CLAIM_CONFIG.outbound.duration - CLAIM_CONFIG.outbound.releaseAt;
-  return clamp01((elapsed - CLAIM_CONFIG.outbound.releaseAt) / travelDuration);
+function outboundTravelProgress(elapsed, config = CLAIM_CONFIG) {
+  const travelDuration = config.outbound.duration - config.outbound.releaseAt;
+  return clamp01((elapsed - config.outbound.releaseAt) / travelDuration);
+}
+
+function resolvedClaimConfig(overrides = {}) {
+  return Object.freeze({
+    ...CLAIM_CONFIG,
+    ...overrides,
+    outbound: Object.freeze({ ...CLAIM_CONFIG.outbound, ...overrides.outbound }),
+    recall: Object.freeze({ ...CLAIM_CONFIG.recall, ...overrides.recall }),
+    empoweredCleave: Object.freeze({ ...CLAIM_CONFIG.empoweredCleave, ...overrides.empoweredCleave }),
+  });
 }
 
 function immutableValue(value) {
@@ -55,11 +65,17 @@ function targetId(candidate) {
 export class ReapersClaim {
   constructor(emit = () => {}) {
     this.emit = emit;
+    this.config = resolvedClaimConfig();
     this.actionSerial = 0;
     this.outboundHitIds = new Set();
     this.recallHitIds = new Set();
     this.cleaveHitIds = new Set();
     this.resetState();
+  }
+
+  setConfig(overrides = {}) {
+    this.config = resolvedClaimConfig(overrides);
+    return this.config;
   }
 
   validateRequest({ origin, direction, inputTime } = {}) {
@@ -91,8 +107,8 @@ export class ReapersClaim {
     this.publish("claimStarted", {
       actionId: this.actionId,
       inputTime,
-      releaseAt: CLAIM_CONFIG.outbound.releaseAt,
-      duration: CLAIM_CONFIG.outbound.duration,
+      releaseAt: this.config.outbound.releaseAt,
+      duration: this.config.outbound.duration,
       origin: frozenPoint(this.origin),
       direction: frozenPoint(this.direction),
       harvestUnits,
@@ -108,8 +124,8 @@ export class ReapersClaim {
       return Object.freeze({ accepted: false, reason: "alreadyConsumed", snapshot: this.snapshot() });
     }
     if (this.phase === "recalling") {
-      const remaining = CLAIM_CONFIG.recall.duration - this.elapsed;
-      if (remaining > CLAIM_CONFIG.recall.followupBuffer) {
+      const remaining = this.config.recall.duration - this.elapsed;
+      if (remaining > this.config.recall.followupBuffer) {
         return Object.freeze({ accepted: false, reason: "windowClosed", snapshot: this.snapshot() });
       }
       this.followupInputTime = inputTime;
@@ -152,13 +168,13 @@ export class ReapersClaim {
 
   snapshot() {
     const outboundProgress = this.phase === "outbound"
-      ? outboundTravelProgress(this.elapsed)
+      ? outboundTravelProgress(this.elapsed, this.config)
       : this.phase === "idle" ? 0 : 1;
     const recallProgress = this.phase === "recalling"
-      ? clamp01(this.elapsed / CLAIM_CONFIG.recall.duration)
+      ? clamp01(this.elapsed / this.config.recall.duration)
       : ["empoweredWindow", "empoweredCleave", "recovery"].includes(this.phase) ? 1 : 0;
     const empoweredRemaining = this.phase === "empoweredWindow"
-      ? Math.max(0, CLAIM_CONFIG.empoweredWindow - this.elapsed)
+      ? Math.max(0, this.config.empoweredWindow - this.elapsed)
       : 0;
     return Object.freeze({
       actionId: this.actionId,
@@ -181,22 +197,22 @@ export class ReapersClaim {
 
   get canCancelToDash() {
     if (this.phase === "empoweredWindow" || this.phase === "recovery") return true;
-    return this.phase === "empoweredCleave" && this.elapsed >= CLAIM_CONFIG.empoweredCleave.cancelToDashAt;
+    return this.phase === "empoweredCleave" && this.elapsed >= this.config.empoweredCleave.cancelToDashAt;
   }
 
   advanceOutbound(dt, adapter) {
-    const available = CLAIM_CONFIG.outbound.duration - this.elapsed;
+    const available = this.config.outbound.duration - this.elapsed;
     const consumed = Math.min(dt, available);
     const from = { ...this.scythePosition };
     this.elapsed += consumed;
-    const progress = outboundTravelProgress(this.elapsed);
-    this.scythePosition.x = this.origin.x + this.direction.x * CLAIM_CONFIG.outbound.distance * progress;
-    this.scythePosition.z = this.origin.z + this.direction.z * CLAIM_CONFIG.outbound.distance * progress;
-    if (this.elapsed > CLAIM_CONFIG.outbound.releaseAt && progress > 0) {
+    const progress = outboundTravelProgress(this.elapsed, this.config);
+    this.scythePosition.x = this.origin.x + this.direction.x * this.config.outbound.distance * progress;
+    this.scythePosition.z = this.origin.z + this.direction.z * this.config.outbound.distance * progress;
+    if (this.elapsed > this.config.outbound.releaseAt && progress > 0) {
       const collisionStatus = this.resolveCollisions("outbound", from, this.scythePosition, this.outboundHitIds, adapter);
       if (collisionStatus.ownershipChanged) return 0;
     }
-    if (this.elapsed + 0.000001 >= CLAIM_CONFIG.outbound.duration) {
+    if (this.elapsed + 0.000001 >= this.config.outbound.duration) {
       this.phase = "recalling";
       this.elapsed = 0;
       this.publish("claimRecallStarted", { actionId: this.actionId, position: frozenPoint(this.scythePosition) });
@@ -205,17 +221,17 @@ export class ReapersClaim {
   }
 
   advanceRecall(dt, adapter) {
-    const available = CLAIM_CONFIG.recall.duration - this.elapsed;
+    const available = this.config.recall.duration - this.elapsed;
     const consumed = Math.min(dt, available);
     const from = { ...this.scythePosition };
     this.elapsed += consumed;
-    const progress = clamp01(this.elapsed / CLAIM_CONFIG.recall.duration);
-    const distance = CLAIM_CONFIG.outbound.distance * (1 - progress);
+    const progress = clamp01(this.elapsed / this.config.recall.duration);
+    const distance = this.config.outbound.distance * (1 - progress);
     this.scythePosition.x = this.origin.x + this.direction.x * distance;
     this.scythePosition.z = this.origin.z + this.direction.z * distance;
     const collisionStatus = this.resolveCollisions("recall", from, this.scythePosition, this.recallHitIds, adapter);
     if (collisionStatus.ownershipChanged) return 0;
-    if (this.elapsed + 0.000001 >= CLAIM_CONFIG.recall.duration) this.catchScythe();
+    if (this.elapsed + 0.000001 >= this.config.recall.duration) this.catchScythe();
     return dt - consumed;
   }
 
@@ -226,36 +242,44 @@ export class ReapersClaim {
     this.publish("claimCaught", {
       actionId: this.actionId,
       position: frozenPoint(this.scythePosition),
-      empoweredWindow: CLAIM_CONFIG.empoweredWindow,
+      empoweredWindow: this.config.empoweredWindow,
     });
-    this.publish("claimFollowupReady", { actionId: this.actionId, remaining: CLAIM_CONFIG.empoweredWindow });
+    this.publish("claimFollowupReady", {
+      actionId: this.actionId,
+      remaining: this.config.empoweredWindow,
+      buffered: this.followupInputTime !== null,
+    });
     if (this.followupInputTime !== null) this.startEmpoweredCleave();
   }
 
   advanceEmpoweredWindow(dt) {
-    const available = CLAIM_CONFIG.empoweredWindow - this.elapsed;
+    const available = this.config.empoweredWindow - this.elapsed;
     const consumed = Math.min(dt, available);
     this.elapsed += consumed;
-    if (this.elapsed + 0.000001 >= CLAIM_CONFIG.empoweredWindow) this.enterRecovery("expired");
+    if (this.elapsed + 0.000001 >= this.config.empoweredWindow) this.enterRecovery("expired");
     return dt - consumed;
   }
 
   startEmpoweredCleave() {
     this.phase = "empoweredCleave";
     this.elapsed = 0;
-    this.publish("claimFollowupConsumed", { actionId: this.actionId, inputTime: this.followupInputTime });
+    this.publish("claimFollowupConsumed", {
+      actionId: this.actionId,
+      inputTime: this.followupInputTime,
+      activeStart: this.config.empoweredCleave.activeStart,
+    });
   }
 
   advanceCleave(dt, adapter) {
-    const available = CLAIM_CONFIG.empoweredCleave.duration - this.elapsed;
+    const available = this.config.empoweredCleave.duration - this.elapsed;
     const consumed = Math.min(dt, available);
     const previous = this.elapsed;
     this.elapsed += consumed;
-    if (this.elapsed >= CLAIM_CONFIG.empoweredCleave.activeStart && previous <= CLAIM_CONFIG.empoweredCleave.activeEnd) {
+    if (this.elapsed >= this.config.empoweredCleave.activeStart && previous <= this.config.empoweredCleave.activeEnd) {
       const collisionStatus = this.resolveCollisions("cleave", this.origin, this.origin, this.cleaveHitIds, adapter);
       if (collisionStatus.ownershipChanged) return 0;
     }
-    if (this.elapsed + 0.000001 >= CLAIM_CONFIG.empoweredCleave.duration) this.enterRecovery("cleave");
+    if (this.elapsed + 0.000001 >= this.config.empoweredCleave.duration) this.enterRecovery("cleave");
     return dt - consumed;
   }
 
@@ -267,15 +291,15 @@ export class ReapersClaim {
   }
 
   advanceRecovery(dt) {
-    const available = CLAIM_CONFIG.recoveryDuration - this.elapsed;
+    const available = this.config.recoveryDuration - this.elapsed;
     const consumed = Math.min(dt, available);
     this.elapsed += consumed;
-    if (this.elapsed + 0.000001 >= CLAIM_CONFIG.recoveryDuration) this.resetState();
+    if (this.elapsed + 0.000001 >= this.config.recoveryDuration) this.resetState();
     return dt - consumed;
   }
 
   resolveCollisions(pass, from, to, hitIds, adapter) {
-    if (!adapter || hitIds.size >= CLAIM_CONFIG.maxTargetsPerPass) return COLLISION_CONTINUES;
+    if (!adapter || hitIds.size >= this.config.maxTargetsPerPass) return COLLISION_CONTINUES;
     const actionId = this.actionId;
     const phase = this.phase;
     const activePass = pass;
@@ -285,10 +309,10 @@ export class ReapersClaim {
       pass: activePass,
       from: frozenPoint(from),
       to: frozenPoint(to),
-      radius: activePass === "outbound" ? CLAIM_CONFIG.outbound.radius
-        : activePass === "recall" ? CLAIM_CONFIG.recall.radius
-          : CLAIM_CONFIG.empoweredCleave.radius,
-      arc: activePass === "cleave" ? CLAIM_CONFIG.empoweredCleave.arc : null,
+      radius: activePass === "outbound" ? this.config.outbound.radius
+        : activePass === "recall" ? this.config.recall.radius
+          : this.config.empoweredCleave.radius,
+      arc: activePass === "cleave" ? this.config.empoweredCleave.arc : null,
       direction,
     };
     const querySweep = typeof adapter === "function" ? adapter : adapter.querySweep?.bind(adapter);
@@ -297,11 +321,11 @@ export class ReapersClaim {
     for (const candidate of candidates) {
       if (this.actionId !== actionId || this.phase !== phase) return COLLISION_OWNERSHIP_CHANGED;
       const id = targetId(candidate);
-      if (id === null || hitIds.has(id) || hitIds.size >= CLAIM_CONFIG.maxTargetsPerPass) continue;
+      if (id === null || hitIds.has(id) || hitIds.size >= this.config.maxTargetsPerPass) continue;
       hitIds.add(id);
-      const definition = activePass === "outbound" ? CLAIM_CONFIG.outbound
-        : activePass === "recall" ? CLAIM_CONFIG.recall
-          : CLAIM_CONFIG.empoweredCleave;
+      const definition = activePass === "outbound" ? this.config.outbound
+        : activePass === "recall" ? this.config.recall
+          : this.config.empoweredCleave;
       const resolution = typeof adapter === "object" && adapter.resolveHit
         ? adapter.resolveHit(Object.freeze({ actionId, pass: activePass, target: candidate.target ?? candidate, definition }))
         : candidate;

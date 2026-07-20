@@ -59,10 +59,7 @@ function roomOneSnapshot({
     player: { health: 130 },
     harvestUnits: 100,
     deathDefiance: { granted: 0, remaining: 0 },
-    upgradeSelections: [],
-    upgradeRanks: [],
     blessingIds: [],
-    rerollsUsedByFloor: Array(10).fill(0),
     runFlags: {},
     statisticsDraft,
   };
@@ -250,7 +247,6 @@ test("Speedrun enforces Ruthless, times every active decision phase, freezes on 
   assert.equal(context.settings.get("gameplay.difficulty"), "standard");
 
   context.controller.sampleTime(1, "playing", true);
-  context.controller.sampleTime(2, "reward", true);
   context.controller.sampleTime(3, "blessing", true);
   context.controller.sampleTime(4, "portalTraversal", true);
   context.controller.sampleTime(5, "roomLoading", true);
@@ -258,13 +254,13 @@ test("Speedrun enforces Ruthless, times every active decision phase, freezes on 
   context.controller.sampleTime(7, "playing", false);
   assert.deepEqual(context.controller.speedrunSnapshot(), {
     active: true,
-    elapsedSeconds: 10,
+    elapsedSeconds: 8,
     finished: false,
   });
 
   context.controller.handleEvent({ type: "enemyDefeated", detail: { type: "queen", origin: "stable" } });
   context.controller.sampleTime(5, "playing", true);
-  assert.equal(context.controller.speedrunSnapshot().elapsedSeconds, 10);
+  assert.equal(context.controller.speedrunSnapshot().elapsedSeconds, 8);
   assert.equal(context.controller.speedrunSnapshot().finished, true);
   context.controller.handleEvent({
     type: "runEnded",
@@ -274,13 +270,19 @@ test("Speedrun enforces Ruthless, times every active decision phase, freezes on 
   assert.equal(context.statistics.getSnapshot().attempts, 0);
   assert.equal(context.statistics.getSnapshot().totalActivePlaytimeSeconds, 0);
   assert.deepEqual(context.speedrunRecords.getSnapshot().best, {
-    timeSeconds: 10,
+    timeSeconds: 8,
     seed: "SPEED-SEED",
     ending: "kill",
   });
+  assert.deepEqual(context.speedrunRecords.getSnapshot().leaderboard, [{
+    timeSeconds: 8,
+    seed: "SPEED-SEED",
+    ending: "kill",
+  }]);
   assert.equal(context.controller.lastRunSummary().runType, "speedrun");
-  assert.equal(context.controller.lastRunSummary().speedrunTimeSeconds, 10);
+  assert.equal(context.controller.lastRunSummary().speedrunTimeSeconds, 8);
   assert.equal(context.controller.lastRunSummary().isPersonalBest, true);
+  assert.equal(context.controller.lastRunSummary().leaderboardRank, 1);
 });
 
 test("Speedrun continuation restores its run type and elapsed clock without changing normal difficulty", () => {

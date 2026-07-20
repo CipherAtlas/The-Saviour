@@ -33,20 +33,18 @@ test("run statistics consume canonical combat, progression, origin, and terminal
   stats.record(event("harvestChanged", { delta: -100 }));
   stats.record(event("deathDefianceGranted", { amount: 1 }));
   stats.record(event("playerRevived"));
-  stats.record(event("roomRewardChosen", {
-    id: "whetted-crescent", path: "Reaper", rank: 1,
-  }));
-  stats.record(event("roomRewardChosen", {
-    id: "whetted-crescent", path: "Reaper", rank: 2,
+  stats.record(event("blessingChosen", {
+    id: "falling-moon", path: "Reaper", rank: 1,
   }));
   stats.record(event("blessingChosen", {
-    id: "hollow-step", path: "Shade", rank: 1,
+    id: "falling-moon", path: "Reaper", rank: 2,
   }));
-  stats.record(event("upgradeRerolled"));
+  stats.record(event("blessingChosen", {
+    id: "ghost-cadence", path: "Shade", rank: 1,
+  }));
 
   stats.sampleTime(10, "playing", true);
   stats.sampleTime(5, "bookend", true);
-  stats.sampleTime(3, "reward", true);
   stats.sampleTime(2, "roomLoading", true);
   stats.sampleTime(8, "paused", true);
   stats.sampleTime(8, "playing", false);
@@ -82,12 +80,12 @@ test("run statistics consume canonical combat, progression, origin, and terminal
   });
   assert.deepEqual(result.harvest, { generated: 28, spent: 100 });
   assert.deepEqual(result.deathDefiance, { granted: 1, consumed: 1 });
-  assert.deepEqual(result.finalRanks, { "whetted-crescent": 2, "hollow-step": 1 });
+  assert.deepEqual(result.finalRanks, { "falling-moon": 2, "ghost-cadence": 1 });
   assert.deepEqual(result.pathTotals, { Reaper: 2, Shade: 1, Grave: 0 });
-  assert.equal(result.rerollsUsed, 1);
+  assert.equal(result.rerollsUsed, 0);
   assert.equal(result.durationSeconds, 19);
   assert.equal(result.combatSeconds, 14);
-  assert.equal(result.activePlaytimeSeconds, 24);
+  assert.equal(result.activePlaytimeSeconds, 21);
   assert.deepEqual(result.boss, {
     attempted: true,
     active: false,

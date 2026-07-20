@@ -47,6 +47,7 @@ test("settings normalize invalid ranges and enumerations", () => {
 
 test("control rebinding detects conflicts and supports reset", () => {
   const settings = new SettingsStore(new MemoryStorage());
+  assert.deepEqual(settings.get("controls.bindings.build"), ["KeyB", "Gamepad:Back"]);
   assert.equal(settings.setBinding("heavy", "KeyZ"), true);
   assert.equal(settings.setBinding("dash", "KeyZ"), false);
   assert.equal(settings.bindingConflict("dash", "KeyR"), "claim");

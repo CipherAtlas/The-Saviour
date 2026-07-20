@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { circleIntersectsArc, circleIntersectsLine, moveCircle, moveCircleDetailed } from "../src/game/collision.js";
-import { BLESSINGS } from "../src/game/blessings.js";
 import { Game } from "../src/game/Game.js";
 import { DASH_ATTACK, HEAVY_ATTACK, PLAYER_CONFIG, PORTAL_CONFIG, RUN_CONFIG, SCYTHE_ATTACKS, STRAIGHT_CHARGE_ATTACK } from "../src/game/gameConfig.js";
 import { PlayerCombat } from "../src/game/PlayerCombat.js";
@@ -103,8 +102,7 @@ test("player attacks use their committed facing rather than live mouse rotation"
   const game = new Game(input, createGameSettings());
   game.startRun("COMMITTED-FACING");
   finishOpening(game);
-  for (const actor of game.director.enemies) actor.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
   game.player.position = { x: 0, z: 0 };
   game.player.previousPosition = { x: 0, z: 0 };
   game.player.criticalChance = 0;
@@ -157,7 +155,7 @@ test("clearing a room grants bounded threshold recovery before the next encounte
   game.startRun("RECOVERY-CHECK");
   finishOpening(game);
   game.player.health = 40;
-  game.director.enemies.length = 0;
+  game.director.clearEncounter("testSetup");
 
   game.checkRoomProgress(RUN_CONFIG.roomClearDelay);
 
@@ -169,29 +167,18 @@ test("clearing a room grants bounded threshold recovery before the next encounte
 
   assert.equal(game.beginPortalTraversal(), true);
   game.updatePortalTraversal(PORTAL_CONFIG.traversalDuration);
-  assert.equal(game.phase, "reward");
+  assert.equal(game.phase, "playing");
+  assert.equal(game.room, 2);
 });
 
-test("the Moonwell floor blessing increases percentage recovery on later chamber clears", () => {
-  const game = new Game(createGameInput({ x: 0, y: 0 }), createGameSettings());
-  game.startRun("RECOVERY-BLESSING");
-  finishOpening(game);
-  BLESSINGS.find((blessing) => blessing.id === "moonwell-renewal").apply(game.player);
-  game.player.health = 40;
-  game.director.enemies.length = 0;
-
-  game.checkRoomProgress(RUN_CONFIG.roomClearDelay);
-
-  assert.equal(game.player.health, 72);
-});
-
-test("Final Mercy converts one lethal hit into a bounded Death Defiance recovery", () => {
+test("a Death Defiance charge converts one lethal hit into a bounded recovery", () => {
   const game = new Game(createGameInput({ x: 0, y: 0 }), createGameSettings());
   const revivals = [];
   game.on((event) => { if (event.type === "playerRevived") revivals.push(event.detail); });
   game.startRun("FINAL-MERCY");
   finishOpening(game);
-  BLESSINGS.find((blessing) => blessing.id === "final-mercy").apply(game.player);
+  game.player.deathDefiance = 1;
+  game.player.deathDefianceGranted = 1;
   game.player.health = 5;
 
   game.damagePlayer(20, "testLethalHit");

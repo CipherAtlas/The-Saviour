@@ -9,6 +9,7 @@ import { EffectsPool } from "./EffectsPool.js";
 import { GameCamera } from "./GameCamera.js";
 
 const MAX_PROJECTILES = 96;
+export const LOW_HEALTH_THRESHOLD = 0.35;
 
 export function endingCorruptionUrgency(game) {
   const endingState = game.ending?.snapshot?.();
@@ -21,6 +22,16 @@ export function presentationDelta(game, dt) {
   if (!Number.isFinite(dt) || dt <= 0) return 0;
   if (game?.phase === "paused" || game?.hitStop?.remaining?.() > 0) return 0;
   return dt;
+}
+
+export function playerLowHealthUrgency(game) {
+  if (game?.phase !== "playing") return 0;
+  const health = Number(game?.player?.health);
+  const maxHealth = Number(game?.player?.maxHealth);
+  if (!Number.isFinite(health) || !Number.isFinite(maxHealth) || maxHealth <= 0 || health <= 0) return 0;
+  const ratio = clamp01(health / maxHealth);
+  const urgency = clamp01((LOW_HEALTH_THRESHOLD - ratio) / LOW_HEALTH_THRESHOLD);
+  return urgency * urgency * (3 - 2 * urgency);
 }
 
 function interpolated(previous, current, alpha) {
@@ -306,7 +317,7 @@ export function combatPresentationDescriptor(type, detail = {}, options = {}) {
     return presentation(
       [{ position: playerPosition, color: ZEPHYR_PRESENTATION_COLORS.hurtRed, count: heavy ? 28 : 18, force: heavy ? 6.2 : 4.5 }],
       [{ position: playerPosition, radius: radius(heavy ? 0.82 : 0.58), color: ZEPHYR_PRESENTATION_COLORS.hurtRed, duration: heavy ? 0.34 : 0.22 }],
-      trauma(heavy ? 0.5 : 0.3),
+      trauma(heavy ? 0.62 : 0.45),
     );
   }
 
@@ -488,6 +499,9 @@ export class GameRenderer {
     this.baseFogDensity = 0.028;
     this.cameraSystem = new GameCamera(settings);
     this.effects = new EffectsPool(this.scene, settings);
+    this.combatOverlay = combatOverlay;
+    this.lowHealthUrgency = -1;
+    this.createPlayerDamageFeedback();
     this.damageNumbers = new DamageNumberLayer(combatOverlay, canvas, settings.getAll());
     this.catalog = new AssetCatalog();
     this.actorRenderer = null;
@@ -521,6 +535,31 @@ export class GameRenderer {
 
   setLoadProgressListener(listener) {
     this.catalog.setProgressListener(listener);
+  }
+
+  createPlayerDamageFeedback() {
+    if (!this.combatOverlay) return;
+    this.lowHealthVignette = document.createElement("div");
+    this.lowHealthVignette.className = "low-health-vignette";
+    this.playerHitVignette = document.createElement("div");
+    this.playerHitVignette.className = "player-hit-vignette";
+    this.combatOverlay.append(this.lowHealthVignette, this.playerHitVignette);
+  }
+
+  syncPlayerDamageFeedback(urgency) {
+    const nextUrgency = clamp01(urgency);
+    if (!this.lowHealthVignette || Math.abs(nextUrgency - this.lowHealthUrgency) < 0.001) return;
+    this.lowHealthUrgency = nextUrgency;
+    this.lowHealthVignette.style.setProperty("--low-health-urgency", nextUrgency.toFixed(3));
+    this.lowHealthVignette.classList.toggle("is-active", nextUrgency > 0);
+  }
+
+  triggerPlayerDamageFeedback(detail = {}) {
+    if (!this.playerHitVignette) return;
+    this.playerHitVignette.dataset.severity = detail.severity === "heavy" ? "heavy" : "light";
+    this.playerHitVignette.classList.remove("is-active");
+    void this.playerHitVignette.offsetWidth;
+    this.playerHitVignette.classList.add("is-active");
   }
 
   createLighting() {
@@ -702,7 +741,6 @@ export class GameRenderer {
 
   buildArena(arena, loadToken) {
     if (!this.initialized) return;
-    this.cameraSystem.setArena(arena);
     this.cameraSystem.snapTo(arena.playerSpawn);
     this.portal.position.set(arena.portal.x, 0, arena.portal.z);
     this.portal.visible = false;
@@ -738,6 +776,8 @@ export class GameRenderer {
     this.syncProjectiles(game.director.projectiles, alpha);
     const boss = game.director.activeBoss();
     const endingUrgency = endingCorruptionUrgency(game);
+    const lowHealthUrgency = playerLowHealthUrgency(game);
+    this.syncPlayerDamageFeedback(lowHealthUrgency);
     this.syncPortal(game, presentationDt);
     const playerX = interpolated(game.player.previousPosition.x, game.player.position.x, alpha);
     const playerZ = interpolated(game.player.previousPosition.z, game.player.position.z, alpha);
@@ -749,6 +789,7 @@ export class GameRenderer {
       Boolean(boss),
       game.portalTraversal?.active ? game.portalTraversal : null,
       endingUrgency,
+      lowHealthUrgency,
     );
     this.damageNumbers.update(dt, this.cameraSystem.camera, {
       phase: game.phase,
@@ -861,6 +902,8 @@ export class GameRenderer {
     const detail = sourceEvent.detail ?? {};
     this.actorRenderer?.handleEvent(sourceEvent);
     this.damageNumbers?.handleEvent(sourceEvent, game);
+    if (type === "playerHit") this.triggerPlayerDamageFeedback(detail);
+    if (type === "runStarted") this.playerHitVignette?.classList.remove("is-active");
     if (type === "enemyHit") {
       const position = presentationPoint(detail.position);
       if (position) {
@@ -961,6 +1004,10 @@ export class GameRenderer {
     this.renderer.shadowMap.type = values.graphics.shadows === "high" ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
     const shadowSize = values.graphics.shadows === "high" ? 2048 : values.graphics.shadows === "low" ? 512 : 1024;
     this.keyLight.shadow.mapSize.set(shadowSize, shadowSize);
+    if (this.combatOverlay) {
+      this.combatOverlay.dataset.reducedMotion = String(values.camera.reducedMotion === true);
+      this.combatOverlay.dataset.screenFlashes = String(values.accessibility.screenFlashes !== false);
+    }
     this.damageNumbers.applySettings(values);
     this.resize();
   }

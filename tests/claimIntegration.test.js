@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createWalkableShape } from "../src/game/arenaGeometry.js";
 import { Game } from "../src/game/Game.js";
 import {
   CHARGE_CONFIG,
@@ -65,6 +66,12 @@ function createGame(seed = "CLAIM-INTEGRATION") {
   game.on((event) => events.push(event));
   game.startRun(seed);
   while (game.phase === "bookend") game.continueBookend();
+  game.arena.width = 30;
+  game.arena.depth = 22;
+  game.arena.walkableShape = createWalkableShape({
+    regions: [{ id: "combat-test", role: "combat", x: 0, z: 0, width: 30, depth: 22 }],
+  });
+  game.arena.obstacles = [];
   return { game, input, events };
 }
 
@@ -101,8 +108,7 @@ function chargedAttack(quality, actionId = `charge-${quality}`) {
 }
 
 function prepareStationaryArena(game, positions = [{ x: 4, z: 0 }]) {
-  for (const actor of game.director.enemies) actor.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
   game.phase = "playing";
   game.player.position = { x: 0, z: 0 };
   game.player.previousPosition = { x: 0, z: 0 };
@@ -116,6 +122,19 @@ function prepareStationaryArena(game, positions = [{ x: 4, z: 0 }]) {
     return enemy;
   });
 }
+
+test("Game publishes charge cancellation metadata for audio lifecycle cleanup", () => {
+  const { game, events } = createGame("AUDIO-CHARGE-CANCELLATION");
+  game.combat.chargingHeavy = true;
+  const result = game.cancelCombatActions("audioTest");
+  const cancellation = events.find((event) => (
+    event.type === "combatActionsCancelled" && event.detail.reason === "audioTest"
+  ));
+
+  assert.equal(result.chargeCancelled, true);
+  assert.equal(cancellation.detail.chargeCancelled, true);
+  assert.equal(Object.isFrozen(cancellation.detail), true);
+});
 
 test("Harvest grants once on an empty floor and persists unspent units across rooms and floors", () => {
   const { game, events } = createGame("HARVEST-PERSISTENCE");
@@ -175,8 +194,7 @@ test("Grave Line spends the Claim bar before hitting only enemies inside its com
 
 test("Claim spend precedes startup and swept outbound/recall hits retain action linkage and pull order", () => {
   const { game, input, events } = createGame("CLAIM-SWEEP");
-  for (const actor of game.director.enemies) actor.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
   game.player.position = { x: 0, z: 0 };
   game.player.previousPosition = { x: 0, z: 0 };
   game.player.aimAngle = 0;
@@ -221,8 +239,7 @@ test("Claim spend precedes startup and swept outbound/recall hits retain action 
 
 test("a Claim queen kill defers terminal cancellation, preserves its ID, and terminates the pass", () => {
   const { game, input, events } = createGame("CLAIM-QUEEN-TERMINAL");
-  for (const actor of game.director.enemies) actor.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
   game.player.position = { x: 0, z: 0 };
   game.player.previousPosition = { x: 0, z: 0 };
   game.setAimPoint({ x: 10, z: 0 });
@@ -263,8 +280,7 @@ test("a Claim queen kill defers terminal cancellation, preserves its ID, and ter
 
 test("recall kills emit no false pull while a surviving light target is pulled after damage", () => {
   const { game, input, events } = createGame("CLAIM-RECALL-PULL");
-  for (const actor of game.director.enemies) actor.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
   game.player.position = { x: 0, z: 0 };
   game.player.previousPosition = { x: 0, z: 0 };
   game.setAimPoint({ x: 10, z: 0 });
@@ -293,18 +309,17 @@ test("recall kills emit no false pull while a surviving light target is pulled a
   assert.ok(events[survivorPull].detail.applied > 0);
 });
 
-test("normal hits use real input, structured action IDs, multipliers, and kill healing", () => {
+test("normal hits use real input, structured action IDs, multipliers, and Harvest", () => {
   const { game, input, events } = createGame("NORMAL-HIT-INTEGRATION");
-  for (const actor of game.director.enemies) actor.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
   game.player.position = { x: 0, z: 0 };
   game.player.previousPosition = { x: 0, z: 0 };
   game.setAimPoint({ x: 10, z: 0 });
   game.player.damageMultiplier = 1.5;
   game.player.reachMultiplier = 1.2;
   game.player.criticalChance = 1;
+  game.rng = { chance: () => true };
   game.player.health = game.player.maxHealth - 20;
-  game.player.healthOnKill = 7;
   const enemy = game.director.spawnEnemy("reaver", { x: 5, z: 0 }, 1);
   enemy.health = 20;
   enemy.speed = 0;
@@ -319,7 +334,7 @@ test("normal hits use real input, structured action IDs, multipliers, and kill h
   assert.equal(enemyHits[0].detail.damage, SCYTHE_ATTACKS[0].damage * 1.5 * 1.75);
   assert.equal(game.combat.harvest.snapshot().units - harvestBefore,
     HARVEST_CONFIG.gainUnits.critical + HARVEST_CONFIG.gainUnits.kill);
-  assert.equal(game.player.health, game.player.maxHealth - 13);
+  assert.equal(game.player.health, game.player.maxHealth - 20);
   const afterDefeat = game.combat.harvest.snapshot().units;
   game.phase = "playing";
   runNormalAttack(game, input, 900);
@@ -337,7 +352,7 @@ test("selective hit-stop applies the exact finisher, critical, charge, and Claim
   assert.equal(normal.events.some((event) => event.type === "hitStopRequested"), false);
 
   const cases = [
-    ["finisher", SCYTHE_ATTACKS[2], false, "comboFinisher"],
+    ["finisher", Object.freeze({ ...SCYTHE_ATTACKS[2], comboIndex: 2 }), false, "comboFinisher"],
     ["critical", SCYTHE_ATTACKS[0], true, "critical"],
     ["partial", chargedAttack("partial"), false, "chargePartial"],
     ["full", chargedAttack("full"), false, "chargeFull"],
@@ -386,7 +401,7 @@ test("multi-target qualifying hits request one max duration rather than summing"
   events.length = 0;
   game.rng = { chance: () => false };
   game.nextNormalActionId();
-  game.resolvePlayerAttack(SCYTHE_ATTACKS[2], new Set(), 0);
+  game.resolvePlayerAttack(Object.freeze({ ...SCYTHE_ATTACKS[2], comboIndex: 2 }), new Set(), 0);
   const requested = events.filter((event) => event.type === "hitStopRequested");
   assert.equal(requested.length, 1);
   assert.equal(game.hitStop.remaining(), HIT_STOP_CONFIG.policies.comboFinisher.duration);
@@ -504,8 +519,7 @@ test("perfect charged reap uses core poise and grants its Harvest bonus once per
 
 test("close-hit Harvest uses the configured inclusive boundary and deduplicates active frames", () => {
   const { game, input, events } = createGame("CLOSE-HIT-BOUNDARY");
-  for (const actor of game.director.enemies) actor.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
   game.player.position = { x: 0, z: 0 };
   game.player.previousPosition = { x: 0, z: 0 };
   game.player.criticalChance = 0;
@@ -565,7 +579,7 @@ test("run, room, death, portal, title, and ending entry cancel Claim idempotentl
     ["runReset", ({ game }) => game.startRun("RESET-REPLACEMENT")],
     ["roomReplacement", ({ game }) => game.loadRoom()],
     ["death", ({ game }) => { game.phase = "playing"; game.player.health = 1; game.player.invulnerable = 0; game.damagePlayer(2, "test"); }],
-    ["portal", ({ game }) => { game.phase = "playing"; game.portalActive = true; game.roomRewardPending = false; game.beginPortalTraversal(); }],
+    ["portal", ({ game }) => { game.phase = "playing"; game.portalActive = true; game.beginPortalTraversal(); }],
     ["title", ({ game }) => game.returnToTitle()],
     ["ending", ({ game }) => game.startEndingFlow()],
   ];

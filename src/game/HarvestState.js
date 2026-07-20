@@ -1,4 +1,4 @@
-import { HARVEST_CONFIG } from "./gameConfig.js";
+import { HARVEST_CONFIG, PROGRESSION_BALANCE_LIMITS } from "./gameConfig.js";
 
 const GAIN_SOURCES = new Set(Object.keys(HARVEST_CONFIG.gainUnits));
 
@@ -49,9 +49,18 @@ export class HarvestState {
 
   gain(source, amount = undefined) {
     const detail = sourceDetail(source);
-    const configuredAmount = HARVEST_CONFIG.gainUnits[detail.type];
-    const hasInvalidOverride = amount !== undefined && amount !== configuredAmount;
-    if (!GAIN_SOURCES.has(detail.type) || hasInvalidOverride || !Number.isInteger(configuredAmount) || configuredAmount <= 0) {
+    const baseAmount = HARVEST_CONFIG.gainUnits[detail.type];
+    const configuredAmount = detail.type === "upgradeModifier" && amount !== undefined ? amount : baseAmount;
+    const hasInvalidOverride = amount !== undefined
+      && detail.type !== "upgradeModifier"
+      && amount !== baseAmount;
+    if (
+      !GAIN_SOURCES.has(detail.type)
+      || hasInvalidOverride
+      || !Number.isInteger(configuredAmount)
+      || configuredAmount <= 0
+      || (detail.type === "upgradeModifier" && configuredAmount > PROGRESSION_BALANCE_LIMITS.harvestRefundPerAction)
+    ) {
       return immutableResult({ accepted: false, delta: 0, reason: "invalidGain", snapshot: this.snapshot() });
     }
     if (detail.eventId !== null && this.rememberedEventIds.has(`${detail.type}:${detail.eventId}`)) {

@@ -1,5 +1,6 @@
 import { createRunSeed } from "../generation/seededRandom.js";
 import { DIFFICULTY, PLAYER_CONFIG, STRAIGHT_CHARGE_CONFIG } from "../game/gameConfig.js";
+import { progressionDefinition } from "../game/progressionRuntime.js";
 import {
   bookendBackgroundAsset,
   bookendCharacterAsset,
@@ -8,6 +9,7 @@ import {
 } from "../game/bookendAssetManifest.js";
 import { publicAssetUrl } from "../publicAssetUrl.js";
 import { AnimatedLogo } from "./AnimatedLogo.js";
+import { GLOSSARY_SECTIONS, TUTORIAL_STEPS } from "./tutorialContent.js";
 
 const HARVEST_MAX_UNITS = 300;
 const HARVEST_UNITS_PER_SEGMENT = 100;
@@ -23,6 +25,14 @@ const DIFFICULTY_MENU_COPY = Object.freeze({
   standard: "The intended experience.",
   ruthless: "Faster threats. Less mercy.",
 });
+const PROGRESSION_PATHS = Object.freeze(["Reaper", "Shade", "Grave"]);
+const TECHNIQUE_SLOTS = Object.freeze([
+  Object.freeze({ id: "combo", label: "Combo", aliases: Object.freeze(["combo", "scytheCombo", "scythe-combo"]) }),
+  Object.freeze({ id: "chargedReap", label: "Charged Reap", aliases: Object.freeze(["chargedReap", "charged-reap", "reap"]) }),
+  Object.freeze({ id: "graveLine", label: "Grave Line", aliases: Object.freeze(["graveLine", "grave-line", "line"]) }),
+  Object.freeze({ id: "claim", label: "Claim", aliases: Object.freeze(["claim", "reapersClaim", "reapers-claim", "reaper's-claim"]) }),
+  Object.freeze({ id: "dash", label: "Dash", aliases: Object.freeze(["dash"]) }),
+]);
 
 function clamp01(value) {
   return Math.max(0, Math.min(1, Number(value) || 0));
@@ -50,14 +60,35 @@ export function formatSpeedrunTime(seconds) {
 
 function titleCaseId(value) {
   if (!value) return "None yet";
-  return String(value).replace(/[-_]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return String(value)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function progressionCopy(value) {
+  if (value == null || value === "") return "";
+  if (Array.isArray(value)) return value.map(progressionCopy).filter(Boolean).join(" · ");
+  if (typeof value === "object") {
+    return String(value.text ?? value.description ?? value.valueText ?? value.totalText ?? value.afterText ?? value.name ?? value.label ?? "");
+  }
+  return String(value);
+}
+
+function rankNumeral(rank) {
+  return ["", "I", "II", "III", "IV", "V"][Math.max(0, Math.floor(Number(rank) || 0))]
+    ?? String(Math.max(0, Math.floor(Number(rank) || 0)));
+}
+
+function techniqueSlotDefinition(slotId) {
+  return TECHNIQUE_SLOTS.find((slot) => slot.aliases.includes(slotId)) ?? null;
 }
 
 function bindingLabel(binding) {
   const labels = {
     Mouse0: "LMB",
-    Mouse1: "RMB",
-    Mouse2: "MMB",
+    Mouse1: "MMB",
+    Mouse2: "RMB",
     Escape: "Esc",
     ShiftLeft: "Shift",
     ShiftRight: "Shift",
@@ -73,6 +104,22 @@ function bindingLabel(binding) {
 function dispatchControlEvent(control, type) {
   const EventConstructor = control.ownerDocument?.defaultView?.Event ?? globalThis.Event;
   control.dispatchEvent(new EventConstructor(type, { bubbles: true }));
+}
+
+const MENU_KEYBOARD_ACTIONS = Object.freeze({
+  KeyW: "menuUp",
+  KeyA: "menuLeft",
+  KeyS: "menuDown",
+  KeyD: "menuRight",
+  Space: "menuConfirm",
+  Enter: "menuConfirm",
+  NumpadEnter: "menuConfirm",
+  KeyE: "menuConfirm",
+});
+
+export function menuActionForKeyboardEvent(event) {
+  if (event.repeat || event.isComposing || event.altKey || event.ctrlKey || event.metaKey) return null;
+  return MENU_KEYBOARD_ACTIONS[event.code] ?? null;
 }
 
 export function adjustFocusedMenuControl(control, direction) {
@@ -113,7 +160,9 @@ export function combatResourceViewModel(harvest = {}, claim = {}, primaryCharge 
   const filledSegments = Math.floor(units / HARVEST_UNITS_PER_SEGMENT);
   const chargingLine = primaryCharge.chargingPrimary === true;
   const chargeRatio = chargingLine
-    ? clamp01(Number(primaryCharge.primaryCharge) / STRAIGHT_CHARGE_CONFIG.buildupDuration)
+    ? clamp01(Number(primaryCharge.primaryCharge) / (
+      Number(primaryCharge.primaryChargeDuration) || STRAIGHT_CHARGE_CONFIG.buildupDuration
+    ))
     : 0;
   const claimPhase = claim.phase ?? "idle";
   const phase = chargingLine ? "lineCharge" : claimPhase;
@@ -150,13 +199,23 @@ export function combatResourceViewModel(harvest = {}, claim = {}, primaryCharge 
     phase,
     segments,
     unitsText: `${units} / ${HARVEST_MAX_UNITS} units`,
-    filledText: `${filledSegments} / 3 filled`,
+    filledText: `${filledSegments} / 3`,
     ariaValueText: `${units} of ${HARVEST_MAX_UNITS} Harvest units; ${filledSegments} of 3 segments filled; ${chargingLine ? claimStatus : `Claim ${claimStatus}`}`,
   };
 }
 
 export class GameUi {
-  constructor(root, game, settings, input, audio, settingsMenu, runSession = null) {
+  constructor(
+    root,
+    game,
+    settings,
+    input,
+    audio,
+    settingsMenu,
+    runSession = null,
+    tutorialProgress = null,
+    { runTutorialEnabled = true } = {},
+  ) {
     this.root = root;
     this.game = game;
     this.settings = settings;
@@ -164,20 +223,35 @@ export class GameUi {
     this.audio = audio;
     this.settingsMenu = settingsMenu;
     this.runSession = runSession;
+    this.tutorialProgress = tutorialProgress;
+    this.runTutorialEnabled = runTutorialEnabled;
+    this.runTutorialAttempted = false;
+    this.tutorialMode = null;
+    this.tutorialIndex = 0;
     this.assetsReady = false;
     this.loadFailed = false;
     this.visiblePhase = game.phase;
     this.loadingTransitionToken = 0;
     this.menuOverlay = null;
     this.menuReturnFocus = null;
+    this.confirmationBackdropScreen = null;
+    this.confirmationReturnFocus = null;
+    this.pauseBackdropScreen = null;
+    this.buildBackdropScreen = null;
+    this.buildResumeOnClose = false;
     this.pendingRunSeed = null;
     this.lastMessageTimer = null;
     this.harvestFeedbackTimer = null;
+    this.hudFadeTimer = null;
     this.harvestFeedbackState = "";
     this.lastDashPercent = -1;
     this.lastDashLabel = "";
+    this.lastHudVitalsSignature = "";
     this.lastCombatResourceSignature = "";
+    this.lastCombatConditionSignature = "";
     this.lastSpeedrunClock = "";
+    this.progressionState = { oaths: [], oathSlots: {} };
+    this.lastBlessingOfferContext = null;
     this.endingOutcome = null;
     this.bookendFocusSequenceId = null;
     this.bookendArtBeatId = null;
@@ -186,13 +260,15 @@ export class GameUi {
     this.bookendImageCache = new BookendImageCache();
     this.activeInputDevice = this.input.activeDevice ?? "keyboardMouse";
     this.build();
+    this.hudTop = this.root.querySelector(".hud-top");
     this.harvestMeter = this.root.querySelector("[data-hud='harvest-meter']");
     this.harvestSegments = [...this.root.querySelectorAll("[data-harvest-segment]")];
     this.harvestUnits = this.root.querySelector("[data-hud='harvest-units']");
     this.harvestFilled = this.root.querySelector("[data-hud='harvest-filled']");
     this.harvestFeedback = this.root.querySelector("[data-hud='harvest-feedback']");
-    this.claimStatus = this.root.querySelector("[data-hud='claim-status']");
     this.controlsHint = this.root.querySelector("[data-hud='controls-hint']");
+    this.updateProgressionState(this.progressionState);
+    this.updateCombatConditions();
     this.bindActions();
     this.setupTouchControls();
     this.updateControlsHint(this.activeInputDevice);
@@ -201,6 +277,8 @@ export class GameUi {
       this.activeInputDevice = event.detail?.current ?? event.detail?.device ?? null;
       this.updateControlsHint(this.activeInputDevice);
       this.updateBookendInputHint(this.activeInputDevice);
+      if (this.menuOverlay === "tutorial") this.renderTutorialStep();
+      if (this.menuOverlay === "build") this.renderBuildLedger(this.progressionState);
     });
     this.applySettings(settings.getAll());
     this.showPhase(game.phase);
@@ -230,6 +308,8 @@ export class GameUi {
             <button class="button title-new-run" data-action="new-run" disabled>Preparing models…</button>
             <button class="button title-speedrun" data-action="speedrun" disabled>Preparing models…</button>
             <button class="button title-utility" data-action="open-records">Records</button>
+            <button class="button title-utility" data-action="open-tutorial">Tutorial</button>
+            <button class="button title-utility" data-action="open-glossary">Glossary</button>
             <button class="button title-utility" data-action="open-settings">Settings</button>
             <button class="button title-utility" data-action="open-credits">Credits</button>
             <button class="button title-utility hidden" data-action="quit">Quit</button>
@@ -261,7 +341,7 @@ export class GameUi {
             <div><dt>Bookends</dt><dd>Intro and ending VN skipped</dd></div>
             <div><dt>Pressure</dt><dd>Fixed Ruthless balance</dd></div>
             <div><dt>Clock starts</dt><dd>First playable frame</dd></div>
-            <div><dt>Clock includes</dt><dd>Combat, portals, upgrades, and blessings</dd></div>
+            <div><dt>Clock includes</dt><dd>Combat, portals, and Oath choices</dd></div>
             <div><dt>Clock stops</dt><dd>The instant the Witch dies</dd></div>
             <div><dt>Finale</dt><dd>Five-second decision remains, untimed</dd></div>
           </dl>
@@ -290,44 +370,110 @@ export class GameUi {
         </div>
       </section>
 
-      <section class="modal menu-modal hidden" data-screen="confirmation" data-menu-overlay role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title" aria-describedby="confirmation-copy">
-        <div class="panel menu-panel confirmation-panel">
-          <p class="eyebrow" data-confirmation-eyebrow>Confirm</p>
-          <h2 id="confirmation-title" data-confirmation-title>Are you sure?</h2>
-          <p class="panel-copy" id="confirmation-copy" data-confirmation-copy></p>
-          <div class="button-row"><button class="button danger" data-action="confirm-menu">Confirm</button><button class="button primary" data-action="cancel-confirmation">Cancel</button></div>
+      <section class="modal menu-modal confirmation-modal hidden" data-screen="confirmation" data-menu-overlay role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title" aria-describedby="confirmation-copy">
+        <div class="panel pause-panel confirmation-panel">
+          <header class="confirmation-heading">
+            <h2 class="confirmation-title" id="confirmation-title" data-confirmation-title>Are you sure?</h2>
+          </header>
+          <p class="confirmation-copy" id="confirmation-copy" data-confirmation-copy></p>
+          <div class="confirmation-actions"><button class="button primary" data-action="cancel-confirmation">Cancel</button><button class="button danger" data-action="confirm-menu">Confirm</button></div>
+        </div>
+      </section>
+
+      <section class="modal menu-modal build-modal hidden" data-screen="build" data-menu-overlay role="dialog" aria-modal="true" aria-labelledby="build-title" aria-describedby="build-description">
+        <div class="panel build-panel">
+          <header class="build-heading">
+            <div>
+              <p class="eyebrow">Run Ledger</p>
+              <h2 id="build-title">Current Build</h2>
+              <p id="build-description">Your five technique Oaths and their tradeoffs.</p>
+            </div>
+            <button class="button quiet" data-action="close-build">Close</button>
+          </header>
+          <div class="build-ledger" data-build-ledger></div>
+          <footer class="build-footer">
+            <span><kbd data-build-shortcut>B</kbd> Toggle build</span>
+            <button class="button primary" data-action="close-build">Return to the descent</button>
+          </footer>
+        </div>
+      </section>
+
+      <section class="modal menu-modal glossary-modal hidden" data-screen="glossary" data-menu-overlay role="dialog" aria-modal="true" aria-labelledby="glossary-title" aria-describedby="glossary-description">
+        <div class="panel glossary-panel">
+          <header class="glossary-heading">
+            <h2 id="glossary-title">Glossary</h2>
+            <button class="button quiet" data-action="close-menu">Close</button>
+          </header>
+          <p class="glossary-lead" id="glossary-description">Mechanics and terms used throughout the Descent.</p>
+          <div class="glossary-content" data-glossary-content></div>
+        </div>
+      </section>
+
+      <section class="modal menu-modal tutorial-modal hidden" data-screen="tutorial" data-menu-overlay role="dialog" aria-modal="true" aria-labelledby="tutorial-title" aria-describedby="tutorial-lead">
+        <div class="panel tutorial-panel" data-tutorial-layout="carousel">
+          <header class="tutorial-heading">
+            <div>
+              <p class="eyebrow" data-tutorial-kicker>Field Guide</p>
+              <h2 id="tutorial-title" data-tutorial-title>Move &amp; Aim</h2>
+            </div>
+            <button class="button quiet tutorial-close" data-action="tutorial-close" aria-label="Close tutorial">Close</button>
+          </header>
+          <div class="tutorial-shell">
+            <nav class="tutorial-topics" data-tutorial-topics aria-label="Field guide topics"></nav>
+            <article class="tutorial-card" data-tutorial-card>
+              <div class="tutorial-step-meta">
+                <span data-tutorial-progress>Step 1 of 7</span>
+                <span class="tutorial-step-rule" aria-hidden="true"></span>
+              </div>
+              <div class="tutorial-content">
+                <div class="tutorial-copy">
+                  <p class="tutorial-lead" id="tutorial-lead" data-tutorial-lead></p>
+                  <div class="tutorial-controls" data-tutorial-controls></div>
+                  <dl class="tutorial-facts" data-tutorial-facts></dl>
+                  <ul class="tutorial-notes" data-tutorial-notes></ul>
+                </div>
+                <figure class="tutorial-visual">
+                  <img data-tutorial-image alt="" />
+                </figure>
+              </div>
+            </article>
+          </div>
+          <footer class="tutorial-actions">
+            <button class="button quiet tutorial-dismiss" data-action="tutorial-dont-show-again">Don't show again</button>
+            <div>
+              <button class="button quiet" data-action="tutorial-back">Back</button>
+              <button class="button primary" data-action="tutorial-next">Next</button>
+            </div>
+          </footer>
         </div>
       </section>
 
       <section class="hud hidden" data-screen="hud">
         <div class="hud-top">
           <div class="health-panel">
-            <div class="hud-labels"><span data-hud="location">Floor 1 · Chamber 1</span><span data-hud="health-text">140 / 140</span></div>
-            <div class="bar"><div class="bar-fill" data-hud="health-bar"></div></div>
+            <div class="hud-arch" aria-hidden="true"><img src="${upgradeDialBackgroundUrl}" alt=""></div>
+            <div class="hud-labels"><span data-hud="location">Floor 1 · Chamber 1</span></div>
+            <div class="health-labels"><span>Life</span><span data-hud="health-text">140 / 140</span></div>
+            <div class="bar health-bar"><div class="bar-fill" data-hud="health-bar"></div></div>
             <div class="dash-meter">
-              <div class="dash-labels"><span>Dash energy</span><span data-hud="dash-text">Ready</span></div>
+              <div class="dash-labels"><span>Dash</span><span data-hud="dash-text">Ready</span></div>
               <div class="bar dash-bar" role="progressbar" aria-label="Dash energy" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100" data-hud="dash-meter">
                 <div class="bar-fill" data-hud="dash-bar"></div>
               </div>
             </div>
             <div class="harvest-meter-wrap">
               <div class="harvest-labels">
-                <span>Harvest</span>
-                <span data-hud="harvest-units">0 / 300 units</span>
+                <span>Harvest · <strong data-hud="harvest-filled">0 / 3</strong></span>
               </div>
               <div class="harvest-meter" role="progressbar" aria-label="Harvest for Reaper's Claim and Grave Line" aria-valuemin="0" aria-valuemax="300" aria-valuenow="0" aria-valuetext="0 of 300 Harvest units; 0 of 3 segments filled; Claim Empty" data-hud="harvest-meter">
                 <span class="harvest-segment" data-harvest-segment="0" data-state="empty"><span class="harvest-segment-fill"></span><span class="harvest-segment-marker" aria-hidden="true">○</span></span>
                 <span class="harvest-segment" data-harvest-segment="1" data-state="empty"><span class="harvest-segment-fill"></span><span class="harvest-segment-marker" aria-hidden="true">○</span></span>
                 <span class="harvest-segment" data-harvest-segment="2" data-state="empty"><span class="harvest-segment-fill"></span><span class="harvest-segment-marker" aria-hidden="true">○</span></span>
               </div>
-              <div class="harvest-meta"><span data-hud="harvest-filled">0 / 3 filled</span><span class="claim-status" data-hud="claim-status" data-state="empty">Claim · Empty</span></div>
+              <span class="sr-only" data-hud="harvest-units">0 / 300 units</span>
               <span class="harvest-feedback" data-hud="harvest-feedback" role="status" aria-live="polite"></span>
             </div>
-            <div class="path-strip" data-hud="paths" aria-label="Run upgrade paths">
-              <span class="path-reaper">Reaper <strong data-path-rank="Reaper">0</strong></span>
-              <span class="path-shade">Shade <strong data-path-rank="Shade">0</strong></span>
-              <span class="path-grave">Grave <strong data-path-rank="Grave">0</strong></span>
-            </div>
+            <div class="combat-condition-strip hidden" data-hud="combat-conditions" role="group" aria-label="No active build conditions"></div>
           </div>
           <div class="objective-panel" data-hud="objective">Defeat all enemies</div>
         </div>
@@ -337,7 +483,7 @@ export class GameUi {
         </div>
         <div class="hud-bottom">
           <div class="message-log" data-hud="message" aria-live="polite"></div>
-          <div class="controls-hint" data-hud="controls-hint">WASD move · Mouse aim · LMB Strike · Q Reap · R Claim · Shift / RMB Dash · Esc pause</div>
+          <div class="controls-hint" data-hud="controls-hint">WASD move · Mouse aim · LMB Strike · Q Reap · R Claim · Shift / RMB Dash · B build · Esc pause</div>
         </div>
       </section>
 
@@ -371,31 +517,19 @@ export class GameUi {
         </div>
       </section>
 
-      <section class="modal hidden" data-screen="reward" role="dialog" aria-modal="true" aria-labelledby="reward-title">
+      <section class="modal hidden" data-screen="blessing" role="dialog" aria-modal="true" aria-labelledby="blessing-title" tabindex="-1">
         <div class="panel upgrade-panel">
           <img class="upgrade-dial-art" src="${upgradeDialBackgroundUrl}" alt="" aria-hidden="true">
           <header class="upgrade-heading">
-            <p class="eyebrow">Chamber reward</p>
-            <h2 id="reward-title">Shape your descent</h2>
+            <p class="eyebrow" data-upgrade-kicker>Technique Oath</p>
+            <h2 id="blessing-title" data-upgrade-title>Choose an Oath</h2>
+            <p class="panel-copy" data-upgrade-context>Choose how this technique changes for the rest of the descent.</p>
           </header>
-          <div class="upgrade-grid" data-room-rewards></div>
-          <div class="upgrade-actions">
-            <button class="button reroll-button" data-action="reroll-upgrades">Reroll choices · once this floor</button>
+          <div class="upgrade-ledger">
+            <div class="upgrade-grid" data-blessings role="group" aria-label="Oath choices"></div>
           </div>
-        </div>
-      </section>
-
-      <section class="modal hidden" data-screen="blessing" role="dialog" aria-modal="true" aria-labelledby="blessing-title">
-        <div class="panel upgrade-panel">
-          <img class="upgrade-dial-art" src="${upgradeDialBackgroundUrl}" alt="" aria-hidden="true">
-          <header class="upgrade-heading">
-            <p class="eyebrow">The threshold yields</p>
-            <h2 id="blessing-title">Choose a major blessing</h2>
-            <p class="panel-copy">Commit to a powerful rank before descending to the next floor.</p>
-          </header>
-          <div class="upgrade-grid" data-blessings></div>
           <div class="upgrade-actions">
-            <button class="button reroll-button" data-action="reroll-upgrades">Reroll choices · once this floor</button>
+            <button class="button primary upgrade-confirm" data-upgrade-confirm disabled>Select an Oath</button>
           </div>
         </div>
       </section>
@@ -407,7 +541,10 @@ export class GameUi {
           </header>
           <nav class="pause-actions" aria-label="Pause menu">
             <button class="button primary" data-action="resume">Resume</button>
+            <button class="button" data-action="open-build">Build</button>
             <button class="button" data-action="suspend-run" aria-label="Suspend at last threshold">Suspend Run</button>
+            <button class="button" data-action="open-tutorial">Field Guide</button>
+            <button class="button" data-action="open-glossary">Glossary</button>
             <button class="button" data-action="pause-settings">Settings</button>
             <button class="button danger" data-action="request-abandon-run">Abandon run</button>
           </nav>
@@ -436,17 +573,20 @@ export class GameUi {
         </div>
       </section>
 
-      <section class="modal hidden" data-screen="ending">
+      <section class="modal ending-modal hidden" data-screen="ending" role="dialog" aria-modal="true" aria-labelledby="ending-title">
         <div class="panel ending-panel">
-          <p class="eyebrow" data-ending="eyebrow">The descent ends</p>
-          <h2 data-ending="title">The Hollow Realm claims another</h2>
-          <p class="panel-copy" data-ending="copy"></p>
+          <header class="ending-heading">
+            <p class="eyebrow" data-ending="eyebrow">The descent ends</p>
+            <h2 id="ending-title" data-ending="title">The Hollow Realm claims another</h2>
+            <p class="panel-copy" data-ending="copy"></p>
+            <div class="ending-divider" aria-hidden="true"></div>
+          </header>
           <div class="run-summary" data-run-summary></div>
-          <div class="button-row">
+          <nav class="ending-actions" aria-label="End of run actions">
             <button class="button primary" data-action="retry">Retry seed</button>
             <button class="button" data-action="new-run">New Descent</button>
             <button class="button" data-action="return-title">Title</button>
-          </div>
+          </nav>
         </div>
       </section>
 
@@ -481,7 +621,9 @@ export class GameUi {
   bindActions() {
     this.root.addEventListener("click", async (event) => {
       if (event.target.matches?.("[data-menu-overlay]") && event.target.dataset.screen !== "confirmation") {
-        this.closeMenuOverlay();
+        if (event.target.dataset.screen === "tutorial") this.closeTutorial();
+        else if (event.target.dataset.screen === "build") this.closeBuild({ timeStamp: event.timeStamp });
+        else this.closeMenuOverlay();
         return;
       }
       const button = event.target.closest("[data-action]");
@@ -545,8 +687,55 @@ export class GameUi {
         this.openMenuOverlay("records", button);
         return;
       }
+      if (action === "open-glossary") {
+        this.renderGlossary();
+        this.openMenuOverlay("glossary", button);
+        this.showPauseBackdrop();
+        return;
+      }
       if (action === "open-credits") {
         this.openMenuOverlay("credits", button);
+        return;
+      }
+      if (action === "open-tutorial") {
+        this.openTutorial({ mode: "handbook", trigger: button });
+        return;
+      }
+      if (action === "open-build") {
+        this.openBuild(button, event.timeStamp);
+        return;
+      }
+      if (action === "close-build") {
+        this.closeBuild({ timeStamp: event.timeStamp });
+        return;
+      }
+      if (action === "tutorial-topic") {
+        this.tutorialIndex = Math.max(0, Math.min(this.tutorialTopics().length - 1, Number(button.dataset.tutorialIndex) || 0));
+        this.renderTutorialStep();
+        return;
+      }
+      if (action === "tutorial-back") {
+        this.tutorialIndex = Math.max(0, this.tutorialIndex - 1);
+        this.renderTutorialStep();
+        this.root.querySelector("[data-action='tutorial-back']")?.focus();
+        return;
+      }
+      if (action === "tutorial-next") {
+        if (this.tutorialIndex >= this.tutorialTopics().length - 1) this.closeTutorial();
+        else {
+          this.tutorialIndex += 1;
+          this.renderTutorialStep();
+          this.root.querySelector("[data-action='tutorial-next']")?.focus();
+        }
+        return;
+      }
+      if (action === "tutorial-close") {
+        this.closeTutorial();
+        return;
+      }
+      if (action === "tutorial-dont-show-again") {
+        this.tutorialProgress?.dismissForever?.();
+        this.closeTutorial();
         return;
       }
       if (action === "close-menu") {
@@ -556,7 +745,6 @@ export class GameUi {
       if (action === "request-reset-records") {
         this.openConfirmation({
           trigger: button,
-          eyebrow: "Erase the ledger",
           title: "Reset all records?",
           copy: "Attempts, endings, combat totals, Speedrun records, and best times will be erased. Settings remain intact.",
           confirmLabel: "Reset records",
@@ -571,9 +759,8 @@ export class GameUi {
       if (action === "request-abandon-run") {
         this.openConfirmation({
           trigger: button,
-          eyebrow: "End this descent",
           title: "Abandon the run?",
-          copy: "The suspended threshold will be cleared and this attempt will be recorded as abandoned.",
+          copy: "The suspended threshold will be cleared. This attempt will be recorded as abandoned.",
           confirmLabel: "Abandon run",
           onConfirm: () => this.runSession?.abandonRun() ?? this.game.returnToTitle(),
         });
@@ -584,6 +771,7 @@ export class GameUi {
         const returnFocus = this.menuReturnFocus;
         this.confirmationAction = null;
         this.confirmationReturnOverlay = null;
+        this.confirmationReturnFocus = null;
         this.closeMenuOverlay({ restoreFocus: false });
         confirm?.();
         if (this.menuOverlay) this.menuReturnFocus = returnFocus;
@@ -592,8 +780,14 @@ export class GameUi {
       if (action === "cancel-confirmation") {
         this.confirmationAction = null;
         const returnOverlay = this.confirmationReturnOverlay;
+        const returnFocus = this.confirmationReturnFocus;
         this.confirmationReturnOverlay = null;
-        if (returnOverlay) this.openMenuOverlay(returnOverlay, this.menuReturnFocus, { preserveReturnFocus: true });
+        this.confirmationReturnFocus = null;
+        this.clearConfirmationBackdrop();
+        if (returnOverlay) {
+          this.openMenuOverlay(returnOverlay, this.menuReturnFocus, { preserveReturnFocus: true });
+          queueMicrotask(() => returnFocus?.focus?.());
+        }
         else this.closeMenuOverlay();
         return;
       }
@@ -624,7 +818,6 @@ export class GameUi {
         return;
       }
       if (action === "bookend-continue") this.game.continueBookend();
-      if (action === "reroll-upgrades") this.game.rerollUpgradeOffer();
       if (action === "kill-princess") this.game.tryKillPrincess(event.timeStamp);
     });
 
@@ -640,9 +833,16 @@ export class GameUi {
           event.stopPropagation();
           if (this.settingsMenu.isOpen) this.settingsMenu.close();
           else if (this.menuOverlay === "confirmation") this.root.querySelector("[data-action='cancel-confirmation']")?.click();
+          else if (this.menuOverlay === "tutorial") this.closeTutorial({ timeStamp: event.timeStamp });
+          else if (this.menuOverlay === "build") this.closeBuild({ timeStamp: event.timeStamp });
           else if (this.menuOverlay) this.closeMenuOverlay();
           else if (this.game.phase === "paused") this.game.togglePause(event.timeStamp);
           return;
+        }
+        const menuAction = this.input.isCapturingBinding ? null : menuActionForKeyboardEvent(event);
+        if (menuAction && this.game.phase !== "bookend" && this.handleMenuAction(menuAction, menuScope)) {
+          event.preventDefault();
+          event.stopPropagation();
         }
       }
     });
@@ -651,7 +851,7 @@ export class GameUi {
   focusableControls(scope) {
     if (!scope) return [];
     return [...scope.querySelectorAll("button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])")]
-      .filter((control) => !control.closest(".hidden") && control.getAttribute("aria-hidden") !== "true");
+      .filter((control) => control.tabIndex !== -1 && !control.closest(".hidden") && control.getAttribute("aria-hidden") !== "true");
   }
 
   trapTab(event, scope) {
@@ -678,7 +878,6 @@ export class GameUi {
       title: "title",
       bookend: "bookend",
       paused: "pause",
-      reward: "reward",
       blessing: "blessing",
       dead: "ending",
       victory: "ending",
@@ -697,11 +896,252 @@ export class GameUi {
   }
 
   closeMenuOverlay({ restoreFocus = true } = {}) {
+    this.clearConfirmationBackdrop();
+    this.clearPauseBackdrop();
+    this.clearBuildBackdrop();
     for (const overlay of this.root.querySelectorAll("[data-menu-overlay]")) overlay.classList.add("hidden");
     this.menuOverlay = null;
     this.pendingRunSeed = null;
+    this.buildResumeOnClose = false;
     if (restoreFocus) this.menuReturnFocus?.focus?.();
     this.menuReturnFocus = null;
+  }
+
+  canOpenBuild() {
+    return !this.settingsMenu?.isOpen
+      && (!this.menuOverlay || this.menuOverlay === "build")
+      && ["playing", "paused", "blessing"].includes(this.game.phase);
+  }
+
+  openBuild(trigger = null, timeStamp = performance.now()) {
+    if (this.menuOverlay === "build") return true;
+    if (!this.canOpenBuild()) return false;
+    this.buildResumeOnClose = this.game.phase === "playing";
+    if (this.buildResumeOnClose && !this.game.togglePause(timeStamp)) {
+      this.buildResumeOnClose = false;
+      return false;
+    }
+    this.renderBuildLedger(this.progressionState);
+    this.openMenuOverlay("build", trigger);
+    this.showBuildBackdrop();
+    return true;
+  }
+
+  closeBuild({ timeStamp = performance.now(), restoreFocus = true } = {}) {
+    if (this.menuOverlay !== "build") return false;
+    const resumePlay = this.buildResumeOnClose;
+    this.closeMenuOverlay({ restoreFocus: restoreFocus && !resumePlay });
+    if (resumePlay && this.game.phase === "paused" && this.game.pausedPhase === "playing") {
+      this.game.togglePause(timeStamp);
+    }
+    return true;
+  }
+
+  showBuildBackdrop() {
+    const screenId = this.game.phase === "paused" ? "pause" : this.game.phase;
+    const screen = this.root.querySelector(`[data-screen='${screenId}']`);
+    if (!screen || screen.matches("[data-menu-overlay]")) return;
+    screen.setAttribute("aria-hidden", "true");
+    screen.inert = true;
+    this.buildBackdropScreen = screen;
+  }
+
+  clearBuildBackdrop() {
+    const screen = this.buildBackdropScreen;
+    if (!screen) return;
+    screen.removeAttribute("aria-hidden");
+    screen.inert = false;
+    this.buildBackdropScreen = null;
+  }
+
+  renderGlossary() {
+    const content = this.root.querySelector("[data-glossary-content]");
+    content.replaceChildren();
+    for (const [sectionIndex, glossarySection] of GLOSSARY_SECTIONS.entries()) {
+      const section = document.createElement("section");
+      section.className = "glossary-section";
+      const heading = document.createElement("h3");
+      heading.id = `glossary-section-${sectionIndex}`;
+      heading.textContent = glossarySection.title;
+      section.setAttribute("aria-labelledby", heading.id);
+      const terms = document.createElement("dl");
+      terms.className = "glossary-list";
+      for (const entry of glossarySection.entries) {
+        const row = document.createElement("div");
+        const term = document.createElement("dt");
+        const definition = document.createElement("dd");
+        term.textContent = entry.term;
+        definition.textContent = entry.definition;
+        row.append(term, definition);
+        terms.append(row);
+      }
+      section.append(heading, terms);
+      content.append(section);
+    }
+  }
+
+  tutorialBindings(control) {
+    if (this.activeInputDevice === "touch") {
+      return control.touchLabel ? [control.touchLabel] : [];
+    }
+    if (this.activeInputDevice === "gamepad") {
+      if (control.gamepadLabel) return [control.gamepadLabel];
+      const bindings = (control.actions ?? []).flatMap((action) => this.settings.get(`controls.bindings.${action}`) ?? []);
+      return [...new Set(bindings.filter((binding) => binding.startsWith("Gamepad:")).map(bindingLabel))];
+    }
+    if (control.keyboardLabel) return [control.keyboardLabel];
+    const actionBindings = (control.actions ?? []).map((action) => (
+      (this.settings.get(`controls.bindings.${action}`) ?? [])
+        .filter((binding) => !binding.startsWith("Gamepad:") && !binding.startsWith("Touch:"))
+    ));
+    const bindings = actionBindings.length > 1
+      ? actionBindings.map((bindingsForAction) => bindingsForAction[0]).filter(Boolean)
+      : actionBindings.flat();
+    return [...new Set(bindings.map(bindingLabel))];
+  }
+
+  tutorialTopics() {
+    return TUTORIAL_STEPS;
+  }
+
+  renderTutorialTopics(entries = this.tutorialTopics()) {
+    const topics = this.root.querySelector("[data-tutorial-topics]");
+    topics.replaceChildren();
+    for (const [index, step] of entries.entries()) {
+      const button = document.createElement("button");
+      button.className = "tutorial-topic";
+      button.dataset.action = "tutorial-topic";
+      button.dataset.tutorialIndex = String(index);
+      button.innerHTML = `<span>${String(index + 1).padStart(2, "0")}</span><strong>${step.navLabel}</strong>`;
+      if (index === this.tutorialIndex) button.setAttribute("aria-current", "step");
+      topics.append(button);
+    }
+  }
+
+  renderTutorialStep() {
+    const entries = this.tutorialTopics();
+    const step = entries[this.tutorialIndex] ?? entries[0];
+    const panel = this.root.querySelector("[data-screen='tutorial'] .tutorial-panel");
+    panel.dataset.tutorialLayout = this.tutorialMode === "handbook" ? "handbook" : "carousel";
+    panel.dataset.tutorialStep = step.id;
+    const kicker = this.root.querySelector("[data-tutorial-kicker]");
+    kicker.textContent = this.tutorialMode === "handbook" ? "" : "Descent Guide";
+    kicker.classList.toggle("hidden", this.tutorialMode === "handbook");
+    this.root.querySelector("[data-tutorial-title]").textContent = step.title;
+    const progress = this.root.querySelector("[data-tutorial-progress]");
+    progress.textContent = `${this.tutorialMode === "handbook" ? "Topic" : "Step"} ${this.tutorialIndex + 1} of ${entries.length}`;
+    this.root.querySelector("[data-tutorial-lead]").textContent = step.lead;
+
+    const controls = this.root.querySelector("[data-tutorial-controls]");
+    controls.replaceChildren();
+    controls.classList.toggle("hidden", !step.controls?.length);
+    for (const control of step.controls ?? []) {
+      const group = document.createElement("div");
+      const label = document.createElement("span");
+      label.textContent = control.label;
+      const bindings = document.createElement("span");
+      bindings.className = "tutorial-binding-list";
+      for (const binding of this.tutorialBindings(control)) {
+        const key = document.createElement("kbd");
+        key.textContent = control.prefix ? `${control.prefix} ${binding}` : binding;
+        bindings.append(key);
+      }
+      group.append(label, bindings);
+      controls.append(group);
+    }
+
+    const facts = this.root.querySelector("[data-tutorial-facts]");
+    facts.replaceChildren();
+    facts.classList.toggle("hidden", !step.facts?.length);
+    for (const fact of step.facts ?? []) {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      const value = document.createElement("dd");
+      term.textContent = fact.label;
+      value.textContent = fact.value;
+      row.append(term, value);
+      facts.append(row);
+    }
+
+    const notes = this.root.querySelector("[data-tutorial-notes]");
+    notes.replaceChildren();
+    notes.classList.toggle("hidden", !step.notes?.length);
+    for (const note of step.notes ?? []) {
+      const item = document.createElement("li");
+      item.textContent = note;
+      notes.append(item);
+    }
+
+    const image = this.root.querySelector("[data-tutorial-image]");
+    image.src = publicAssetUrl(step.image);
+    image.alt = step.imageAlt;
+    image.dataset.fit = step.imageFit ?? "cover";
+
+    this.renderTutorialTopics(entries);
+    const back = this.root.querySelector("[data-action='tutorial-back']");
+    const next = this.root.querySelector("[data-action='tutorial-next']");
+    const dismiss = this.root.querySelector(".tutorial-dismiss");
+    back.disabled = this.tutorialIndex === 0;
+    next.textContent = this.tutorialIndex === entries.length - 1
+      ? this.tutorialMode === "handbook" ? "Done" : "Begin Descent"
+      : "Next";
+    dismiss.classList.toggle("hidden", this.tutorialMode === "handbook");
+  }
+
+  openTutorial({ mode = "handbook", trigger = null, index = 0 } = {}) {
+    this.tutorialMode = mode;
+    this.tutorialIndex = Math.max(0, Math.min(this.tutorialTopics().length - 1, index));
+    this.renderTutorialStep();
+    this.openMenuOverlay("tutorial", trigger);
+    this.showPauseBackdrop();
+    queueMicrotask(() => {
+      const preferred = mode === "handbook"
+        ? this.root.querySelector("[data-tutorial-topics] [aria-current='step']")
+        : this.root.querySelector("[data-action='tutorial-next']");
+      preferred?.focus();
+    });
+  }
+
+  closeTutorial({ timeStamp = performance.now() } = {}) {
+    const wasRunStart = this.tutorialMode === "runStart";
+    this.closeMenuOverlay({ restoreFocus: !wasRunStart });
+    this.tutorialMode = null;
+    if (wasRunStart && this.game.phase === "paused") this.game.togglePause(timeStamp);
+  }
+
+  showPauseBackdrop() {
+    const screen = this.game.phase === "paused" ? this.root.querySelector("[data-screen='pause']") : null;
+    if (!screen) return;
+    screen.classList.add("tutorial-backdrop");
+    screen.setAttribute("aria-hidden", "true");
+    screen.inert = true;
+    this.pauseBackdropScreen = screen;
+  }
+
+  clearPauseBackdrop() {
+    const screen = this.pauseBackdropScreen;
+    if (!screen) return;
+    screen.classList.remove("tutorial-backdrop");
+    screen.removeAttribute("aria-hidden");
+    screen.inert = false;
+    this.pauseBackdropScreen = null;
+  }
+
+  scheduleRunTutorial() {
+    if (
+      this.runTutorialAttempted
+      || !this.runTutorialEnabled
+      || this.game.runType !== "normal"
+      || this.game.floor !== 1
+      || this.game.room !== 1
+      || !(this.tutorialProgress?.shouldShow?.() ?? false)
+    ) return;
+    this.runTutorialAttempted = true;
+    queueMicrotask(() => {
+      if (this.game.phase !== "playing" || this.menuOverlay || this.settingsMenu.isOpen) return;
+      this.game.togglePause(performance.now());
+      this.openTutorial({ mode: "runStart" });
+    });
   }
 
   openDifficulty(trigger, seed, preferredDifficulty = this.settings.get("gameplay.lastDifficultyId")) {
@@ -745,16 +1185,41 @@ export class GameUi {
     return started;
   }
 
-  openConfirmation({ trigger, eyebrow, title, copy, confirmLabel, onConfirm }) {
+  openConfirmation({ trigger, title, copy, confirmLabel, onConfirm }) {
     const screen = this.root.querySelector("[data-screen='confirmation']");
     this.confirmationReturnOverlay = this.menuOverlay;
-    screen.querySelector("[data-confirmation-eyebrow]").textContent = eyebrow;
+    this.confirmationReturnFocus = trigger;
     screen.querySelector("[data-confirmation-title]").textContent = title;
     screen.querySelector("[data-confirmation-copy]").textContent = copy;
     screen.querySelector("[data-action='confirm-menu']").textContent = confirmLabel;
     this.confirmationAction = onConfirm;
     this.openMenuOverlay("confirmation", trigger, { preserveReturnFocus: Boolean(this.confirmationReturnOverlay) });
+    this.showConfirmationBackdrop();
     queueMicrotask(() => screen.querySelector("[data-action='cancel-confirmation']")?.focus());
+  }
+
+  showConfirmationBackdrop() {
+    const screen = this.confirmationReturnOverlay
+      ? this.root.querySelector(`[data-screen='${this.confirmationReturnOverlay}']`)
+      : this.game.phase === "paused" ? this.root.querySelector("[data-screen='pause']") : null;
+    if (!screen) return;
+    screen.classList.remove("hidden");
+    screen.classList.add("confirmation-backdrop");
+    screen.setAttribute("aria-hidden", "true");
+    screen.inert = true;
+    this.confirmationBackdropScreen = screen;
+  }
+
+  clearConfirmationBackdrop() {
+    const screen = this.confirmationBackdropScreen;
+    if (!screen) return;
+    screen.classList.remove("confirmation-backdrop");
+    screen.removeAttribute("aria-hidden");
+    screen.inert = false;
+    if (screen.matches("[data-menu-overlay]") && screen.dataset.screen !== this.menuOverlay) {
+      screen.classList.add("hidden");
+    }
+    this.confirmationBackdropScreen = null;
   }
 
   setTitleStatus(message = "") {
@@ -789,7 +1254,12 @@ export class GameUi {
       return;
     }
     const { statistics, derived } = model;
-    const speedrun = model.speedrun ?? { attempts: 0, completions: 0, best: null };
+    const speedrun = model.speedrun ?? {
+      attempts: 0,
+      completions: 0,
+      best: null,
+      leaderboard: [],
+    };
     const overview = document.createElement("div");
     overview.className = "records-overview";
     overview.innerHTML = `
@@ -814,16 +1284,17 @@ export class GameUi {
     const speedrunRecord = document.createElement("section");
     speedrunRecord.className = "records-speedrun";
     const speedrunTitle = document.createElement("h3");
-    speedrunTitle.textContent = "Speedrun · Ruthless";
+    speedrunTitle.textContent = "Personal leaderboard · This browser";
+    const speedrunScope = document.createElement("p");
+    speedrunScope.className = "records-speedrun-scope";
+    speedrunScope.textContent = "Speedrun · Ruthless · Fastest 10 Witch clears";
     const speedrunRows = document.createElement("dl");
-    const bestRows = [
+    speedrunRows.className = "records-speedrun-summary";
+    const summaryRows = [
       ["Attempts", String(speedrun.attempts)],
       ["Witch clears", String(speedrun.completions)],
-      ["Best time", speedrun.best ? formatSpeedrunTime(speedrun.best.timeSeconds) : "—"],
-      ["Best seed", speedrun.best?.seed ?? "—"],
-      ["Decision", speedrun.best ? speedrun.best.ending === "kill" ? "Mercy" : "Hesitation" : "—"],
     ];
-    for (const [label, value] of bestRows) {
+    for (const [label, value] of summaryRows) {
       const row = document.createElement("div");
       const term = document.createElement("dt");
       const description = document.createElement("dd");
@@ -832,13 +1303,59 @@ export class GameUi {
       row.append(term, description);
       speedrunRows.append(row);
     }
-    speedrunRecord.append(speedrunTitle, speedrunRows);
+    speedrunRecord.append(speedrunTitle, speedrunScope, speedrunRows);
+    const leaderboard = Array.isArray(speedrun.leaderboard)
+      ? speedrun.leaderboard
+      : speedrun.best ? [speedrun.best] : [];
+    if (leaderboard.length === 0) {
+      const emptyLeaderboard = document.createElement("p");
+      emptyLeaderboard.className = "records-speedrun-empty";
+      emptyLeaderboard.textContent = "Complete a speedrun to set the first time.";
+      speedrunRecord.append(emptyLeaderboard);
+    } else {
+      const tableScroll = document.createElement("div");
+      tableScroll.className = "records-speedrun-table-scroll";
+      const table = document.createElement("table");
+      table.className = "records-speedrun-table";
+      const caption = document.createElement("caption");
+      caption.className = "sr-only";
+      caption.textContent = "Fastest completed speedruns on this browser";
+      const head = document.createElement("thead");
+      const headingRow = document.createElement("tr");
+      for (const label of ["Rank", "Time", "Seed", "Decision"]) {
+        const heading = document.createElement("th");
+        heading.setAttribute("scope", "col");
+        heading.textContent = label;
+        headingRow.append(heading);
+      }
+      head.append(headingRow);
+      const body = document.createElement("tbody");
+      leaderboard.forEach((entry, index) => {
+        const row = document.createElement("tr");
+        const values = [
+          `#${index + 1}`,
+          formatSpeedrunTime(entry.timeSeconds),
+          entry.seed,
+          entry.ending === "kill" ? "Mercy" : "Hesitation",
+        ];
+        values.forEach((value, cellIndex) => {
+          const cell = document.createElement(cellIndex === 0 ? "th" : "td");
+          if (cellIndex === 0) cell.setAttribute("scope", "row");
+          cell.textContent = value;
+          row.append(cell);
+        });
+        body.append(row);
+      });
+      table.append(caption, head, body);
+      tableScroll.append(table);
+      speedrunRecord.append(tableScroll);
+    }
     content.append(speedrunRecord);
     const preferences = document.createElement("p");
     preferences.className = "records-preferences";
     preferences.textContent = statistics.attempts === 0
       ? "No descent has ended yet. The ledger will begin with your first completed attempt."
-      : `Preferred path: ${derived.preferredPath ?? "unformed"} · Most selected upgrade: ${titleCaseId(derived.mostSelectedUpgrade)} · Favored major action: ${titleCaseId(derived.favoriteMajorAction)}`;
+      : `Most selected Oath: ${titleCaseId(derived.mostSelectedUpgrade)} · Favored major action: ${titleCaseId(derived.favoriteMajorAction)}`;
     content.append(preferences);
     if (model.storageError) {
       const warning = document.createElement("p");
@@ -854,7 +1371,60 @@ export class GameUi {
     }
   }
 
+  handleMenuAction(action, scope = this.activeMenuScope()) {
+    if (!scope || this.game.phase === "bookend") return false;
+    const directions = {
+      menuUp: -1,
+      menuLeft: -1,
+      menuDown: 1,
+      menuRight: 1,
+    };
+    const direction = directions[action] ?? 0;
+    const activeElement = document.activeElement;
+    const activeControl = typeof scope.contains === "function" && !scope.contains(activeElement)
+      ? null
+      : activeElement;
+
+    if (["menuLeft", "menuRight"].includes(action)
+      && this.settingsMenu?.isOpen
+      && activeControl?.matches?.("[role='tab']")) {
+      this.settingsMenu.moveTab(direction);
+      return true;
+    }
+
+    if (["menuLeft", "menuRight"].includes(action) && adjustFocusedMenuControl(activeControl, direction)) {
+      return true;
+    }
+
+    if (direction !== 0) {
+      const controls = this.focusableControls(scope);
+      if (controls.length > 0) {
+        const current = controls.indexOf(activeControl);
+        const next = current < 0
+          ? 0
+          : (current + direction + controls.length) % controls.length;
+        controls[next].focus();
+      }
+      return true;
+    }
+
+    if (action !== "menuConfirm") return false;
+    if (activeControl?.matches?.("button:not(:disabled), input[type='checkbox']:not(:disabled)")) {
+      activeControl.click();
+    } else if (!adjustFocusedMenuControl(activeControl, 1)) {
+      this.focusableControls(scope)[0]?.focus();
+    }
+    return true;
+  }
+
   handleMenuInput(timeStamp = performance.now()) {
+    const buildInput = this.input.consumePressed("build");
+    if (buildInput && this.menuOverlay === "build") {
+      this.closeBuild({ timeStamp: buildInput.timeStamp ?? timeStamp });
+      return true;
+    }
+    if (buildInput && this.openBuild(null, buildInput.timeStamp ?? timeStamp)) return true;
+
     const scope = this.activeMenuScope();
     if (!scope || this.game.phase === "bookend") return false;
     const moveUp = this.input.consumePressed("moveUp");
@@ -870,34 +1440,23 @@ export class GameUi {
     if (back) {
       if (this.settingsMenu.isOpen) this.settingsMenu.close();
       else if (this.menuOverlay === "confirmation") this.root.querySelector("[data-action='cancel-confirmation']")?.click();
+      else if (this.menuOverlay === "tutorial") this.closeTutorial({ timeStamp: back.timeStamp ?? timeStamp });
+      else if (this.menuOverlay === "build") this.closeBuild({ timeStamp: back.timeStamp ?? timeStamp });
       else if (this.menuOverlay) this.closeMenuOverlay();
       else if (this.game.phase === "paused") this.game.togglePause(back.timeStamp ?? timeStamp);
       return true;
     }
 
-    const activeControl = document.activeElement;
-    if (verticalDirection === 0 && horizontalDirection !== 0 && adjustFocusedMenuControl(activeControl, horizontalDirection)) {
-      return true;
-    }
-
-    const focusDirection = verticalDirection || horizontalDirection;
-    if (focusDirection !== 0) {
-      const controls = this.focusableControls(scope);
-      if (controls.length > 0) {
-        const current = Math.max(0, controls.indexOf(document.activeElement));
-        controls[(current + focusDirection + controls.length) % controls.length].focus();
-      }
-      return true;
-    }
-
-    if (confirm) {
-      if (activeControl?.matches?.("button:not(:disabled), input[type='checkbox']:not(:disabled)")) {
-        activeControl.click();
-      } else {
-        adjustFocusedMenuControl(activeControl, 1);
-      }
-      return true;
-    }
+    const menuAction = verticalDirection < 0
+      ? "menuUp"
+      : verticalDirection > 0
+        ? "menuDown"
+        : horizontalDirection < 0
+          ? "menuLeft"
+          : horizontalDirection > 0
+            ? "menuRight"
+            : confirm ? "menuConfirm" : null;
+    if (menuAction) return this.handleMenuAction(menuAction, scope);
     return false;
   }
 
@@ -981,11 +1540,34 @@ export class GameUi {
     if (type === "runStarted" || type === "runResumed") {
       this.resetEndingPresentation();
       this.setTitleStatus("");
+      if (type === "runStarted") {
+        this.runTutorialAttempted = false;
+        this.lastBlessingOfferContext = null;
+        this.updateProgressionState({ oaths: [], oathSlots: {} });
+        this.updateCombatConditions();
+      }
     }
     if (type === "roomReady") {
       this.setObjective(this.game.arena?.boss ? "Defeat the Witch" : "Defeat all enemies");
     }
-    if (type === "hudChanged") this.updateHud(detail);
+    if (type === "hudChanged") {
+      this.updateHud(detail);
+      if (detail.build || detail.progressionState) {
+        this.updateProgressionState(detail.build ?? detail.progressionState);
+      }
+      if (detail.conditions || detail.combatConditions) {
+        this.updateCombatConditions(detail.conditions ?? detail.combatConditions);
+      }
+    }
+    if (type === "progressionStateChanged") {
+      this.updateProgressionState(detail.build ?? detail.progressionState ?? detail);
+      if (detail.conditions || detail.combatConditions) {
+        this.updateCombatConditions(detail.conditions ?? detail.combatConditions);
+      }
+    }
+    if (type === "combatConditionsChanged") {
+      this.updateCombatConditions(detail.conditions ?? detail.combatConditions ?? detail);
+    }
     if (type === "harvestChanged") this.showHarvestFeedback(detail);
     if (type === "arenaChanged") {
       this.setObjective(detail.boss ? "Defeat the Witch" : "Defeat all enemies");
@@ -994,16 +1576,7 @@ export class GameUi {
     if (type === "bookendStarted" || type === "bookendAdvanced") {
       this.showBookend(detail, { focus: type === "bookendStarted" });
     }
-    if (type === "roomRewardOffered") {
-      this.setObjective("Choose a chamber reward");
-      this.showRoomRewards(detail.choices, detail.rerollAvailable);
-    }
-    if (type === "blessingOffered") this.showBlessings(detail.choices, detail.rerollAvailable);
-    if (type === "upgradeRerolled") {
-      if (detail.tier === "chamber") this.showRoomRewards(detail.choices, false);
-      else this.showBlessings(detail.choices, false);
-      this.showMessage("The offered paths have shifted.");
-    }
+    if (type === "blessingOffered") this.showBlessings(detail.choices, detail);
     if (type === "endingDecisionStarted" || type === "endingDecisionUpdated") this.updateEndingDecision(detail);
     if (type === "endingChoiceResolved") this.resolveEndingChoice(detail.ending);
     if (type === "endingFadeStarted" || type === "endingFadeUpdated") this.updateEndingFade(detail);
@@ -1015,7 +1588,6 @@ export class GameUi {
     if (type === "bossHealth") this.updateBossHealth(detail.health, detail.maxHealth);
     if (type === "runEnded") this.showEnding(detail);
     if (type === "blessingChosen") this.showMessage(`${detail.name} accepted`);
-    if (type === "roomRewardChosen") this.showMessage(`${detail.path} · ${detail.name} reached rank ${detail.rank}`);
     if (type === "portalTraversalStarted") {
       this.setObjective("Descending…");
       this.showMessage("The Hollow Realm pulls you deeper.");
@@ -1036,7 +1608,6 @@ export class GameUi {
     this.root.querySelector("[data-screen='hud']").classList.toggle("hidden", ["title", "roomLoading", "bookend", "dead", "victory", "endingComplete", "endingChoice", "endingStrike", "endingFade"].includes(phase));
     this.root.querySelector("[data-screen='pause']").classList.toggle("hidden", phase !== "paused");
     this.root.querySelector("[data-screen='bookend']").classList.toggle("hidden", phase !== "bookend");
-    this.root.querySelector("[data-screen='reward']").classList.toggle("hidden", phase !== "reward");
     this.root.querySelector("[data-screen='blessing']").classList.toggle("hidden", phase !== "blessing");
     this.root.querySelector("[data-screen='ending-decision']").classList.toggle("hidden", phase !== "endingChoice");
     this.root.querySelector("[data-screen='ending']").classList.toggle("hidden", !terminal);
@@ -1063,15 +1634,179 @@ export class GameUi {
     }
     if (phase === "paused") queueMicrotask(() => this.root.querySelector("[data-action='resume']")?.focus());
     if (terminal) queueMicrotask(() => this.root.querySelector("[data-action='retry']")?.focus());
+    if (["playing", "portalTraversal"].includes(phase)) this.wakeHud();
+    if (phase === "playing") this.scheduleRunTutorial();
+  }
+
+  wakeHud() {
+    if (!this.hudTop) return;
+    clearTimeout(this.hudFadeTimer);
+    this.hudTop.classList.add("is-awake");
+    this.hudFadeTimer = setTimeout(() => {
+      this.hudTop.classList.remove("is-awake");
+      this.hudFadeTimer = null;
+    }, 1800);
   }
 
   updateHud(detail) {
+    const vitalsSignature = `${detail.floor}:${detail.room}:${Math.ceil(detail.health)}:${detail.maxHealth}`;
+    if (vitalsSignature !== this.lastHudVitalsSignature) {
+      this.lastHudVitalsSignature = vitalsSignature;
+      this.wakeHud();
+    }
     this.root.querySelector("[data-hud='location']").textContent = `Floor ${detail.floor}/${detail.totalFloors} · Chamber ${detail.room}`;
     this.root.querySelector("[data-hud='health-text']").textContent = `${Math.ceil(detail.health)} / ${detail.maxHealth}`;
     this.root.querySelector("[data-hud='health-bar']").style.transform = `scaleX(${Math.max(0, detail.health / detail.maxHealth)})`;
-    for (const path of ["Reaper", "Shade", "Grave"]) {
-      this.root.querySelector(`[data-path-rank='${path}']`).textContent = String(detail.paths?.[path] ?? 0);
+  }
+
+  updateProgressionState(snapshot = {}) {
+    const source = snapshot?.build ?? snapshot?.progressionState ?? snapshot ?? {};
+    this.progressionState = {
+      oaths: Array.isArray(source.oaths) ? source.oaths : this.progressionState?.oaths ?? [],
+      oathSlots: source.oathSlots && typeof source.oathSlots === "object"
+        ? source.oathSlots
+        : this.progressionState?.oathSlots ?? {},
+    };
+    this.renderBuildLedger(this.progressionState);
+  }
+
+  oathForTechniqueSlot(slot, build) {
+    const oathSlots = build.oathSlots ?? {};
+    const ownedOaths = Array.isArray(build.oaths) ? build.oaths : [];
+    let oath = slot.aliases.map((alias) => oathSlots[alias]).find(Boolean) ?? null;
+    if (typeof oath === "string") oath = ownedOaths.find((candidate) => candidate.id === oath) ?? { id: oath };
+    return oath ?? ownedOaths.find((candidate) => slot.aliases.includes(candidate.techniqueSlot)) ?? null;
+  }
+
+  appendBuildDetail(container, label, copy, tone = "") {
+    if (!copy) return;
+    const row = document.createElement("div");
+    row.className = "build-detail-row";
+    if (tone) row.dataset.tone = tone;
+    const term = document.createElement("dt");
+    const description = document.createElement("dd");
+    term.textContent = label;
+    description.textContent = copy;
+    row.append(term, description);
+    container.append(row);
+  }
+
+  createBuildItem(owned, { slotLabel = "" } = {}) {
+    const definition = progressionDefinition(owned.id) ?? owned;
+    const path = PROGRESSION_PATHS.includes(owned.path ?? definition.path) ? owned.path ?? definition.path : null;
+    const rank = Math.max(1, Number(owned.rank) || 1);
+    const maxRank = Number.isFinite(Number(owned.maxRank ?? definition.maxRank))
+      ? Number(owned.maxRank ?? definition.maxRank)
+      : null;
+    const item = document.createElement("article");
+    item.className = `build-item${path ? ` path-${path.toLowerCase()}` : ""}`;
+
+    const heading = document.createElement("header");
+    const identity = document.createElement("div");
+    const meta = document.createElement("span");
+    meta.className = "build-item-meta";
+    meta.textContent = [slotLabel, path].filter(Boolean).join(" · ");
+    const title = document.createElement("h4");
+    title.textContent = owned.name ?? definition.name ?? titleCaseId(owned.id);
+    identity.append(meta, title);
+    const rankLabel = document.createElement("strong");
+    rankLabel.className = "build-item-rank";
+    rankLabel.textContent = `Rank ${rankNumeral(rank)}${maxRank ? ` / ${rankNumeral(maxRank)}` : ""}`;
+    heading.append(identity, rankLabel);
+    item.append(heading);
+
+    const details = document.createElement("dl");
+    details.className = "build-item-details";
+    this.appendBuildDetail(details, "Gain", progressionCopy(definition.benefit), "gain");
+    this.appendBuildDetail(details, "Tradeoff", progressionCopy(definition.cost), "cost");
+    item.append(details);
+    return item;
+  }
+
+  renderBuildLedger(build = this.progressionState) {
+    const ledger = this.root.querySelector("[data-build-ledger]");
+    if (!ledger) return;
+    ledger.replaceChildren();
+    const oaths = Array.isArray(build.oaths) ? build.oaths : [];
+    const oathCollection = document.createElement("section");
+    oathCollection.className = "build-collection";
+    const heading = document.createElement("header");
+    const headingName = document.createElement("h3");
+    const headingCount = document.createElement("span");
+    headingName.textContent = "Technique Oaths";
+    headingCount.textContent = `${oaths.length} / ${TECHNIQUE_SLOTS.length} sworn`;
+    heading.append(headingName, headingCount);
+    const oathList = document.createElement("div");
+    oathList.className = "build-item-list";
+    oathCollection.append(heading, oathList);
+    for (const slot of TECHNIQUE_SLOTS) {
+      const oath = this.oathForTechniqueSlot(slot, build);
+      if (oath) {
+        oathList.append(this.createBuildItem(oath, { slotLabel: slot.label }));
+        continue;
+      }
+      const empty = document.createElement("article");
+      empty.className = "build-item build-item-unclaimed";
+      const label = document.createElement("span");
+      label.className = "build-item-meta";
+      label.textContent = slot.label;
+      const title = document.createElement("h4");
+      title.textContent = "No oath sworn";
+      const description = document.createElement("p");
+      description.textContent = "This technique has no path oath yet.";
+      empty.append(label, title, description);
+      oathList.append(empty);
     }
+    ledger.append(oathCollection);
+
+    const bindings = this.input.actionBindings?.("build") ?? this.settings.get("controls.bindings.build") ?? ["KeyB"];
+    const preferred = this.activeInputDevice === "gamepad"
+      ? bindings.find((binding) => binding.startsWith("Gamepad:"))
+      : bindings.find((binding) => !binding.startsWith("Gamepad:") && !binding.startsWith("Touch:"));
+    this.root.querySelector("[data-build-shortcut]").textContent = bindingLabel(preferred ?? "KeyB");
+  }
+
+  updateCombatConditions(snapshot = {}) {
+    const source = snapshot?.conditions ?? snapshot?.combatConditions ?? snapshot ?? {};
+    const aegis = source.aegis ?? {};
+    const guaranteedCritical = source.guaranteedCritical ?? source.guaranteedCrit ?? {};
+    const items = [];
+    const aegisValue = Math.max(0, Number(aegis.value) || 0);
+    const aegisSeconds = Math.max(0, Number(aegis.seconds) || 0);
+    if (aegis.ready === true || aegisValue > 0 || aegisSeconds > 0) {
+      const aegisParts = [];
+      if (aegisValue > 0) aegisParts.push(String(Math.round(aegisValue)));
+      if (aegisSeconds > 0) aegisParts.push(`${Number(aegisSeconds.toFixed(1))}s`);
+      items.push({ path: "grave", label: "Aegis", value: aegisParts.join(" · ") || "Ready" });
+    }
+    if (guaranteedCritical === true || guaranteedCritical.ready === true) {
+      items.push({ path: "shade", label: "Critical", value: "Ready" });
+    }
+
+    const signature = JSON.stringify(items);
+    if (signature === this.lastCombatConditionSignature) return;
+    this.lastCombatConditionSignature = signature;
+    const strip = this.root.querySelector("[data-hud='combat-conditions']");
+    if (!strip) return;
+    strip.replaceChildren();
+    strip.classList.toggle("hidden", items.length === 0);
+    strip.setAttribute(
+      "aria-label",
+      items.length === 0
+        ? "No active build conditions"
+        : items.map((item) => `${item.label} ${item.value}`).join("; "),
+    );
+    for (const item of items) {
+      const condition = document.createElement("span");
+      condition.className = `path-${item.path}`;
+      const label = document.createElement("small");
+      label.textContent = item.label;
+      const value = document.createElement("strong");
+      value.textContent = item.value;
+      condition.append(label, value);
+      strip.append(condition);
+    }
+    this.wakeHud();
   }
 
   updateSpeedrunTimer(snapshot) {
@@ -1098,7 +1833,8 @@ export class GameUi {
 
   updateCombatResources(game) {
     if (!game.player) return;
-    const cooldownDuration = PLAYER_CONFIG.dash.cooldown * game.player.dashCooldownMultiplier;
+    const cooldownDuration = game.combat.dashCooldownDuration
+      ?? PLAYER_CONFIG.dash.cooldown * game.player.dashCooldownMultiplier;
     const ratio = cooldownDuration > 0
       ? Math.max(0, Math.min(1, 1 - game.combat.dashCooldown / cooldownDuration))
       : 1;
@@ -1108,28 +1844,36 @@ export class GameUi {
     const label = game.combat.isDashing ? "Dashing"
       : chargeDashSpent ? "Charge dash spent"
         : percent >= 100 ? "Ready" : `${percent}%`;
+    let hudChanged = false;
     if (percent !== this.lastDashPercent) {
       this.root.querySelector("[data-hud='dash-bar']").style.transform = `scaleX(${ratio})`;
       this.root.querySelector("[data-hud='dash-meter']").setAttribute("aria-valuenow", String(percent));
       this.lastDashPercent = percent;
+      hudChanged = true;
     }
     if (label !== this.lastDashLabel) {
       this.root.querySelector("[data-hud='dash-text']").textContent = label;
       this.lastDashLabel = label;
+      hudChanged = true;
     }
 
     const harvest = game.combat.harvest?.snapshot?.() ?? { units: 0 };
     const claim = game.combat.claim?.snapshot?.() ?? { phase: "idle" };
-    const model = combatResourceViewModel(harvest, claim, game.combat);
+    const model = combatResourceViewModel(harvest, claim, {
+      ...game.combat,
+      primaryChargeDuration: game.combat.lineBuildupDuration(game.player),
+    });
     const signature = `${model.units}:${model.phase}:${Math.round((game.combat.primaryCharge ?? 0) * 100)}`;
-    if (signature === this.lastCombatResourceSignature) return;
+    if (signature === this.lastCombatResourceSignature) {
+      if (hudChanged) this.wakeHud();
+      return;
+    }
     this.lastCombatResourceSignature = signature;
+    this.wakeHud();
     this.harvestMeter.setAttribute("aria-valuenow", String(model.units));
     this.harvestMeter.setAttribute("aria-valuetext", model.ariaValueText);
     this.harvestUnits.textContent = model.unitsText;
     this.harvestFilled.textContent = model.filledText;
-    this.claimStatus.textContent = model.phase === "lineCharge" ? model.claimStatus : `Claim · ${model.claimStatus}`;
-    this.claimStatus.dataset.state = model.phase === "idle" ? model.claimStatus.toLowerCase() : model.phase;
     this.harvestMeter.dataset.action = model.phase;
     for (const [index, segment] of model.segments.entries()) {
       const element = this.harvestSegments[index];
@@ -1142,14 +1886,14 @@ export class GameUi {
   updateControlsHint(device) {
     if (!this.controlsHint) return;
     if (device === "gamepad") {
-      this.controlsHint.textContent = "Left stick move · Right stick aim · Tap X combo / hold X Grave Line (1 dash) · Y Reap · RB Claim · A Dash · Menu pause";
+      this.controlsHint.textContent = "Left stick move · Right stick aim · Tap X combo / hold X Grave Line (1 dash) · Y Reap · RB Claim · A Dash · Back build · Menu pause";
       return;
     }
     if (device === "touch") {
       this.controlsHint.textContent = "Left stick move · Right stick aim · Tap Strike combo / hold Grave Line (1 dash) · Reap · Dash · Claim";
       return;
     }
-    this.controlsHint.textContent = "WASD move · Mouse aim · Tap LMB combo / hold Grave Line (1 dash) · Q Reap · R Claim · Shift / RMB Dash · Esc pause";
+    this.controlsHint.textContent = "WASD move · Mouse aim · Tap LMB combo / hold Grave Line (1 dash) · Q Reap · R Claim · Shift / RMB Dash · B build · Esc pause";
   }
 
   updateBookendInputHint(device) {
@@ -1175,6 +1919,7 @@ export class GameUi {
     if (delta === 0) return;
     const state = delta > 0 ? "gain" : "spend";
     const amount = Math.abs(delta);
+    this.wakeHud();
     clearTimeout(this.harvestFeedbackTimer);
     this.harvestFeedbackState = state;
     this.harvestMeter.dataset.feedback = state;
@@ -1319,22 +2064,59 @@ export class GameUi {
     });
   }
 
-  showUpgradeChoices(grid, choices, choose) {
+  setUpgradeOfferHeading(offer = {}, choices = []) {
+    const screen = this.root.querySelector("[data-screen='blessing']");
+    if (!screen) return;
+    const kicker = screen.querySelector("[data-upgrade-kicker]");
+    const title = screen.querySelector("[data-upgrade-title]");
+    const context = screen.querySelector("[data-upgrade-context]");
+    const firstChoice = choices[0] ?? {};
+    const techniqueId = offer.techniqueSlot ?? firstChoice.techniqueSlot;
+    const technique = offer.techniqueLabel
+      ?? techniqueSlotDefinition(techniqueId)?.label
+      ?? (techniqueId ? titleCaseId(techniqueId) : "Technique");
+    const mastery = offer.selectionMode === "mastery";
+    kicker.textContent = mastery ? "Technique Mastery" : "Technique Oath";
+    title.textContent = mastery ? "Master an Oath" : `${technique} Oath`;
+    context.textContent = mastery
+      ? "Choose one owned Oath to raise to Rank II."
+      : "Choose how this technique changes for the rest of the descent.";
+  }
+
+  showUpgradeChoices(grid, choices, choose, { mastery = false } = {}) {
+    const screen = this.root.querySelector("[data-screen='blessing']");
+    const confirm = screen.querySelector("[data-upgrade-confirm]");
+    const actions = confirm.closest(".upgrade-actions");
     grid.replaceChildren();
+    grid.classList.toggle("is-mastery", mastery);
+    actions?.classList.toggle("hidden", mastery);
+    confirm.classList.toggle("hidden", mastery);
+    confirm.className = "button primary upgrade-confirm";
+    confirm.textContent = "Select an Oath";
+    confirm.disabled = true;
+    confirm.onclick = null;
     const buttons = [];
-    for (const choice of choices) {
+    const selectChoice = (choice, index) => {
+      for (const [buttonIndex, button] of buttons.entries()) {
+        const selected = buttonIndex === index;
+        button.classList.toggle("is-selected", selected);
+        button.setAttribute("aria-pressed", String(selected));
+      }
+      confirm.className = `button primary upgrade-confirm path-${choice.path.toLowerCase()}`;
+      confirm.textContent = `Take ${choice.name}`;
+      confirm.disabled = false;
+      confirm.onclick = () => choose(choice.id);
+    };
+
+    for (const [index, choice] of choices.entries()) {
       const button = document.createElement("button");
-      button.className = `upgrade-card path-${choice.path.toLowerCase()}`;
+      const choicePath = PROGRESSION_PATHS.includes(choice.path) ? choice.path : "Reaper";
+      button.className = `upgrade-card path-${choicePath.toLowerCase()}${mastery ? " mastery-choice" : ""}`;
       button.type = "button";
-      const art = document.createElement("img");
-      art.className = "upgrade-card-art";
-      art.src = publicAssetUrl(`assets/ui/upgrade-option-${choice.path.toLowerCase()}-sprite.png`);
-      art.alt = "";
-      art.setAttribute("aria-hidden", "true");
-      art.draggable = false;
+      button.setAttribute("aria-pressed", "false");
       const stud = document.createElement("img");
       stud.className = "upgrade-card-stud";
-      stud.src = publicAssetUrl(`assets/ui/upgrade-option-${choice.path.toLowerCase()}-stud.png`);
+      stud.src = publicAssetUrl(`assets/ui/upgrade-option-${choicePath.toLowerCase()}-stud.png`);
       stud.alt = "";
       stud.setAttribute("aria-hidden", "true");
       stud.draggable = false;
@@ -1344,70 +2126,74 @@ export class GameUi {
       header.className = "upgrade-card-header";
       const path = document.createElement("span");
       path.className = "upgrade-path";
-      path.textContent = choice.path;
+      path.textContent = choicePath;
+      header.append(path);
+      const slotDefinition = techniqueSlotDefinition(choice.techniqueSlot);
+      if (choice.techniqueSlot) {
+        const technique = document.createElement("span");
+        technique.className = "upgrade-technique";
+        technique.textContent = slotDefinition?.label ?? titleCaseId(choice.techniqueSlot);
+        header.append(technique);
+      }
       const rank = document.createElement("span");
       rank.className = "upgrade-rank";
-      rank.textContent = choice.maxRank === null ? "Restoration" : `Rank ${choice.nextRank}/${choice.maxRank}`;
-      header.append(path);
+      rank.textContent = mastery ? "Master to Rank II" : `Rank ${choice.nextRank}`;
       const name = document.createElement("h3");
       name.textContent = choice.name;
+      const benefit = progressionCopy(choice.benefit) || progressionCopy(choice.description);
       content.append(header, name, rank);
-      const details = document.createElement("dl");
-      details.className = "upgrade-details";
-      const appendDetail = (labelText, valueText, kind = "text") => {
-        const item = document.createElement("div");
-        item.dataset.detail = kind;
-        const label = document.createElement("dt");
-        const value = document.createElement("dd");
-        label.textContent = labelText;
-        value.textContent = valueText;
-        item.append(label, value);
-        details.append(item);
-      };
-      if (choice.preview?.rows?.length > 0) {
-        for (const row of choice.preview.rows) {
-          appendDetail(row.label, `${row.beforeText} → ${row.afterText}`, "value");
+      if (!mastery) {
+        for (const [label, copy, kind] of [
+          ["Gain", benefit, "gain"],
+          ["Tradeoff", progressionCopy(choice.cost) || "No added tradeoff", "cost"],
+        ]) {
+          const row = document.createElement("span");
+          row.className = "upgrade-card-summary";
+          row.dataset.detail = kind;
+          const rowLabel = document.createElement("strong");
+          rowLabel.textContent = label;
+          row.append(rowLabel, document.createTextNode(` ${copy}`));
+          content.append(row);
         }
       }
-      const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`;
-      const profile = [];
-      if (choice.prerequisites?.length) profile.push(countLabel(choice.prerequisites.length, "requirement"));
-      if (choice.excludes?.length) profile.push(countLabel(choice.excludes.length, "conflict"));
-      if (choice.synergies?.length) profile.push(countLabel(choice.synergies.length, "synergy", "synergies"));
-      if (choice.transformation?.status === "live") profile.push("Action upgrade");
-      if (profile.length > 0) appendDetail("Build", profile.join(" · "), "summary");
-      if (details.childElementCount > 0) content.append(details);
-      button.append(art, stud, content);
-      button.addEventListener("click", () => choose(choice.id));
+      button.append(stud, content);
+      button.addEventListener("click", () => {
+        if (mastery) choose(choice.id);
+        else selectChoice(choice, index);
+      });
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? buttons.length - 1
+            : (index + (["ArrowDown", "ArrowRight"].includes(event.key) ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[nextIndex]?.focus();
+      });
       buttons.push(button);
       grid.append(button);
     }
-    queueMicrotask(() => buttons[Math.min(1, buttons.length - 1)]?.focus());
+    queueMicrotask(() => {
+      if (this.activeInputDevice === "gamepad") buttons[0]?.focus();
+      else screen.focus({ preventScroll: true });
+    });
   }
 
-  setRerollState(screenId, available) {
-    const screen = this.root.querySelector(`[data-screen='${screenId}']`);
-    const button = screen.querySelector("[data-action='reroll-upgrades']");
-    button.disabled = !available;
-    button.textContent = available ? "Reroll choices · once this floor" : "Reroll unavailable this floor";
-  }
-
-  showRoomRewards(rewards = [], rerollAvailable = false) {
-    this.showUpgradeChoices(
-      this.root.querySelector("[data-room-rewards]"),
-      rewards,
-      (id) => this.game.chooseRoomReward(id),
-    );
-    this.setRerollState("reward", rerollAvailable);
-  }
-
-  showBlessings(blessings = [], rerollAvailable = false) {
+  showBlessings(blessings = [], offer = {}) {
+    const hasContext = offer.techniqueSlot || offer.techniqueLabel || offer.selectionMode;
+    if (hasContext) this.lastBlessingOfferContext = offer;
+    const context = hasContext ? offer : this.lastBlessingOfferContext ?? offer;
+    if (offer.build || offer.progressionState) {
+      this.updateProgressionState(offer.build ?? offer.progressionState);
+    }
+    this.setUpgradeOfferHeading(context, blessings);
     this.showUpgradeChoices(
       this.root.querySelector("[data-blessings]"),
       blessings,
       (id) => this.game.chooseBlessing(id),
+      { mastery: context.selectionMode === "mastery" },
     );
-    this.setRerollState("blessing", rerollAvailable);
   }
 
   updateEndingDecision(detail) {
@@ -1522,8 +2308,6 @@ export class GameUi {
     root.replaceChildren();
     if (!summary) return;
     const kills = Object.values(summary.enemiesKilled?.byType ?? {}).reduce((total, count) => total + count, 0);
-    const preferredPath = Object.entries(summary.pathTotals ?? {})
-      .sort(([leftId, left], [rightId, right]) => right - left || leftId.localeCompare(rightId))[0]?.[0] ?? "Unformed";
     const outcome = summary.terminal?.kind === "ending"
       ? summary.terminal.id === "kill" ? "Mercy ending" : "Release ending"
       : titleCaseId(summary.terminal?.cause ?? "Defeated");
@@ -1535,9 +2319,11 @@ export class GameUi {
         : outcome],
       ["Difficulty", "Ruthless"],
       [summary.speedrunFinished ? "Witch time" : "Elapsed", formatSpeedrunTime(summary.speedrunTimeSeconds)],
-      ["Record", summary.isPersonalBest
-        ? "New personal best"
-        : summary.terminal?.kind === "ending" ? "Completed attempt" : "Attempt ended"],
+      ["Leaderboard", summary.isPersonalBest
+        ? "New personal best · Rank #1"
+        : Number.isInteger(summary.leaderboardRank)
+          ? `Personal rank · #${summary.leaderboardRank}`
+          : summary.terminal?.kind === "ending" ? "Outside personal top 10" : "Not ranked"],
       ["Seed", summary.seed],
     ] : [
       ["Outcome", outcome],
@@ -1550,7 +2336,6 @@ export class GameUi {
       ["Enemies reaped", String(kills)],
       ["Damage dealt", String(Math.round(summary.damageDealt))],
       ["Highest hit", String(Math.round(summary.highestHit))],
-      ["Preferred path", preferredPath],
     );
     const heading = document.createElement("h3");
     heading.textContent = speedrun ? "Speedrun summary" : "Descent summary";

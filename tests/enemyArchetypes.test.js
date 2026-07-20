@@ -66,6 +66,26 @@ test("six non-boss archetypes expose unique model and behavior contracts", () =>
   assert.ok(NON_BOSS_ARCHETYPE_IDS.every((type) => Object.keys(getEnemyArchetype(type).attacks).length >= 2));
 });
 
+test("the six retained families expose immutable encounter roles and bounded specialist identity", () => {
+  const expected = {
+    thrall: { roles: ["frontline"], specialist: false },
+    reaver: { roles: ["mobile"], specialist: false },
+    boneguard: { roles: ["frontline", "tank"], specialist: true },
+    hexer: { roles: ["ranged"], specialist: true },
+    wraith: { roles: ["mobile"], specialist: true },
+    bombardier: { roles: ["area", "ranged"], specialist: true },
+  };
+  for (const [type, contract] of Object.entries(expected)) {
+    const definition = getEnemyArchetype(type);
+    assert.deepEqual(definition.roles, contract.roles);
+    assert.equal(definition.specialist, contract.specialist);
+    assert.equal(Object.isFrozen(definition.roles), true);
+  }
+  assert.deepEqual(new Set(NON_BOSS_ARCHETYPE_IDS), new Set(Object.keys(expected)));
+  assert.deepEqual(ENEMY_ARCHETYPES.queen.roles, ["boss"]);
+  assert.equal(ENEMY_ARCHETYPES.queen.specialist, false);
+});
+
 test("the reinforced roster has faster movement, larger health pools, and immutable combo plans", () => {
   const minimums = {
     thrall: { health: 78, speed: 5.45 },

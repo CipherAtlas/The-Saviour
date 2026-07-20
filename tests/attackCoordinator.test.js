@@ -41,14 +41,18 @@ test("family and total budgets create behavioral differences between difficultie
   assert.ok(relaxed.request({ enemyId: "e4", family: "ranged" }));
 
   const ruthless = new AttackCoordinator();
-  ruthless.beginStep(["e1", "e2", "e3", "e4", "e5", "e6", "e7"], DIFFICULTY.ruthless);
+  ruthless.beginStep(["e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10", "e11"], DIFFICULTY.ruthless);
   assert.ok(ruthless.request({ enemyId: "e1", family: "area" }));
   assert.ok(ruthless.request({ enemyId: "e2", family: "area" }));
-  assert.ok(ruthless.request({ enemyId: "e3", family: "melee" }));
+  assert.ok(ruthless.request({ enemyId: "e3", family: "area" }));
   assert.ok(ruthless.request({ enemyId: "e4", family: "melee" }));
-  assert.ok(ruthless.request({ enemyId: "e5", family: "ranged" }));
-  assert.ok(ruthless.request({ enemyId: "e6", family: "ranged" }));
-  assert.equal(ruthless.request({ enemyId: "e7", family: "ranged" }), null);
+  assert.ok(ruthless.request({ enemyId: "e5", family: "melee" }));
+  assert.ok(ruthless.request({ enemyId: "e6", family: "melee" }));
+  assert.ok(ruthless.request({ enemyId: "e7", family: "ranged" }));
+  assert.ok(ruthless.request({ enemyId: "e8", family: "ranged" }));
+  assert.ok(ruthless.request({ enemyId: "e9", family: "ranged" }));
+  assert.ok(ruthless.request({ enemyId: "e10", family: "ranged" }));
+  assert.equal(ruthless.request({ enemyId: "e11", family: "melee" }), null);
   assert.equal(ruthless.lastDenial.reason, "totalBudget");
 });
 

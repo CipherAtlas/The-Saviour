@@ -1,4 +1,57 @@
 import { PERFORMANCE_BUDGET } from "../game/gameConfig.js";
+import { createNavigationCells, isCircleWalkable, walkableArea } from "../game/arenaGeometry.js";
+
+export const BENCHMARK_ARENA_TARGET = Object.freeze({ floor: 9, room: 3 });
+
+function pointInsideObstacle(point, obstacle, padding) {
+  return Math.abs(point.x - obstacle.x) <= obstacle.width / 2 + padding
+    && Math.abs(point.z - obstacle.z) <= obstacle.depth / 2 + padding;
+}
+
+export function placeBenchmarkEnemies(arena, enemies) {
+  const clearance = Math.max(0.92, ...enemies.map((enemy) => enemy.radius ?? 0));
+  const candidates = createNavigationCells(arena, { cellSize: 2, clearance })
+    .filter((point) => !(arena.obstacles ?? []).some((obstacle) => pointInsideObstacle(point, obstacle, clearance)));
+  if (candidates.length < enemies.length) throw new RangeError("Benchmark arena cannot contain the configured enemy burst.");
+  for (let index = 0; index < enemies.length; index += 1) {
+    const point = candidates[Math.floor(index * candidates.length / enemies.length)];
+    enemies[index].position.x = point.x;
+    enemies[index].position.z = point.z;
+    enemies[index].previousPosition.x = point.x;
+    enemies[index].previousPosition.z = point.z;
+  }
+  return enemies.every((enemy) => isCircleWalkable(arena, enemy.position, enemy.radius));
+}
+
+export function benchmarkArenaDiagnostics(arena, enemies) {
+  return Object.freeze({
+    layoutFamily: arena.layoutFamily,
+    width: arena.width,
+    depth: arena.depth,
+    walkableArea: Number(walkableArea(arena).toFixed(2)),
+    majorRegions: arena.walkableShape.majorRegionIds.length,
+    connectorMinimum: arena.walkableShape.connectors.length > 0
+      ? Math.min(...arena.walkableShape.connectors.map((connector) => connector.width))
+      : null,
+    burstEnemies: enemies.length,
+    enemiesContained: enemies.every((enemy) => isCircleWalkable(arena, enemy.position, enemy.radius)),
+  });
+}
+
+function prepareLargestSilhouetteStress(game, enemyCount) {
+  game.enterBenchmarkMode(enemyCount);
+  if (game.floor !== BENCHMARK_ARENA_TARGET.floor || game.room !== BENCHMARK_ARENA_TARGET.room) {
+    game.floor = BENCHMARK_ARENA_TARGET.floor;
+    game.room = BENCHMARK_ARENA_TARGET.room;
+    game.loadRoom();
+    game.director.stressSpawn(enemyCount, BENCHMARK_ARENA_TARGET.floor);
+  }
+  if (!placeBenchmarkEnemies(game.arena, game.director.enemies)) {
+    throw new Error("Benchmark enemy burst escaped the authoritative walkable silhouette.");
+  }
+  game.player.invulnerable = 9999;
+  return benchmarkArenaDiagnostics(game.arena, game.director.enemies);
+}
 
 function percentile(values, ratio) {
   if (values.length === 0) return null;
@@ -32,10 +85,11 @@ export function createBenchmarkHarness(game, renderer, ui) {
     maxDamageNumberDomNodes: 0,
     maxDamageNumberProjected: 0,
     longTasks: 0,
+    arena: null,
   };
   globalThis.__ROGUE_BENCHMARK__ = state;
   renderer.setGpuTimingEnabled(true);
-  game.enterBenchmarkMode(PERFORMANCE_BUDGET.stressEnemies);
+  state.arena = prepareLargestSilhouetteStress(game, PERFORMANCE_BUDGET.stressEnemies);
   ui.hideForBenchmark();
   const resultElement = document.createElement("pre");
   resultElement.id = "benchmark-results";
@@ -139,6 +193,7 @@ export function createBenchmarkHarness(game, renderer, ui) {
         longTasks: state.longTasks,
         domInteractiveMs: navigation ? Number(navigation.domInteractive.toFixed(1)) : null,
         resourceTransferBytes: resourceBytes,
+        arena: state.arena,
         budgets: PERFORMANCE_BUDGET,
       };
       state.status = "complete";

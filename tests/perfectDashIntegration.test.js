@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createWalkableShape } from "../src/game/arenaGeometry.js";
 import { Game } from "../src/game/Game.js";
 import { CLAIM_CONFIG, HARVEST_CONFIG, RUN_CONFIG } from "../src/game/gameConfig.js";
 
@@ -33,8 +34,15 @@ function createGame(seed) {
   game.on((event) => events.push(event));
   game.startRun(seed);
   while (game.phase === "bookend") game.continueBookend();
-  for (const enemy of game.director.enemies) enemy.active = false;
-  game.director.pendingWaves.length = 0;
+  game.director.clearEncounter("testSetup");
+  game.arena.width = 30;
+  game.arena.depth = 22;
+  game.arena.walkableShape = createWalkableShape({
+    regions: [{ id: "combat-test", role: "combat", x: 0, z: 0, width: 30, depth: 22 }],
+  });
+  game.arena.obstacles = [];
+  game.player.position = { x: 0, z: 0 };
+  game.player.previousPosition = { x: 0, z: 0 };
   game.phase = "playing";
   events.length = 0;
   return { game, input, events };

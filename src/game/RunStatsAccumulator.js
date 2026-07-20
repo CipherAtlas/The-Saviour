@@ -101,7 +101,7 @@ function progressionTotals(selections) {
       || typeof selection.id !== "string"
       || selection.id.length === 0
       || !PATH_IDS.includes(selection.path)
-      || !["chamber", "blessing"].includes(selection.tier)
+      || selection.tier !== "blessing"
       || !Number.isInteger(selection.rankAfter)
       || selection.rankAfter < 1
       || selection.rankAfter > 30
@@ -175,8 +175,7 @@ export function validateRunStatisticsDraft(candidate) {
     && progression !== null
     && validCountMap(candidate.finalRanks)
     && sameCountMap(candidate.finalRanks, progression?.finalRanks ?? {})
-    && integerNonnegative(candidate.rerollsUsed)
-    && candidate.rerollsUsed <= 10
+    && candidate.rerollsUsed === 0
     && isRecord(candidate.pathTotals)
     && PATH_IDS.every((path) => integerNonnegative(candidate.pathTotals[path]))
     && PATH_IDS.every((path) => candidate.pathTotals[path] === progression?.pathTotals[path])
@@ -316,13 +315,8 @@ export class RunStatsAccumulator {
           this.values.deathDefiance.consumed + 1,
         );
         return true;
-      case "roomRewardChosen":
-        return this.recordSelection(detail, "chamber");
       case "blessingChosen":
         return this.recordSelection(detail, "blessing");
-      case "upgradeRerolled":
-        this.values.rerollsUsed = Math.min(10, this.values.rerollsUsed + 1);
-        return true;
       case "bossCombatStarted":
         this.startBossAttempt();
         return true;

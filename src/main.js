@@ -1,16 +1,19 @@
 import "./styles.css";
 import { AudioSystem } from "./audio/AudioSystem.js";
 import { Game } from "./game/Game.js";
+import { isCircleWalkable, isPointWalkable, walkableArea } from "./game/arenaGeometry.js";
+import { ENEMY_EMERGENCE } from "./game/encounterContracts.js";
 import { RunSessionController } from "./game/RunSessionController.js";
 import { CAMERA_CONFIG, RUN_CONFIG } from "./game/gameConfig.js";
 import { InputController } from "./game/InputController.js";
-import { AutoplayAgent } from "./playtest/AutoplayAgent.js";
+import { AutoplayAgent, createAutoplayState } from "./playtest/AutoplayAgent.js";
 import { PlaytestReporter } from "./playtest/PlaytestReporter.js";
 import { GameRenderer } from "./rendering/GameRenderer.js";
 import { SettingsStore } from "./settings/SettingsStore.js";
 import { SpeedrunRecordsStore } from "./settings/SpeedrunRecordsStore.js";
 import { StatisticsStore } from "./settings/StatisticsStore.js";
 import { SuspendedRunStore } from "./settings/SuspendedRunStore.js";
+import { TutorialProgressStore } from "./settings/TutorialProgressStore.js";
 import { GameUi } from "./ui/GameUi.js";
 import { SettingsMenu } from "./ui/SettingsMenu.js";
 
@@ -32,80 +35,14 @@ function screenToWorldDirection(screenDirection) {
   };
 }
 
-function autoplayState(game, telegraphs) {
-  return {
-    phase: game.phase,
-    floor: game.floor,
-    room: game.room,
-    portalActive: game.portalActive,
-    portalTraversal: game.portalTraversal ? {
-      active: game.portalTraversal.active,
-      progress: game.portalTraversal.progress,
-    } : null,
-    player: game.player ? {
-      position: { ...game.player.position },
-      radius: game.player.radius,
-      health: game.player.health,
-      maxHealth: game.player.maxHealth,
-      cooldowns: {
-        dashReady: game.combat.dashCooldown <= 0,
-        heavyReady: game.combat.heavyCooldown <= 0,
-      },
-      harvest: game.combat.harvest.snapshot(),
-      claim: game.combat.claim.snapshot(),
-    } : null,
-    arena: game.arena ? {
-      width: game.arena.width,
-      depth: game.arena.depth,
-      portal: { ...game.arena.portal },
-      obstacles: game.arena.obstacles.map((obstacle) => ({ ...obstacle })),
-    } : null,
-    enemies: game.director.enemies.map((enemy) => ({
-      id: enemy.id,
-      type: enemy.type,
-      active: enemy.active,
-      position: { ...enemy.position },
-      radius: enemy.radius,
-      health: enemy.health,
-      maxHealth: enemy.maxHealth,
-      attackPending: enemy.attackPending,
-      attackWindup: enemy.attackWindup,
-      attackRange: enemy.attackRange,
-    })),
-    projectiles: game.director.projectiles.filter((projectile) => projectile.active).map((projectile) => ({
-      active: true,
-      kind: projectile.kind,
-      mode: projectile.mode,
-      position: { ...projectile.position },
-      velocity: { ...projectile.velocity },
-      radius: projectile.radius,
-      areaRadius: projectile.areaRadius,
-      target: { ...projectile.target },
-      timeRemaining: projectile.life,
-    })),
-    telegraphs: telegraphs.map((telegraph) => ({ ...telegraph, position: { ...telegraph.position } })),
-    bookend: game.phase === "bookend" ? { active: Boolean(game.bookend.snapshot()) } : null,
-    ending: game.ending.snapshot(),
-    blessing: game.phase === "blessing" ? {
-      choices: game.pendingBlessings.map(({ id, name, description, path, rank, nextRank, maxRank }) => ({
-        id, name, description, path, rank, nextRank, maxRank,
-      })),
-    } : null,
-    reward: game.phase === "reward" ? {
-      choices: game.pendingRoomRewards.map(({ id, name, description, path, rank, nextRank, maxRank }) => ({
-        id, name, description, path, rank, nextRank, maxRank,
-      })),
-    } : null,
-  };
-}
-
-function createAutoplayRuntime({ game, input, renderer, settings, runNumber, seed, endingPolicy }) {
+function createAutoplayRuntime({ game, input, renderer, settings, runNumber, seed, endingPolicy, preferredPath, runType }) {
   const telegraphs = [];
   const reporter = new PlaytestReporter({ targetFps: 60 });
-  reporter.beginRun({ runNumber, seed, difficulty: settings.get("gameplay.difficulty") });
+  reporter.beginRun({ runNumber, seed, difficulty: runType === "speedrun" ? "ruthless" : settings.get("gameplay.difficulty") });
   const reportElement = document.createElement("pre");
   reportElement.id = "playtest-report";
   reportElement.dataset.status = "running";
+  reportElement.dataset.runType = runType;
   reportElement.hidden = true;
   document.body.append(reportElement);
   let active = true;
@@ -118,7 +55,7 @@ function createAutoplayRuntime({ game, input, renderer, settings, runNumber, see
   try { observer?.observe({ type: "longtask", buffered: false }); } catch { /* Optional browser metric. */ }
 
   function readState() {
-    return autoplayState(game, telegraphs);
+    return createAutoplayState(game, telegraphs);
   }
 
   function applyIntent(intent) {
@@ -134,7 +71,6 @@ function createAutoplayRuntime({ game, input, renderer, settings, runNumber, see
     if (!action) return;
     if (action.type === "continueBookend") game.continueBookend();
     if (action.type === "killPrincess") game.tryKillPrincess(performance.now());
-    if (action.type === "chooseRoomReward") game.chooseRoomReward(action.id);
     if (action.type === "chooseBlessing") game.chooseBlessing(action.id);
   }
 
@@ -142,7 +78,7 @@ function createAutoplayRuntime({ game, input, renderer, settings, runNumber, see
     readState,
     actionSink: applyIntent,
     onDiagnostic: (diagnostic) => reporter.recordDiagnostic(diagnostic),
-    config: { endingPolicy },
+    config: { endingPolicy, preferredPath },
   });
 
   function finish() {
@@ -182,10 +118,14 @@ function createAutoplayRuntime({ game, input, renderer, settings, runNumber, see
         dt,
         performance: {
           fps: frameMs > 0 ? 1000 / frameMs : 0,
+          frameMs,
           cpuMs,
           gpuMs: metrics.gpuMs,
           drawCalls: metrics.drawCalls,
           triangles: metrics.triangles,
+          telegraphs: metrics.telegraphs ?? telegraphs.length,
+          actors: metrics.activeActors,
+          damageNumbers: metrics.damageNumbers?.active,
           longTasks,
         },
       });
@@ -194,6 +134,15 @@ function createAutoplayRuntime({ game, input, renderer, settings, runNumber, see
 
     handleEvent(event) {
       reporter.recordEvent(event);
+      if (event.type === "enemyAttackLeaseGranted") {
+        reporter.recordEvent({ type: "attackLeaseGranted", detail: event.detail });
+      }
+      if (event.type === "enemyAttackDeferred") {
+        reporter.recordEvent({ type: "attackLeaseDenied", detail: event.detail });
+      }
+      if (event.type === "enemyAttackLeaseReleased") {
+        reporter.recordEvent({ type: "attackLeaseReleased", detail: event.detail });
+      }
       if (event.type === "enemyTelegraph") {
         telegraphs.push({
           ...event.detail,
@@ -212,8 +161,21 @@ function createAutoplayRuntime({ game, input, renderer, settings, runNumber, see
 function updateRuntimeProbe(probe, game, renderer) {
   const boss = game.director.activeBoss();
   const bossPattern = game.director.queenPatternState;
+  const encounterPlan = game.director.encounterPlan;
+  const encounter = game.director.encounterScheduler?.snapshot?.() ?? null;
+  const activeEnemies = game.director.enemies.filter((enemy) => enemy.active);
+  const interactiveEnemies = activeEnemies.filter((enemy) => game.director.isEnemyInteractive(enemy));
+  const emergingEnemies = activeEnemies.filter((enemy) => enemy.lifecycle?.state === "emerging");
+  const emergenceDistances = game.player
+    ? emergingEnemies.map((enemy) => Math.hypot(
+      enemy.position.x - game.player.position.x,
+      enemy.position.z - game.player.position.z,
+    ))
+    : [];
   probe.dataset.phase = game.phase;
   probe.dataset.showcase = game.showcaseMode ?? "";
+  probe.dataset.runType = game.runType ?? "normal";
+  probe.dataset.difficulty = game.difficultyId ?? "";
   probe.dataset.floor = String(game.floor);
   probe.dataset.room = String(game.room);
   probe.dataset.roomReady = String(game.roomReady);
@@ -241,8 +203,40 @@ function updateRuntimeProbe(probe, game, renderer) {
     ? boss.attackKind ?? bossPattern?.lastAction ?? boss.lastAttackKind ?? ""
     : "";
   probe.dataset.bossPattern = boss && bossPattern ? bossPattern.queue.join(",") : "";
+  probe.dataset.layoutFamily = game.arena?.layoutFamily ?? "";
+  probe.dataset.walkableShapeKind = game.arena?.walkableShape?.kind ?? "";
+  probe.dataset.walkableArea = game.arena ? walkableArea(game.arena).toFixed(2) : "";
+  probe.dataset.connectorMinimum = game.arena?.walkableShape?.connectors?.length
+    ? Math.min(...game.arena.walkableShape.connectors.map((connector) => connector.width)).toFixed(2)
+    : "";
+  probe.dataset.majorRegions = String(game.arena?.walkableShape?.majorRegionIds?.length ?? 0);
+  probe.dataset.recipeId = encounterPlan?.id ?? "";
+  probe.dataset.recipeType = encounterPlan?.type ?? "";
+  probe.dataset.totalPopulation = String(encounterPlan?.totalPopulation ?? encounter?.totalPopulation ?? activeEnemies.length);
   probe.dataset.enemyCount = String(game.director.enemies.length);
-  probe.dataset.activeEnemies = String(game.director.enemies.filter((enemy) => enemy.active).length);
+  probe.dataset.activeEnemies = String(activeEnemies.length);
+  probe.dataset.livingEnemies = String(interactiveEnemies.length);
+  probe.dataset.spawningEnemies = String(emergingEnemies.length);
+  probe.dataset.pendingEnemies = String(encounter?.pending ?? 0);
+  probe.dataset.maximumSimultaneous = String(encounter?.maximumSimultaneous ?? interactiveEnemies.length + emergingEnemies.length);
+  probe.dataset.emergenceDuration = ENEMY_EMERGENCE.durationSeconds.toFixed(2);
+  probe.dataset.minimumEmergenceDistance = emergenceDistances.length > 0
+    ? Math.min(...emergenceDistances).toFixed(3)
+    : "";
+  probe.dataset.playerShapeContained = game.arena && game.player
+    ? String(isCircleWalkable(game.arena, game.player.position, game.player.radius))
+    : "";
+  probe.dataset.portalShapeContained = game.arena?.portal
+    ? String(isPointWalkable(game.arena, game.arena.portal))
+    : "";
+  probe.dataset.rewardShapeContained = game.arena?.rewardPosition
+    ? String(isPointWalkable(game.arena, game.arena.rewardPosition))
+    : "";
+  probe.dataset.enemiesShapeContained = game.arena
+    ? String(game.benchmarkMode
+      ? globalThis.__ROGUE_BENCHMARK__?.arena?.enemiesContained === true
+      : activeEnemies.every((enemy) => isCircleWalkable(game.arena, enemy.position, enemy.radius)))
+    : "";
   probe.dataset.endingStage = game.ending.snapshot().stage;
   probe.dataset.endingResult = game.ending.snapshot().result?.id ?? "";
   probe.dataset.endingPresentation = game.endingPresentationStage;
@@ -256,27 +250,38 @@ function updateRuntimeProbe(probe, game, renderer) {
   probe.dataset.damageNumberCapacity = String(metrics.damageNumbers?.capacity ?? 0);
   probe.dataset.damageNumberPeak = String(metrics.damageNumbers?.peak ?? 0);
   probe.dataset.damageNumberDropped = String(metrics.damageNumbers?.dropped ?? 0);
+  if (!probe.hidden) probe.textContent = JSON.stringify({ ...probe.dataset }, null, 2);
 }
 
 const searchParams = new URLSearchParams(window.location.search);
 const requestedShowcase = searchParams.get("showcase");
-const showcaseMode = ["boss", "reward", "ending"].includes(requestedShowcase) ? requestedShowcase : null;
-const autoplayEnabled = searchParams.get("autoplay") === "1" && showcaseMode !== "reward";
+const showcaseMode = ["boss", "oath", "ending"].includes(requestedShowcase) ? requestedShowcase : null;
+const autoplayEnabled = searchParams.get("autoplay") === "1" && showcaseMode !== "oath";
 const endingPolicy = searchParams.get("ending") === "timeout" ? "timeout" : "kill";
+const autoplayRunType = searchParams.get("runType") === "speedrun" ? "speedrun" : "normal";
+const preferredBuildPath = {
+  reaper: "Reaper",
+  shade: "Shade",
+  grave: "Grave",
+}[searchParams.get("build")?.toLowerCase()] ?? null;
 const autoplayRunNumber = Math.max(1, Number(searchParams.get("run")) || 1);
 const simulationScale = autoplayEnabled ? Math.min(4, Math.max(1, Number(searchParams.get("timeScale")) || 4)) : 1;
+const pauseAfterRoomReady = searchParams.get("pauseAfterRoomReady") === "1";
 const canvas = document.querySelector("#game-canvas");
 const combatOverlay = document.querySelector("#combat-overlay");
 const uiRoot = document.querySelector("#ui");
 const runtimeProbe = document.createElement("pre");
 runtimeProbe.id = "runtime-probe";
-runtimeProbe.hidden = true;
+runtimeProbe.hidden = searchParams.get("probe") !== "1";
 document.body.append(runtimeProbe);
 const settings = new SettingsStore(searchParams.get("benchmark") === "1" ? null : undefined);
 const statistics = new StatisticsStore(searchParams.get("benchmark") === "1" ? null : undefined);
 const speedrunRecords = new SpeedrunRecordsStore(searchParams.get("benchmark") === "1" ? null : undefined);
 const suspendedRuns = new SuspendedRunStore(searchParams.get("benchmark") === "1" ? null : undefined);
-if (autoplayEnabled) settings.set("gameplay.difficulty", searchParams.get("difficulty") ?? "standard");
+const tutorialProgress = new TutorialProgressStore(searchParams.get("benchmark") === "1" ? null : undefined);
+if (autoplayEnabled) {
+  settings.set("gameplay.difficulty", autoplayRunType === "speedrun" ? "ruthless" : searchParams.get("difficulty") ?? "standard");
+}
 const input = new InputController(canvas, settings);
 const audio = new AudioSystem(settings);
 const renderer = new GameRenderer(canvas, settings, combatOverlay);
@@ -290,9 +295,12 @@ const runSession = new RunSessionController({
   platform: Object.freeze({ canQuit: false, quit: null }),
 });
 const settingsMenu = new SettingsMenu(uiRoot, settings, input);
-const ui = new GameUi(uiRoot, game, settings, input, audio, settingsMenu, runSession);
+const ui = new GameUi(uiRoot, game, settings, input, audio, settingsMenu, runSession, tutorialProgress, {
+  runTutorialEnabled: !autoplayEnabled && !showcaseMode && searchParams.get("benchmark") !== "1",
+});
 renderer.setLoadProgressListener((progress) => ui.setLoadingProgress(progress));
 let autoplayRuntime = null;
+let probeFrozen = false;
 
 input.onActiveDeviceChanged((event) => game.emit(event.type, event.detail));
 
@@ -308,6 +316,11 @@ game.on((event) => {
       .then(async (readyToken) => {
         await ui.completeRoomLoad();
         game.acknowledgeRoomReady(readyToken);
+        if (pauseAfterRoomReady && !probeFrozen) {
+          probeFrozen = true;
+          input.clearAutomation();
+          runtimeProbe.dataset.probeFrozen = "true";
+        }
       })
       .catch((error) => {
         console.error("Unable to build dungeon biome", error);
@@ -359,11 +372,14 @@ if (autoplayEnabled) {
     runNumber: autoplayRunNumber,
     seed: autoplaySeed,
     endingPolicy,
+    preferredPath: preferredBuildPath,
+    runType: autoplayRunType,
   });
 }
 if (showcaseMode === "boss") game.enterBossShowcase(showcaseSeed);
-else if (showcaseMode === "reward") game.enterRewardShowcase(showcaseSeed);
+else if (showcaseMode === "oath") game.enterOathShowcase(showcaseSeed);
 else if (showcaseMode === "ending") game.enterEndingShowcase(showcaseSeed);
+else if (autoplayRuntime && autoplayRunType === "speedrun") runSession.startSpeedrun(autoplaySeed);
 else if (autoplayRuntime) game.startRun(autoplaySeed);
 
 let benchmark = null;
@@ -422,7 +438,8 @@ renderer.setAnimationLoop((time) => {
       });
     }
   }
-  accumulator += Math.min(rawDelta * simulationScale, RUN_CONFIG.fixedStep * RUN_CONFIG.maxFixedSteps);
+  if (probeFrozen) accumulator = 0;
+  else accumulator += Math.min(rawDelta * simulationScale, RUN_CONFIG.fixedStep * RUN_CONFIG.maxFixedSteps);
   let fixedSteps = 0;
   while (accumulator >= RUN_CONFIG.fixedStep && fixedSteps < RUN_CONFIG.maxFixedSteps) {
     autoplayRuntime?.tick(RUN_CONFIG.fixedStep);
@@ -449,5 +466,6 @@ globalThis.__ROGUE_GAME__ = {
   renderer,
   settings,
   runSession,
+  tutorialProgress,
   getMetrics: () => renderer.metrics(),
 };

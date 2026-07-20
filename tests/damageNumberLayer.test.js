@@ -220,7 +220,7 @@ test("bookend and choice phases finish numbers while loading and terminal phases
   const { fake, layer } = createLayer();
   try {
     layer.projectedVector = { set: () => ({ project: () => ({ x: 0, y: 0, z: 0 }) }) };
-    for (const phase of ["bookend", "reward", "blessing"]) {
+    for (const phase of ["bookend", "blessing"]) {
       layer.spawn(model({ targetId: `enemy:${phase}` }));
       layer.update(DAMAGE_NUMBER_STYLES.normal.lifetime, {}, { phase });
       assert.equal(layer.metrics().active, 0, `${phase} should finish the active number`);

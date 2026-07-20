@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import test from "node:test";
 import { AdaptiveMusic } from "../src/audio/AdaptiveMusic.js";
 import { AudioSystem, gainFromSlider } from "../src/audio/AudioSystem.js";
+import { COMBAT_SFX_CUES, CombatSfx } from "../src/audio/CombatSfx.js";
 import {
   LicensedSoundtrack,
   SOUNDTRACK_CACHE_LIMIT,
@@ -53,6 +54,7 @@ class FakeSource extends FakeAudioNode {
     super();
     this.frequency = new FakeAudioParam();
     this.detune = new FakeAudioParam();
+    this.playbackRate = new FakeAudioParam(1);
     this.starts = [];
     this.stops = [];
     this.onended = null;
@@ -69,6 +71,7 @@ class FakeAudioContext {
     this.state = "running";
     this.destination = new FakeAudioNode();
     this.closed = false;
+    this.createdSources = [];
   }
 
   createGain() {
@@ -99,6 +102,7 @@ class FakeAudioContext {
   createBufferSource() {
     const source = new FakeSource();
     source.buffer = null;
+    this.createdSources.push(source);
     return source;
   }
 
@@ -259,6 +263,221 @@ test("procedural voices enforce their global source cap and can be cleaned up", 
   assert.equal(instruments.activeSourceCount, 0);
 });
 
+test("combat SFX assets are packaged as bounded variation pools", async () => {
+  const files = [...new Set(Object.values(COMBAT_SFX_CUES).flat())];
+  assert.equal(files.length, 48);
+  assert.ok(Object.values(COMBAT_SFX_CUES).every((entries) => entries.length >= 1 && entries.length <= 3));
+  for (const file of files) {
+    assert.match(file, /^\/assets\/audio\/sfx\/combat\/.+\.mp3$/);
+    const packagedPath = new URL(`../public${file}`, import.meta.url);
+    assert.ok((await stat(packagedPath)).size > 0, `${file} must be a non-empty packaged file`);
+  }
+});
+
+test("combat SFX preloads, avoids immediate repeats, caps voices, and fades charge cues", async () => {
+  const context = new FakeAudioContext();
+  let decoded = 0;
+  context.decodeAudioData = async () => ({ id: ++decoded, duration: 0.5 });
+  const combat = new CombatSfx(context, context.destination, {
+    fetcher: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }),
+    random: () => 0,
+    maxSources: 2,
+  });
+
+  assert.equal(await combat.preload(), true);
+  assert.equal(combat.metrics().decodedFiles, 48);
+  assert.equal(combat.play("playerBasic1", { volume: 0.7 }), true);
+  assert.equal(combat.play("playerBasic1", { volume: 0.7 }), true);
+  assert.notEqual(context.createdSources[0].buffer, context.createdSources[1].buffer);
+  assert.equal(combat.play("playerQCharge", { volume: 0.5 }), true);
+  assert.equal(combat.metrics().activeSources, 2);
+  assert.equal(context.createdSources[0].stops.length, 1);
+  assert.equal(combat.stopCue("playerQCharge"), true);
+  assert.equal(context.createdSources.at(-1).stops.length, 1);
+  combat.dispose();
+  assert.equal(combat.metrics().activeSources, 0);
+});
+
+test("combat SFX selects decoded variations and retries an unavailable cue on demand", async () => {
+  const context = new FakeAudioContext();
+  context.decodeAudioData = async () => ({ duration: 0.3 });
+  const basicFiles = COMBAT_SFX_CUES.playerBasic1;
+  const combat = new CombatSfx(context, context.destination, {
+    fetcher: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }),
+    random: () => 0,
+  });
+  combat.buffers.set(basicFiles[0], { id: "loaded-a" });
+  combat.buffers.set(basicFiles[2], { id: "loaded-c" });
+
+  assert.equal(combat.play("playerBasic1"), true);
+  assert.equal(combat.play("playerBasic1"), true);
+  assert.notEqual(context.createdSources[0].buffer, context.createdSources[1].buffer);
+  assert.equal(combat.play("playerQCharge"), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(combat.play("playerQCharge"), true);
+});
+
+test("sampled combat mapping covers player actions and every enemy family", () => {
+  const context = new FakeAudioContext();
+  const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
+  audio.initialize();
+  const played = [];
+  const stopped = [];
+  audio.combatSfx = {
+    play: (cueKey, options) => { played.push({ cueKey, options }); return true; },
+    stopCue: (cueKey) => { stopped.push(cueKey); return true; },
+    metrics: () => ({}),
+    dispose() {},
+  };
+
+  const events = [
+    ["attack", { comboIndex: 0 }],
+    ["attack", { comboIndex: 1 }],
+    ["attack", { comboIndex: 2 }],
+    ["attack", { dash: true }],
+    ["attack", { heavy: true, chargeQuality: "perfect" }],
+    ["attack", { line: true }],
+    ["dash", {}],
+    ["claimStarted", {}],
+    ["claimRecallStarted", {}],
+    ["claimCaught", {}],
+    ["claimFollowupConsumed", { activeStart: 0.11 }],
+    ["enemyAttack", { type: "thrall", attack: "lunge" }],
+    ["enemyAttack", { type: "thrall", attack: "graveCleave" }],
+    ["enemyAttack", { type: "reaver", attack: "dashLane" }],
+    ["enemyAttack", { type: "reaver", attack: "crosscut" }],
+    ["enemyAttack", { type: "boneguard", attack: "shieldSlam" }],
+    ["enemyAttack", { type: "boneguard", attack: "guardCharge" }],
+    ["enemyAttack", { type: "hexer", attack: "aimedBolt" }],
+    ["enemyAttack", { type: "hexer", attack: "fan" }],
+    ["enemyAttack", { type: "hexer", attack: "rune" }],
+    ["enemyAttack", { type: "wraith", attack: "blinkFlank" }],
+    ["enemyAttack", { type: "wraith", attack: "veilSweep" }],
+    ["enemyAttack", { type: "bombardier", attack: "lobbedBomb" }],
+    ["enemyAttack", { type: "bombardier", attack: "cinderBurst" }],
+    ["enemyAttack", { type: "queen", attack: "royalDash" }],
+    ["enemyAttack", { type: "queen", attack: "royalFan" }],
+    ["enemyAttack", { type: "queen", attack: "voidWell" }],
+    ["enemyAttack", { type: "queen", attack: "teleport" }],
+    ["enemyAttack", { type: "queen", attack: "summon" }],
+    ["projectileImpact", { sourceType: "bombardier", kind: "cinderBomb" }],
+    ["projectileImpact", { sourceType: "queen", kind: "queenWell" }],
+  ];
+  for (const [type, detail] of events) audio.handleEvent({ type, detail });
+
+  assert.deepEqual(played.map(({ cueKey }) => cueKey), [
+    "playerBasic1",
+    "playerBasic2",
+    "playerBasic3",
+    "playerDashAttack",
+    "playerQPerfect",
+    "playerLineRelease",
+    "playerDash",
+    "playerClaimOut",
+    "playerClaimReturn",
+    "playerClaimCatch",
+    "playerClaimCleave",
+    "enemyDash",
+    "enemyMelee",
+    "enemyDash",
+    "enemyMelee",
+    "enemyShield",
+    "enemyDash",
+    "enemyMagicBolt",
+    "enemyMagicBolt",
+    "enemyMagicArea",
+    "enemyBlink",
+    "enemyWraithSweep",
+    "enemyMagicBolt",
+    "enemyMagicArea",
+    "enemyDash",
+    "enemyQueen",
+    "enemyMagicArea",
+    "enemyBomb",
+    "enemyMagicArea",
+  ]);
+  assert.deepEqual(stopped, ["playerQCharge"]);
+  assert.ok(played.every(({ options }) => options.destination === audio.buses.sfx));
+  assert.equal(played.find(({ cueKey }) => cueKey === "playerClaimCleave").options.startAt, 0.11);
+});
+
+test("enemy samples retain a procedural fallback and player damage follows its source family", () => {
+  const context = new FakeAudioContext();
+  const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
+  audio.initialize();
+  const calls = recordEventCues(audio);
+  const sampled = [];
+  audio.combatSfx = {
+    play: (cueKey) => { sampled.push(cueKey); return false; },
+    stopCue: () => false,
+    metrics: () => ({}),
+    dispose() {},
+  };
+
+  audio.handleEvent({ type: "enemyAttack", detail: { type: "thrall", attack: "lunge" } });
+  assert.deepEqual(calls.map(({ kind }) => kind), ["noise", "tone"]);
+  assert.deepEqual(sampled, ["enemyDash"]);
+
+  calls.length = 0;
+  sampled.length = 0;
+  audio.handleEvent({ type: "projectileImpact", detail: { sourceType: "bombardier", kind: "cinderBomb" } });
+  assert.deepEqual(calls.map(({ kind }) => kind), ["noise", "tone"]);
+  assert.deepEqual(sampled, ["enemyBomb"]);
+
+  calls.length = 0;
+  sampled.length = 0;
+  audio.handleEvent({ type: "playerHit", detail: { family: "directProjectile", source: "hexBolt", severity: "light" } });
+  assert.deepEqual(sampled, ["enemyMagicBolt"]);
+  assert.deepEqual(calls.map(({ kind }) => kind), ["noise", "tone", "tone"]);
+
+  calls.length = 0;
+  sampled.length = 0;
+  audio.handleEvent({ type: "playerHit", detail: { family: "areaProjectile", source: "cinderBomb", severity: "heavy" } });
+  assert.deepEqual(sampled, []);
+  assert.deepEqual(calls.map(({ kind }) => kind), ["tone"]);
+});
+
+test("sampled Q, Grave Line, and Claim cues avoid redundant synthesized layers", () => {
+  const context = new FakeAudioContext();
+  const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
+  audio.initialize();
+  const calls = recordEventCues(audio);
+  const played = [];
+  const stopped = [];
+  audio.combatSfx = {
+    play: (cueKey, options) => { played.push({ cueKey, options }); return true; },
+    stopCue: (cueKey) => { stopped.push(cueKey); return true; },
+    metrics: () => ({}),
+    dispose() {},
+  };
+
+  for (const event of [
+    { type: "chargeStart" },
+    { type: "chargeReleased", detail: { quality: "perfect" } },
+    { type: "lineChargeStart" },
+    { type: "lineChargeReleased" },
+    { type: "claimStarted", detail: { releaseAt: 0.08 } },
+    { type: "claimRecallStarted" },
+    { type: "claimCaught" },
+    { type: "claimFollowupConsumed", detail: { activeStart: 0.08 } },
+  ]) {
+    audio.handleEvent(event);
+  }
+
+  assert.deepEqual(calls, []);
+  assert.deepEqual(played.map(({ cueKey }) => cueKey), [
+    "playerQCharge",
+    "playerLineCharge",
+    "playerClaimOut",
+    "playerClaimReturn",
+    "playerClaimCatch",
+    "playerClaimCleave",
+  ]);
+  assert.equal(played.find(({ cueKey }) => cueKey === "playerClaimOut").options.startAt, 0.08);
+  assert.equal(played.find(({ cueKey }) => cueKey === "playerClaimCleave").options.startAt, 0.08);
+  assert.deepEqual(stopped, ["playerQCharge", "playerLineCharge"]);
+});
+
 test("Harvest and Claim events produce distinct bounded SFX and UI cue patterns", () => {
   const context = new FakeAudioContext();
   const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
@@ -281,13 +500,15 @@ test("Harvest and Claim events produce distinct bounded SFX and UI cue patterns"
   const recallCue = capture("claimRecallStarted");
   const catchCue = capture("claimCaught");
   const readyCue = capture("claimFollowupReady");
+  const bufferedReadyCue = capture("claimFollowupReady", { buffered: true });
   assert.deepEqual(throwCue.map((call) => call.kind), ["noise", "tone"]);
   assert.deepEqual(recallCue.map((call) => call.kind), ["noise", "tone"]);
   assert.ok(recallCue[1].glide > recallCue[1].frequency);
   assert.notDeepEqual(catchCue, throwCue);
   assert.ok([...throwCue, ...recallCue, ...catchCue].every((call) => call.bus === "sfx"));
-  assert.equal(readyCue.length, 2);
+  assert.equal(readyCue.length, 1);
   assert.ok(readyCue.every((call) => call.kind === "tone" && call.bus === "ui"));
+  assert.deepEqual(bufferedReadyCue, []);
   assert.ok([gain, spend, throwCue, recallCue, catchCue, readyCue].every((cue) => cue.length <= 2));
 });
 
@@ -314,7 +535,7 @@ test("Claim hit accents differ by resolved pass without duplicating the generic 
   assert.deepEqual(capture("claimCompleted", { result: "expired" }), []);
 });
 
-test("stagger and charged-release cues remain bounded with a distinct perfect layer", () => {
+test("charged-release lifecycle stops the charge bed without duplicating the attack sample", () => {
   const context = new FakeAudioContext();
   const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
   audio.initialize();
@@ -330,10 +551,9 @@ test("stagger and charged-release cues remain bounded with a distinct perfect la
   const full = capture("chargeReleased", { quality: "full" });
   const perfect = capture("chargeReleased", { quality: "perfect" });
   assert.deepEqual(stagger.map((call) => call.kind), ["noise", "tone"]);
-  assert.equal(partial.length, 1);
-  assert.equal(full.length, 1);
-  assert.equal(perfect.length, 2);
-  assert.ok(perfect[1].startAt > perfect[0].startAt);
+  assert.deepEqual(partial, []);
+  assert.deepEqual(full, []);
+  assert.deepEqual(perfect, []);
   assert.ok([...stagger, ...partial, ...full, ...perfect].every((call) => call.bus === "sfx"));
   assert.deepEqual(capture("chargeReleased", {}), []);
 });
@@ -369,6 +589,12 @@ test("Witch teleport and summon cues keep distinct layered action-ID lifecycles"
     continuesCombo: true,
   });
   const summon = lifecycle("summon", "witch-summon-1");
+  assert.deepEqual(capture("enemyAttack", {
+    type: "queen",
+    attack: "teleport",
+    actionId: "witch-teleport-1",
+    phase: 3,
+  }), []);
 
   for (const stage of ["anticipation", "release", "recovery"]) {
     assert.equal(teleport[stage].length, 2);
@@ -402,10 +628,41 @@ test("cancelled Witch cues silence their action envelope and suppress stale rele
   assert.deepEqual(calls, []);
 });
 
+test("combat cancellation and ending transitions stop charge and Witch action cues", () => {
+  const context = new FakeAudioContext();
+  const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
+  audio.initialize();
+  const stopped = [];
+  audio.combatSfx = {
+    play: () => true,
+    stopCue: (cueKey) => { stopped.push(cueKey); return true; },
+    metrics: () => ({}),
+    dispose() {},
+  };
+
+  audio.handleEvent({
+    type: "queenSpecialAnticipated",
+    detail: { action: "summon", actionId: "queen-defeat-cue" },
+  });
+  audio.handleEvent({ type: "combatActionsCancelled", detail: { chargeCancelled: true } });
+  assert.deepEqual(stopped, ["playerQCharge", "playerLineCharge"]);
+  audio.handleEvent({ type: "enemyDefeated", detail: { type: "queen" } });
+  assert.equal(audio.queenActionCues.size, 0);
+
+  audio.handleEvent({
+    type: "queenSpecialAnticipated",
+    detail: { action: "teleport", actionId: "ending-cue" },
+  });
+  audio.handleEvent({ type: "endingSequenceStarted" });
+  assert.equal(audio.queenActionCues.size, 0);
+  assert.deepEqual(stopped.slice(-2), ["playerQCharge", "playerLineCharge"]);
+});
+
 test("boss phases, guard dismissal, and phase-three combo steps have readable SFX signatures", () => {
   const context = new FakeAudioContext();
   const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
   audio.initialize();
+  audio.combatSfx = { play: () => true, stopCue: () => true };
   const calls = recordEventCues(audio);
   const capture = (type, detail = {}) => {
     calls.length = 0;
@@ -461,6 +718,7 @@ test("regular enemy combo openers and finishers have distinct restrained accents
   const context = new FakeAudioContext();
   const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
   audio.initialize();
+  audio.combatSfx = { play: () => true, stopCue: () => true };
   const calls = recordEventCues(audio);
   const capture = (detail) => {
     calls.length = 0;

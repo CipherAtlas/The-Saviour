@@ -376,6 +376,10 @@ export class InputController {
     });
   }
 
+  get isCapturingBinding() {
+    return this.capture !== null;
+  }
+
   cancelCapture() {
     if (!this.capture) return;
     const resolve = this.capture;

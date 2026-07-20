@@ -1,3 +1,5 @@
+import { isCircleWalkable, isWalkableSegment, nearestWalkablePoint } from "./arenaGeometry.js";
+
 const DEFAULT_CELL_SIZE = 1.1;
 const DEFAULT_PADDING = 0.84;
 
@@ -31,6 +33,36 @@ function gridToWorld(cell, cellSize) {
   return { x: cell.x * cellSize, z: cell.z * cellSize };
 }
 
+function pushOpen(heap, entry) {
+  heap.push(entry);
+  let index = heap.length - 1;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (heap[parent].score <= entry.score) break;
+    heap[index] = heap[parent];
+    index = parent;
+  }
+  heap[index] = entry;
+}
+
+function popOpen(heap) {
+  if (heap.length === 1) return heap.pop();
+  const result = heap[0];
+  const tail = heap.pop();
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    if (left >= heap.length) break;
+    const right = left + 1;
+    const child = right < heap.length && heap[right].score < heap[left].score ? right : left;
+    if (heap[child].score >= tail.score) break;
+    heap[index] = heap[child];
+    index = child;
+  }
+  heap[index] = tail;
+  return result;
+}
+
 function pointInsideExpandedObstacle(point, obstacle, padding) {
   return (
     point.x >= obstacle.x - obstacle.width / 2 - padding
@@ -41,6 +73,10 @@ function pointInsideExpandedObstacle(point, obstacle, padding) {
 }
 
 function isWalkable(point, arena, padding) {
+  if (arena.walkableShape) {
+    if (!isCircleWalkable(arena, point, padding)) return false;
+    return !(arena.obstacles ?? []).some((obstacle) => pointInsideExpandedObstacle(point, obstacle, padding));
+  }
   const halfWidth = arena.width / 2 - padding - 0.65;
   const halfDepth = arena.depth / 2 - padding - 0.65;
   if (Math.abs(point.x) > halfWidth || Math.abs(point.z) > halfDepth) return false;
@@ -61,11 +97,17 @@ function lineCrossesObstacle(start, end, obstacle, padding) {
 }
 
 export function hasLineOfSight(start, end, arena, padding = DEFAULT_PADDING) {
+  if (arena?.walkableShape && !isWalkableSegment(arena, start, end, padding)) return false;
   return !(arena?.obstacles ?? []).some((obstacle) => lineCrossesObstacle(start, end, obstacle, padding));
 }
 
 function nearestWalkableCell(origin, arena, cellSize, padding) {
   if (isWalkable(gridToWorld(origin, cellSize), arena, padding)) return origin;
+  if (arena.walkableShape) {
+    const repaired = nearestWalkablePoint(arena, gridToWorld(origin, cellSize), padding);
+    const repairedCell = worldToGrid(repaired, cellSize);
+    if (isWalkable(gridToWorld(repairedCell, cellSize), arena, padding)) return repairedCell;
+  }
   for (let radius = 1; radius <= 4; radius += 1) {
     for (let x = -radius; x <= radius; x += 1) {
       for (let z = -radius; z <= radius; z += 1) {
@@ -104,23 +146,19 @@ export function findNavigationPath(start, target, arena, options = {}) {
 
   const startKey = gridKey(startCell.x, startCell.z);
   const goalKey = gridKey(goalCell.x, goalCell.z);
-  const open = new Map([[startKey, 0]]);
+  const open = [{ key: startKey, score: 0 }];
+  const openScores = new Map([[startKey, 0]]);
   const cameFrom = new Map();
   const cells = new Map([[startKey, startCell]]);
   const costs = new Map([[startKey, 0]]);
 
-  while (open.size > 0) {
-    let currentKey = null;
-    let currentScore = Infinity;
-    for (const [key, score] of open) {
-      if (score < currentScore) {
-        currentKey = key;
-        currentScore = score;
-      }
-    }
+  while (open.length > 0) {
+    const currentEntry = popOpen(open);
+    const currentKey = currentEntry.key;
+    if (currentEntry.score !== openScores.get(currentKey)) continue;
 
     if (currentKey === goalKey) return reconstructPath(cameFrom, cells, currentKey, cellSize, target);
-    open.delete(currentKey);
+    openScores.delete(currentKey);
     const current = cells.get(currentKey);
 
     for (const neighbor of NEIGHBORS) {
@@ -140,7 +178,9 @@ export function findNavigationPath(start, target, arena, options = {}) {
       costs.set(nextKey, nextCost);
       cameFrom.set(nextKey, currentKey);
       cells.set(nextKey, next);
-      open.set(nextKey, nextCost + heuristic);
+      const score = nextCost + heuristic;
+      openScores.set(nextKey, score);
+      pushOpen(open, { key: nextKey, score });
     }
   }
 

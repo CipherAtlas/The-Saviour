@@ -33,8 +33,8 @@ function completedRun({ runId, difficultyId = "standard", ending = "kill", durat
   stats.record({ type: "perfectDash" });
   stats.record({ type: "chargeReleased", detail: { quality: "full" } });
   stats.record({ type: "claimStarted" });
-  stats.record({ type: "roomRewardChosen", detail: {
-    id: "whetted-crescent", path: "Reaper", rank: 1,
+  stats.record({ type: "blessingChosen", detail: {
+    id: "falling-moon", path: "Reaper", rank: 1,
   } });
   stats.record({ type: "bossCombatStarted" });
   stats.sampleTime(duration, "playing", true);
@@ -70,7 +70,7 @@ test("lifetime statistics aggregate finalized runs once and preserve difficulty 
   assert.equal(value.highestHit, 44);
   assert.equal(value.actions.claims, 2);
   assert.deepEqual(value.boss, { attempts: 2, clears: 2 });
-  assert.equal(value.upgradeHistory["whetted-crescent"].selections, 2);
+  assert.equal(value.upgradeHistory["falling-moon"].selections, 2);
   assert.equal(value.pathHistory.Reaper.runsSelected, 2);
   assert.equal(Object.isFrozen(value), true);
   assert.deepEqual(value.recordedRunIds, ["run-1", "run-2"]);
@@ -85,7 +85,7 @@ test("records derive favorites and completion rate from primitive aggregates", (
   assert.equal(view.completions, 1);
   assert.equal(view.completionRate, 1);
   assert.equal(view.favoriteMajorAction, "chargedReaps");
-  assert.equal(view.mostSelectedUpgrade, "whetted-crescent");
+  assert.equal(view.mostSelectedUpgrade, "falling-moon");
   assert.equal(view.preferredPath, "Reaper");
 });
 
@@ -101,23 +101,23 @@ test("invalid storage falls back to an empty local record with a nonblocking sta
   assert.equal(validateLifetimeStatistics(withDiagnostics), null);
 });
 
-test("upgrade rank history aggregates final run ranks instead of summing intermediate previews", () => {
+test("Oath rank history aggregates final run ranks instead of summing intermediate previews", () => {
   const run = new RunStatsAccumulator({
     runId: "rank-history",
     seed: "RANK-HISTORY",
     difficultyId: "standard",
   });
-  run.record({ type: "roomRewardChosen", detail: {
-    id: "whetted-crescent", path: "Reaper", rank: 1,
+  run.record({ type: "blessingChosen", detail: {
+    id: "falling-moon", path: "Reaper", rank: 1,
   } });
-  run.record({ type: "roomRewardChosen", detail: {
-    id: "whetted-crescent", path: "Reaper", rank: 2,
+  run.record({ type: "blessingChosen", detail: {
+    id: "falling-moon", path: "Reaper", rank: 2,
   } });
   const store = new StatisticsStore(new MemoryStorage());
   store.recordCompletedRun(run.finalize({ completed: false, cause: "defeated" }));
 
-  assert.equal(store.getSnapshot().upgradeHistory["whetted-crescent"].selections, 2);
-  assert.equal(store.getSnapshot().upgradeHistory["whetted-crescent"].totalRanks, 2);
+  assert.equal(store.getSnapshot().upgradeHistory["falling-moon"].selections, 2);
+  assert.equal(store.getSnapshot().upgradeHistory["falling-moon"].totalRanks, 2);
 });
 
 test("reset removes only statistics and write failures preserve valid in-session results", () => {

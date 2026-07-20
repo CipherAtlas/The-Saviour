@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "capturedOn": "2026-07-20",
+  "focusedTests": {
+    "command": "node --test tests/arenaGenerator.test.js tests/encounterPatterns.test.js tests/difficultyProfiles.test.js tests/enemyDirector.test.js tests/autoplayAgent.test.js tests/attackCoordinator.test.js",
+    "passed": 40,
+    "failed": 0,
+    "durationMs": 1208.8
+  },
+  "encounters": [
+    { "difficulty": "standard", "seed": "REFINEMENT-BASELINE-standard-2-1", "floor": 2, "room": 1, "biome": "forgottenKeep", "layout": "splitHall", "width": 42, "depth": 27, "waves": 1, "count": 4, "threat": 5.5, "roster": ["hexer:stable", "hexer:stable", "thrall:stable", "thrall:stable"] },
+    { "difficulty": "standard", "seed": "REFINEMENT-BASELINE-standard-5-2", "floor": 5, "room": 2, "biome": "ossuary", "layout": "splitHall", "width": 41, "depth": 24, "waves": 2, "count": 7, "threat": 11.35, "roster": ["thrall:volatile", "thrall:volatile", "wraith:stable", "boneguard:stable", "thrall:stable", "hexer:stable", "bombardier:stable"] },
+    { "difficulty": "standard", "seed": "REFINEMENT-BASELINE-standard-9-3", "floor": 9, "room": 3, "biome": "voidCourt", "layout": "ring", "width": 42, "depth": 29, "waves": 3, "count": 12, "threat": 22.2, "roster": ["wraith:volatile", "boneguard:stable", "bombardier:stable", "bombardier:stable", "reaver:stable", "thrall:volatile", "wraith:volatile", "hexer:stable", "reaver:volatile", "reaver:volatile", "wraith:volatile", "reaver:volatile"] },
+    { "difficulty": "ruthless", "seed": "REFINEMENT-BASELINE-ruthless-2-1", "floor": 2, "room": 1, "biome": "ossuary", "layout": "splitHall", "width": 38, "depth": 24, "waves": 1, "count": 4, "threat": 5.4, "roster": ["hexer:stable", "reaver:stable", "thrall:stable", "thrall:stable"] },
+    { "difficulty": "ruthless", "seed": "REFINEMENT-BASELINE-ruthless-5-2", "floor": 5, "room": 2, "biome": "emberFoundry", "layout": "ring", "width": 40, "depth": 31, "waves": 2, "count": 7, "threat": 11.95, "roster": ["wraith:volatile", "bombardier:stable", "thrall:volatile", "thrall:stable", "boneguard:stable", "boneguard:stable", "thrall:stable"] },
+    { "difficulty": "ruthless", "seed": "REFINEMENT-BASELINE-ruthless-9-3", "floor": 9, "room": 3, "biome": "voidCourt", "layout": "ring", "width": 38, "depth": 32, "waves": 3, "count": 12, "threat": 21.25, "roster": ["boneguard:stable", "bombardier:stable", "boneguard:stable", "hexer:stable", "thrall:volatile", "thrall:volatile", "reaver:volatile", "reaver:volatile", "reaver:volatile", "bombardier:volatile", "boneguard:stable", "thrall:volatile"] }
+  ],
+  "standardAutoplay": {
+    "seed": "REFINEMENT-BASELINE-AUTOPLAY",
+    "completed": true,
+    "ending": "kill",
+    "deaths": 0,
+    "roomsVisited": 30,
+    "simulationDurationSeconds": 694.73,
+    "kills": 226,
+    "damageTaken": 297.52,
+    "roomBands": [
+      { "band": "early", "floors": [1, 3], "rooms": 9, "medianClearSeconds": 9.3, "minClearSeconds": 4.18, "maxClearSeconds": 31.44 },
+      { "band": "middle", "floors": [4, 6], "rooms": 9, "medianClearSeconds": 25.66, "minClearSeconds": 10.67, "maxClearSeconds": 46.44 },
+      { "band": "late", "floors": [7, 10], "rooms": 11, "medianClearSeconds": 24.57, "minClearSeconds": 10.3, "maxClearSeconds": 38.73 }
+    ]
+  },
+  "timeoutEndingShowcase": {
+    "seed": "REFINEMENT-BASELINE-TIMEOUT",
+    "completed": true,
+    "ending": "timeout",
+    "decisionDurationSeconds": 5,
+    "bookendSequences": ["intro", "ending.plea", "ending.timeout"]
+  },
+  "benchmark35": {
+    "seed": "REFINEMENT-BASELINE-BENCHMARK",
+    "passed": true,
+    "samples": 1289,
+    "frameP95Ms": 8.7,
+    "cpuP95Ms": 2.4,
+    "gpuP95Ms": 2.38,
+    "maxDrawCalls": 80,
+    "maxTriangles": 81050,
+    "maxActiveActors": 35,
+    "maxTelegraphs": 5,
+    "longTasks": 0
+  }
+}

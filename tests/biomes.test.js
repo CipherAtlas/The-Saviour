@@ -1,46 +1,62 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { generateArena } from "../src/generation/arenaGenerator.js";
-import { BIOMES } from "../src/generation/biomes.js";
+import {
+  BIOMES,
+  chooseEnvironmentTheme,
+  ENVIRONMENT_THEMES,
+  ENVIRONMENT_THEME_IDS,
+  getEnvironmentTheme,
+} from "../src/generation/biomes.js";
+import { SeededRandom } from "../src/generation/seededRandom.js";
 
-test("seeded arenas keep biome and prop generation deterministic", () => {
-  const first = generateArena({ seed: "BIOME-CHECK", floor: 7, room: 2 });
-  const second = generateArena({ seed: "BIOME-CHECK", floor: 7, room: 2 });
+test("seeded arenas keep cosmetic environment selection and prop generation deterministic", () => {
+  const first = generateArena({ seed: "THEME-CHECK", floor: 7, room: 2 });
+  const second = generateArena({ seed: "THEME-CHECK", floor: 7, room: 2 });
   assert.deepEqual(first, second);
-  assert.ok(BIOMES[first.biome]);
+  assert.ok(ENVIRONMENT_THEMES[first.environmentTheme]);
+  assert.equal(first.biome, first.environmentTheme);
   assert.ok(first.props.length >= 8);
 });
 
-test("all biome bands appear across a complete set of deterministic runs", () => {
+test("environment themes are selected from one global pool without floor progression", () => {
+  const first = chooseEnvironmentTheme(new SeededRandom("GLOBAL-THEME"));
+  const same = chooseEnvironmentTheme(new SeededRandom("GLOBAL-THEME"));
+  assert.equal(first, same);
+
   const encountered = new Set();
-  for (let floor = 1; floor <= 10; floor += 1) {
-    for (let room = 1; room <= 3; room += 1) {
-      encountered.add(generateArena({ seed: `BAND-${floor}`, floor, room, boss: floor === 10 && room === 3 }).biome);
-    }
+  for (let seedIndex = 0; seedIndex < 80; seedIndex += 1) {
+    encountered.add(chooseEnvironmentTheme(new SeededRandom(`THEME-${seedIndex}`)).id);
   }
-  assert.deepEqual(encountered, new Set(Object.keys(BIOMES)));
+  assert.deepEqual(encountered, new Set(ENVIRONMENT_THEME_IDS));
 });
 
-test("each biome exposes a distinct encounter and layout gameplay identity", () => {
-  const identities = new Set();
-  const encounterSignatures = new Set();
-  const layoutSignatures = new Set();
-  for (const biome of Object.values(BIOMES)) {
-    identities.add(biome.gameplay.identity);
-    encounterSignatures.add(JSON.stringify(biome.gameplay.encounterBias));
-    layoutSignatures.add(JSON.stringify(biome.gameplay.layoutWeights));
-    assert.ok(Object.values(biome.gameplay.encounterBias).every((weight) => weight > 0));
-    assert.ok(Object.values(biome.gameplay.layoutWeights).every((weight) => weight > 0));
+test("environment themes expose presentation assets but no mechanical gameplay contract", () => {
+  assert.equal(BIOMES, ENVIRONMENT_THEMES);
+  for (const theme of Object.values(ENVIRONMENT_THEMES)) {
+    assert.equal("gameplay" in theme, false);
+    assert.ok(theme.floorModel);
+    assert.ok(theme.wallModel);
+    assert.ok(theme.obstacleModels.length > 0);
+    assert.ok(theme.propModels.length > 0);
+    assert.ok(theme.palette.accent > 0);
+    assert.equal(getEnvironmentTheme(theme.id), theme);
   }
-  assert.equal(identities.size, Object.keys(BIOMES).length);
-  assert.equal(encounterSignatures.size, Object.keys(BIOMES).length);
-  assert.equal(layoutSignatures.size, Object.keys(BIOMES).length);
+});
+
+test("environment theme asset bundles remain visually distinct", () => {
+  const fingerprints = new Set(Object.values(ENVIRONMENT_THEMES).map((theme) => JSON.stringify({
+    floorModel: theme.floorModel,
+    wallModel: theme.wallModel,
+    decal: theme.decal,
+    palette: theme.palette,
+  })));
+  assert.equal(fingerprints.size, ENVIRONMENT_THEME_IDS.length);
 });
 
 test("environment models never alternate between blocking obstacles and collisionless props", () => {
-  const obstacleModels = new Set(Object.values(BIOMES).flatMap((biome) => biome.obstacleModels));
-  const propModels = new Set(Object.values(BIOMES).flatMap((biome) => biome.propModels));
+  const obstacleModels = new Set(Object.values(ENVIRONMENT_THEMES).flatMap((theme) => theme.obstacleModels));
+  const propModels = new Set(Object.values(ENVIRONMENT_THEMES).flatMap((theme) => theme.propModels));
   const conflictingModels = [...obstacleModels].filter((modelKey) => propModels.has(modelKey));
-
   assert.deepEqual(conflictingModels, []);
 });

@@ -1,3 +1,5 @@
+import { isCircleWalkable, nearestWalkablePoint } from "./arenaGeometry.js";
+
 const TAU = Math.PI * 2;
 
 function normalizeAngle(angle) {
@@ -52,8 +54,7 @@ function resolveObstacleAxis(position, radius, obstacle, axis) {
 
 export function moveCircleDetailed(position, velocity, dt, radius, arena) {
   const next = { x: position.x, z: position.z };
-  const halfWidth = arena.width / 2 - 1 - radius;
-  const halfDepth = arena.depth / 2 - 1 - radius;
+  const shapeRadius = radius + (arena.walkableShape ? 0.08 : 1);
   let blockedX = false;
   let blockedZ = false;
 
@@ -66,14 +67,32 @@ export function moveCircleDetailed(position, velocity, dt, radius, arena) {
 
   for (let step = 0; step < steps; step += 1) {
     const desiredX = next.x + stepX;
-    next.x = clamp(desiredX, -halfWidth, halfWidth);
+    const previousX = next.x;
+    next.x = desiredX;
     for (const obstacle of arena.obstacles) resolveObstacleAxis(next, radius, obstacle, "x");
+    if (!isCircleWalkable(arena, next, shapeRadius)) {
+      const repaired = nearestWalkablePoint(arena, next, shapeRadius);
+      next.x = Math.abs(repaired.z - next.z) <= 0.001 ? repaired.x : previousX;
+    }
     if (Math.abs(next.x - desiredX) > 0.0001) blockedX = true;
 
     const desiredZ = next.z + stepZ;
-    next.z = clamp(desiredZ, -halfDepth, halfDepth);
+    const previousZ = next.z;
+    next.z = desiredZ;
     for (const obstacle of arena.obstacles) resolveObstacleAxis(next, radius, obstacle, "z");
+    if (!isCircleWalkable(arena, next, shapeRadius)) {
+      const repaired = nearestWalkablePoint(arena, next, shapeRadius);
+      next.z = Math.abs(repaired.x - next.x) <= 0.001 ? repaired.z : previousZ;
+    }
     if (Math.abs(next.z - desiredZ) > 0.0001) blockedZ = true;
+  }
+
+  if (!isCircleWalkable(arena, next, shapeRadius)) {
+    const repaired = nearestWalkablePoint(arena, position, shapeRadius);
+    next.x = repaired.x;
+    next.z = repaired.z;
+    blockedX = true;
+    blockedZ = true;
   }
 
   return { position: next, blockedX, blockedZ };
@@ -83,13 +102,13 @@ export function moveCircle(position, velocity, dt, radius, arena) {
   return moveCircleDetailed(position, velocity, dt, radius, arena).position;
 }
 
-export function separateCircles(actors) {
+export function separateCircles(actors, arena = null, isInteractive = (actor) => actor.active) {
   for (let first = 0; first < actors.length; first += 1) {
     const a = actors[first];
-    if (!a.active) continue;
+    if (!isInteractive(a)) continue;
     for (let second = first + 1; second < actors.length; second += 1) {
       const b = actors[second];
-      if (!b.active) continue;
+      if (!isInteractive(b)) continue;
       const dx = b.position.x - a.position.x;
       const dz = b.position.z - a.position.z;
       const minimum = a.radius + b.radius;
@@ -99,10 +118,29 @@ export function separateCircles(actors) {
       const overlap = (minimum - distance) * 0.5;
       const nx = dx / distance;
       const nz = dz / distance;
-      a.position.x -= nx * overlap;
-      a.position.z -= nz * overlap;
-      b.position.x += nx * overlap;
-      b.position.z += nz * overlap;
+      const nextA = { x: a.position.x - nx * overlap, z: a.position.z - nz * overlap };
+      const nextB = { x: b.position.x + nx * overlap, z: b.position.z + nz * overlap };
+      const aValid = !arena || isCircleWalkable(arena, nextA, a.radius + 0.04);
+      const bValid = !arena || isCircleWalkable(arena, nextB, b.radius + 0.04);
+      if (aValid) {
+        a.position.x = nextA.x;
+        a.position.z = nextA.z;
+      }
+      if (bValid) {
+        b.position.x = nextB.x;
+        b.position.z = nextB.z;
+      }
+      if (aValid === bValid) continue;
+      const movable = aValid ? a : b;
+      const direction = aValid ? -1 : 1;
+      const fullPush = {
+        x: movable.position.x + nx * overlap * direction,
+        z: movable.position.z + nz * overlap * direction,
+      };
+      if (!arena || isCircleWalkable(arena, fullPush, movable.radius + 0.04)) {
+        movable.position.x = fullPush.x;
+        movable.position.z = fullPush.z;
+      }
     }
   }
 }

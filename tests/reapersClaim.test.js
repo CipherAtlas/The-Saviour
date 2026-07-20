@@ -71,6 +71,10 @@ test("a late recall press buffers through catch and commits the empowered cleave
   assert.equal(claim.bufferFollowup(11).accepted, true);
   claim.update(CLAIM_CONFIG.recall.followupBuffer, () => []);
   assert.equal(claim.snapshot().phase, "empoweredCleave");
+  const ready = events.find((event) => event.type === "claimFollowupReady");
+  const consumed = events.find((event) => event.type === "claimFollowupConsumed");
+  assert.equal(ready.detail.buffered, true);
+  assert.equal(consumed.detail.activeStart, CLAIM_CONFIG.empoweredCleave.activeStart);
   assert.equal(events.filter((event) => event.type === "claimFollowupConsumed").length, 1);
 });
 

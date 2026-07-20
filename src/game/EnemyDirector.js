@@ -15,8 +15,21 @@ import {
   QUEEN_MIN_WINDUP_SECONDS,
 } from "./bossPatterns.js";
 import { createEncounterPlan, ENEMY_ORIGINS } from "./encounterPatterns.js";
-import { DIFFICULTY, RUN_CONFIG } from "./gameConfig.js";
+import {
+  ENEMY_LIFECYCLE_STATES,
+  ENEMY_EMERGENCE,
+  advanceEmergence,
+  createEmergenceState,
+  isEnemyInteractive as lifecycleIsInteractive,
+} from "./encounterContracts.js";
+import {
+  isCircleWalkable,
+  isWalkableSegment,
+  nearestWalkablePoint,
+} from "./arenaGeometry.js";
+import { DIFFICULTY, RUN_CONFIG, resolveEnemyStatScalars } from "./gameConfig.js";
 import { findNavigationPath, hasLineOfSight } from "./navigation.js";
+import { EncounterScheduler } from "../playtest/EncounterScheduler.js";
 
 const PROJECTILE_POOL_SIZE = 144;
 const BOMBADIER_ATTACK_SPACING = 1.15;
@@ -25,7 +38,8 @@ const MAX_CLAIM_PULL = 3.2;
 const MAX_TRACKED_PLAYER_SPEED = 28;
 const ENEMY_PATH_CELL_SIZE = 1.1;
 const ENEMY_PATH_CLEARANCE = 0.16;
-const ENEMY_PATH_TARGET_THRESHOLD = 0.9;
+const ENEMY_PATH_TARGET_THRESHOLD = 2.75;
+const ENEMY_PATH_REFRESH_SECONDS = 0.65;
 const POISE_RECOVERY_DELAY = 1.05;
 const POISE_RECOVERY_PER_SECOND = 0.34;
 const QUEEN_PHASE_THREE_GUARD_CAP = 0;
@@ -68,12 +82,25 @@ const ATTACK_FAMILY_BY_KIND = Object.freeze({
 });
 
 function completeDifficultyProfile(profile) {
-  if (profile?.id && profile.attackBudgets) return profile;
+  if (profile?.id && profile.attackBudgets && profile.nonBossStats && profile.bossStats) return profile;
+  const enemyHealth = profile?.enemyHealth ?? STANDARD_DIFFICULTY.enemyHealth;
+  const enemyDamage = profile?.enemyDamage ?? STANDARD_DIFFICULTY.enemyDamage;
+  const enemySpeed = profile?.enemySpeed ?? STANDARD_DIFFICULTY.enemySpeed;
   return {
     ...STANDARD_DIFFICULTY,
     ...profile,
     id: profile?.id ?? STANDARD_DIFFICULTY.id,
     attackBudgets: profile?.attackBudgets ?? STANDARD_DIFFICULTY.attackBudgets,
+    nonBossStats: profile?.nonBossStats ?? {
+      health: enemyHealth,
+      damage: enemyDamage,
+      speed: enemySpeed,
+    },
+    bossStats: profile?.bossStats ?? {
+      health: enemyHealth,
+      damage: enemyDamage,
+      speed: enemySpeed,
+    },
   };
 }
 
@@ -172,14 +199,17 @@ export class EnemyDirector {
     this.bossModifiers = { health: 0, enrage: 0 };
     this.bombardierAttackCooldown = 0;
     this.encounterPlan = null;
+    this.encounterScheduler = null;
+    this.schedulerEnemyActors = new Map();
     this.pendingWaves = [];
     this.waveDelay = 0;
     this.encounterFloor = 1;
     this.queenPatternState = null;
     this.stableOriginDismissed = false;
+    this.currentPlayer = null;
   }
 
-  reset({ arena, floor, room, rng, difficulty, bossModifiers = {} }) {
+  reset({ arena, floor, room, rng, difficulty, bossModifiers = {}, previousRecipeType = null }) {
     this.attackCoordinator.reset("encounterReset");
     this.enemies.length = 0;
     this.deactivateProjectiles();
@@ -191,10 +221,13 @@ export class EnemyDirector {
     this.bombardierAttackCooldown = 0;
     this.encounterFloor = floor;
     this.encounterPlan = null;
+    this.encounterScheduler = null;
+    this.schedulerEnemyActors.clear();
     this.pendingWaves.length = 0;
     this.waveDelay = 0;
     this.queenPatternState = createQueenPatternState(rng.fork("queen-patterns"));
     this.stableOriginDismissed = false;
+    this.currentPlayer = null;
 
     if (arena.boss) {
       this.spawnEnemy("queen", { x: 0, z: 2.5 }, floor, { origin: ENEMY_ORIGINS.STABLE });
@@ -204,12 +237,46 @@ export class EnemyDirector {
     this.encounterPlan = createEncounterPlan({
       floor,
       room,
-      biome: arena.biome,
       spawnPoints: arena.enemySpawnPoints,
       rng: rng.fork("plan"),
+      difficulty: this.difficulty,
+      layout: arena,
+      layoutFamily: arena.layoutFamily,
+      previousRecipeType,
     });
     this.pendingWaves = [...this.encounterPlan.waves];
-    this.startNextWave();
+    const originCounts = this.encounterPlan.batches
+      .flatMap((batch) => batch.entries)
+      .reduce((counts, entry) => {
+        counts[entry.origin] += 1;
+        return counts;
+      }, { [ENEMY_ORIGINS.STABLE]: 0, [ENEMY_ORIGINS.VOLATILE]: 0 });
+    this.emit("encounterPlanned", {
+      floor,
+      room,
+      layoutFamily: this.encounterPlan.layoutFamily,
+      recipeId: this.encounterPlan.id,
+      recipeType: this.encounterPlan.type,
+      totalPopulation: this.encounterPlan.totalPopulation,
+      pendingPopulation: this.encounterPlan.totalPopulation,
+      threat: this.encounterPlan.threat,
+      roles: this.encounterPlan.roleCounts,
+      specialistCounts: this.encounterPlan.specialistCounts,
+      originCounts,
+      recipe: this.encounterPlan,
+    });
+
+    const queuedEvents = [];
+    this.encounterScheduler = new EncounterScheduler(this.encounterPlan, {
+      floor,
+      room,
+      layoutFamily: this.encounterPlan.layoutFamily,
+      onEvent: (type, detail, atSeconds) => {
+        if (!this.encounterScheduler) queuedEvents.push({ type, detail, atSeconds });
+        else this.handleSchedulerEvent(type, detail, atSeconds);
+      },
+    });
+    for (const event of queuedEvents) this.handleSchedulerEvent(event.type, event.detail, event.atSeconds);
   }
 
   spawnEnemy(type, position, floor = 1, options = {}) {
@@ -219,9 +286,9 @@ export class EnemyDirector {
     const origin = type === "queen" ? ENEMY_ORIGINS.STABLE : requestedOrigin;
     const stats = definition.stats;
     const difficulty = completeDifficultyProfile(this.difficulty);
-    const floorHealth = 1 + Math.max(0, floor - 1) * (type === "queen" ? 0.02 : 0.078);
+    const statScalars = resolveEnemyStatScalars({ type, floor, difficulty });
     const bossHealth = type === "queen" ? 1 + this.bossModifiers.health : 1;
-    const maxHealth = Math.round(stats.maxHealth * floorHealth * difficulty.enemyHealth * bossHealth);
+    const maxHealth = Math.round(stats.maxHealth * statScalars.health * bossHealth);
     const id = this.nextEnemyId++;
     const resistanceClass = RESISTANCE_BY_TYPE[type];
     const maxPoise = Math.round(POISE_BY_RESISTANCE[resistanceClass] * difficulty.poiseMultiplier);
@@ -237,6 +304,14 @@ export class EnemyDirector {
       modelKey: definition.modelKey,
       behavior: definition.behavior,
       active: true,
+      lifecycle: options.lifecycle ?? {
+        state: ENEMY_LIFECYCLE_STATES.ACTIVE,
+        startedAtSeconds: 0,
+        elapsedSeconds: ENEMY_EMERGENCE.durationSeconds,
+        remainingSeconds: 0,
+      },
+      schedulerEnemyId: options.schedulerEnemyId ?? null,
+      lifecycleManagedByScheduler: Boolean(options.schedulerEnemyId),
       position: clonePosition(position),
       previousPosition: clonePosition(position),
       facing: { x: 0, z: 1 },
@@ -247,8 +322,8 @@ export class EnemyDirector {
       maxPoise,
       poise: maxPoise,
       poiseRecoveryDelay: 0,
-      speed: stats.speed * difficulty.enemySpeed * (type === "queen" ? 1 + this.bossModifiers.enrage : 1),
-      damage: stats.damage * difficulty.enemyDamage,
+      speed: stats.speed * statScalars.speed * (type === "queen" ? 1 + this.bossModifiers.enrage : 1),
+      damage: stats.damage * statScalars.damage,
       attackRange: stats.attackRange,
       attackCooldown: this.rng?.float(0.12, 0.42) ?? 0.25,
       attackWindup: 0,
@@ -265,13 +340,15 @@ export class EnemyDirector {
       actionSpeed: 0,
       strafeDirection: this.rng?.chance(0.5) ? 1 : -1,
       hitFlash: 0,
+      progressionSlowTimer: 0,
+      progressionSpeedMultiplier: 1,
       knockback: { x: 0, z: 0 },
       bossPhase: 1,
       decisionTimer: this.rng?.float(0, 0.18) ?? 0,
       navigationPath: [],
       navigationIndex: 0,
       navigationTarget: null,
-      navigationRefresh: 0,
+      navigationRefresh: (id % 12) * 0.04,
       lastAttackKind: null,
       comboSerial: 0,
       comboPending: null,
@@ -285,26 +362,48 @@ export class EnemyDirector {
     this.enemies.push(enemy);
     this.emit("enemySpawned", {
       id: enemy.id,
+      ...(enemy.schedulerEnemyId ? { enemyId: enemy.schedulerEnemyId } : {}),
       type: enemy.type,
       origin: enemy.origin,
       originPhase: enemy.originPhase,
       formationIndex: enemy.formationIndex,
       position: clonePosition(enemy.position),
+      lifecycleState: enemy.lifecycle.state,
+      emergenceDurationSeconds: enemy.lifecycle.state === ENEMY_LIFECYCLE_STATES.EMERGING
+        ? ENEMY_EMERGENCE.durationSeconds
+        : 0,
     });
     return enemy;
   }
 
   update(dt, player, resolvePlayerDamage) {
+    this.currentPlayer = player;
+    // Encounter triggers are intentionally time/defeat driven; player position only repairs overlap at placement.
+    this.encounterScheduler?.advance(dt);
+    for (const enemy of this.enemies) {
+      if (!enemy.active || enemy.lifecycleManagedByScheduler || enemy.lifecycle.state !== ENEMY_LIFECYCLE_STATES.EMERGING) continue;
+      if (!advanceEmergence(enemy.lifecycle, dt)) continue;
+      this.emit("enemyEmergenceCompleted", {
+        floor: this.encounterFloor,
+        enemyId: enemy.schedulerEnemyId ?? enemy.id,
+        runtimeEnemyId: enemy.id,
+        type: enemy.type,
+        durationSeconds: ENEMY_EMERGENCE.durationSeconds,
+        position: clonePosition(enemy.position),
+      });
+    }
     this.bombardierAttackCooldown = Math.max(0, this.bombardierAttackCooldown - dt);
     for (const enemy of this.enemies) {
-      if (!enemy.active) this.releaseAttackLease(enemy, "inactive");
+      if (!this.isEnemyInteractive(enemy)) this.releaseAttackLease(enemy, enemy.active ? "emerging" : "inactive");
     }
     this.beginAttackStep();
     for (const enemy of this.enemies) {
-      if (!enemy.active) continue;
+      if (!this.isEnemyInteractive(enemy)) continue;
       enemy.previousPosition.x = enemy.position.x;
       enemy.previousPosition.z = enemy.position.z;
       enemy.hitFlash = Math.max(0, enemy.hitFlash - dt);
+      enemy.progressionSlowTimer = Math.max(0, (enemy.progressionSlowTimer ?? 0) - dt);
+      if (enemy.progressionSlowTimer <= 0) enemy.progressionSpeedMultiplier = 1;
       enemy.attackCooldown = Math.max(0, enemy.attackCooldown - dt);
       if (enemy.comboPending) enemy.comboPending.window = Math.max(0, enemy.comboPending.window - dt);
       this.updatePoise(enemy, dt);
@@ -316,46 +415,114 @@ export class EnemyDirector {
       this.updateEnemyBehavior(enemy, dt, player, resolvePlayerDamage);
     }
 
-    separateCircles(this.enemies);
+    separateCircles(this.enemies, this.arena, (enemy) => this.isEnemyInteractive(enemy));
     this.updateProjectiles(dt, player, resolvePlayerDamage);
-    this.updateEncounterWaves(dt);
   }
 
-  startNextWave() {
-    const wave = this.pendingWaves.shift();
-    if (!wave) return false;
-    for (let index = 0; index < wave.entries.length; index += 1) {
-      const entry = wave.entries[index];
-      const fallback = { x: index - wave.entries.length / 2, z: 4 };
-      const spawn = this.arena.enemySpawnPoints[entry.spawnIndex % Math.max(1, this.arena.enemySpawnPoints.length)] ?? fallback;
-      const definition = getEnemyArchetype(entry.type);
-      const position = entry.origin === ENEMY_ORIGINS.VOLATILE
-        ? this.findOpenPoint({
-          x: spawn.x + Math.cos(entry.originPhase) * 0.55,
-          z: spawn.z + Math.sin(entry.originPhase) * 0.55,
-        }, definition.stats.radius)
-        : spawn;
-      this.spawnEnemy(entry.type, position, this.encounterFloor, entry);
+  isEnemyInteractive(enemy) {
+    return Boolean(enemy?.active && lifecycleIsInteractive(enemy));
+  }
+
+  handleSchedulerEvent(type, detail, atSeconds) {
+    if (type === "enemyDefeated") return;
+    if (type === "encounterBatchTriggered") {
+      this.pendingWaves = this.pendingWaves.filter((wave) => wave.id !== detail.batchId);
+      const batch = this.encounterPlan?.batches.find((entry) => entry.id === detail.batchId);
+      const originCounts = (batch?.entries ?? []).reduce((counts, entry) => {
+        counts[entry.origin] += 1;
+        return counts;
+      }, { [ENEMY_ORIGINS.STABLE]: 0, [ENEMY_ORIGINS.VOLATILE]: 0 });
+      this.emit(type, {
+        ...detail,
+        atSeconds,
+        types: batch?.entries.map((entry) => entry.type) ?? [],
+        entries: batch?.entries ?? [],
+        originCounts,
+      });
+      return;
     }
-    this.waveDelay = this.pendingWaves[0]?.delay ?? 0;
-    const originCounts = wave.entries.reduce((counts, entry) => {
-      counts[entry.origin] += 1;
-      return counts;
-    }, { [ENEMY_ORIGINS.STABLE]: 0, [ENEMY_ORIGINS.VOLATILE]: 0 });
-    this.emit("encounterWaveStarted", {
-      planId: this.encounterPlan?.id ?? null,
-      wave: wave.index + 1,
-      totalWaves: this.encounterPlan?.waves.length ?? 1,
-      types: wave.entries.map((entry) => entry.type),
-      originCounts,
-    });
-    return true;
+    if (type === "enemyEmergenceStarted") {
+      const scheduledEnemy = this.encounterScheduler?.enemies.get(detail.enemyId);
+      if (!scheduledEnemy) return;
+      if (this.stableOriginDismissed && scheduledEnemy.entry.origin === ENEMY_ORIGINS.STABLE) {
+        this.encounterScheduler.killEnemy(scheduledEnemy.id);
+        return;
+      }
+      const enemy = this.spawnScheduledEnemy(scheduledEnemy);
+      this.schedulerEnemyActors.set(scheduledEnemy.id, enemy);
+      const playerPosition = this.currentPlayer?.position ?? this.arena.playerSpawn ?? { x: 0, z: 0 };
+      this.emit(type, {
+        ...detail,
+        atSeconds,
+        runtimeEnemyId: enemy.id,
+        position: clonePosition(enemy.position),
+        playerPosition: clonePosition(playerPosition),
+        playerDistance: distanceBetween(enemy.position, playerPosition),
+      });
+      return;
+    }
+    if (type === "enemyEmergenceCompleted") {
+      const enemy = this.schedulerEnemyActors.get(detail.enemyId);
+      if (!enemy?.active) return;
+      this.emit(type, {
+        ...detail,
+        atSeconds,
+        runtimeEnemyId: enemy.id,
+        position: clonePosition(enemy.position),
+      });
+      return;
+    }
+    this.emit(type, { ...detail, atSeconds });
   }
 
-  updateEncounterWaves(dt) {
-    if (this.hasLivingEnemies() || this.pendingWaves.length === 0) return;
-    this.waveDelay = Math.max(0, this.waveDelay - dt);
-    if (this.waveDelay <= 0) this.startNextWave();
+  spawnScheduledEnemy(scheduledEnemy) {
+    const entry = scheduledEnemy.entry;
+    const spawnPoints = this.arena.enemySpawnPoints ?? [];
+    const fallback = { x: entry.formationIndex ?? 0, z: 4 };
+    const spawn = spawnPoints[entry.spawnIndex % Math.max(1, spawnPoints.length)] ?? fallback;
+    const definition = getEnemyArchetype(entry.type);
+    const requested = entry.origin === ENEMY_ORIGINS.VOLATILE
+      ? {
+        x: spawn.x + Math.cos(entry.originPhase) * 0.55,
+        z: spawn.z + Math.sin(entry.originPhase) * 0.55,
+      }
+      : spawn;
+    const position = this.findSpawnPoint(requested, definition.stats.radius, entry.originPhase);
+    return this.spawnEnemy(entry.type, position, this.encounterFloor, {
+      ...entry,
+      lifecycle: scheduledEnemy.lifecycle,
+      schedulerEnemyId: scheduledEnemy.id,
+    });
+  }
+
+  findSpawnPoint(requested, radius, phase = 0) {
+    const player = this.currentPlayer ?? {
+      position: this.arena.playerSpawn ?? { x: 0, z: 0 },
+      radius: 0.58,
+    };
+    const open = this.findOpenPoint(requested, radius);
+    const minimum = radius + player.radius + 0.08;
+    if (distanceBetween(open, player.position) >= minimum) return open;
+    const candidates = [];
+    for (let ring = 0; ring < 3; ring += 1) {
+      const distance = minimum + ring * 0.45;
+      for (let index = 0; index < 24; index += 1) {
+        const angle = phase + (index / 24) * Math.PI * 2;
+        const candidate = {
+          x: player.position.x + Math.cos(angle) * distance,
+          z: player.position.z + Math.sin(angle) * distance,
+        };
+        if (!this.isOpenPoint(candidate, radius)) continue;
+        candidates.push(candidate);
+      }
+      if (candidates.length > 0) break;
+    }
+    candidates.sort((left, right) => (
+      distanceBetween(left, requested) - distanceBetween(right, requested)
+      || left.x - right.x
+      || left.z - right.z
+    ));
+    return candidates[0] ?? open;
   }
 
   updateKnockback(enemy, dt) {
@@ -712,7 +879,23 @@ export class EnemyDirector {
         x: enemy.position.x + Math.cos(angle) * 3,
         z: enemy.position.z + Math.sin(angle) * 3,
       }, getEnemyArchetype(selectedTypes[index]).stats.radius);
-      this.spawnEnemy(selectedTypes[index], position, 10, { origin: enemy.origin, formationIndex: index });
+      const guard = this.spawnEnemy(selectedTypes[index], position, 10, {
+        origin: enemy.origin,
+        formationIndex: index,
+        lifecycle: createEmergenceState(0),
+      });
+      const playerPosition = this.currentPlayer?.position ?? this.arena.playerSpawn ?? { x: 0, z: 0 };
+      this.emit("enemyEmergenceStarted", {
+        floor: this.encounterFloor,
+        enemyId: guard.id,
+        runtimeEnemyId: guard.id,
+        type: guard.type,
+        origin: guard.origin,
+        durationSeconds: ENEMY_EMERGENCE.durationSeconds,
+        position: clonePosition(guard.position),
+        playerPosition: clonePosition(playerPosition),
+        playerDistance: distanceBetween(guard.position, playerPosition),
+      });
     }
     this.emit("queenSummon", {
       actionId,
@@ -795,18 +978,14 @@ export class EnemyDirector {
       target.z += leadZ;
     }
 
-    if (this.arena) {
-      const halfWidth = this.arena.width / 2 - 1.2;
-      const halfDepth = this.arena.depth / 2 - 1.2;
-      target.x = Math.max(-halfWidth, Math.min(halfWidth, target.x));
-      target.z = Math.max(-halfDepth, Math.min(halfDepth, target.z));
-    }
+    if (this.arena) Object.assign(target, nearestWalkablePoint(this.arena, target, 0.2));
     if (["rune", "lobbedBomb", "voidWell"].includes(attackKind)) return this.findOpenPoint(target, 0.2);
     return target;
   }
 
   beginTrackedAttack(enemy, attackKind, player, options = {}) {
     const target = this.predictAttackTarget(enemy, attackKind, player);
+    if (!hasLineOfSight(enemy.position, target, this.arena, 0.08)) return null;
     const direction = normalize(target.x - enemy.position.x, target.z - enemy.position.z);
     return this.beginAttack(enemy, attackKind, target, direction, options);
   }
@@ -879,7 +1058,7 @@ export class EnemyDirector {
     let leftPressure = 0;
     let rightPressure = 0;
     for (const other of this.enemies) {
-      if (!other.active || other.id === enemy.id) continue;
+      if (!this.isEnemyInteractive(other) || other.id === enemy.id) continue;
       const offsetX = other.position.x - enemy.position.x;
       const offsetZ = other.position.z - enemy.position.z;
       if (offsetX * offsetX + offsetZ * offsetZ > 16) continue;
@@ -897,15 +1076,38 @@ export class EnemyDirector {
       enemy.facing.z = directionZ;
     }
     const before = enemy.position;
-    enemy.position = moveCircle(before, { x: directionX * speed, z: directionZ * speed }, dt, enemy.radius, this.arena);
+    const effectiveSpeed = speed * (enemy.progressionSpeedMultiplier ?? 1);
+    enemy.position = moveCircle(
+      before,
+      { x: directionX * effectiveSpeed, z: directionZ * effectiveSpeed },
+      dt,
+      enemy.radius,
+      this.arena,
+    );
     return distanceBetween(before, enemy.position);
+  }
+
+  slowEnemy(enemy, reduction, durationSeconds) {
+    if (
+      !this.isEnemyInteractive(enemy)
+      || !Number.isFinite(reduction)
+      || reduction <= 0
+      || !Number.isFinite(durationSeconds)
+      || durationSeconds <= 0
+    ) return false;
+    enemy.progressionSpeedMultiplier = Math.min(
+      enemy.progressionSpeedMultiplier ?? 1,
+      1 - Math.min(0.6, reduction),
+    );
+    enemy.progressionSlowTimer = Math.max(enemy.progressionSlowTimer ?? 0, durationSeconds);
+    return true;
   }
 
   clearEnemyPath(enemy) {
     enemy.navigationPath = [];
     enemy.navigationIndex = 0;
     enemy.navigationTarget = null;
-    enemy.navigationRefresh = 0;
+    enemy.navigationRefresh = 0.12 + (enemy.id % 7) * 0.035;
   }
 
   moveEnemyToward(enemy, target, speed, dt) {
@@ -919,14 +1121,18 @@ export class EnemyDirector {
     enemy.navigationRefresh = Math.max(0, enemy.navigationRefresh - dt);
     const targetMoved = !enemy.navigationTarget
       || distanceBetween(enemy.navigationTarget, target) > ENEMY_PATH_TARGET_THRESHOLD;
-    if (enemy.navigationRefresh <= 0 || targetMoved || enemy.navigationPath.length === 0) {
+    if (targetMoved) {
+      enemy.navigationRefresh = Math.min(enemy.navigationRefresh, 0.18 + (enemy.id % 7) * 0.035);
+    }
+    if (enemy.navigationPath.length === 0 && enemy.navigationRefresh > 0) return 0;
+    if (enemy.navigationRefresh <= 0) {
       enemy.navigationPath = findNavigationPath(enemy.position, target, this.arena, {
         cellSize: ENEMY_PATH_CELL_SIZE,
         padding,
       });
       enemy.navigationIndex = enemy.navigationPath.length > 1 ? 1 : 0;
       enemy.navigationTarget = clonePosition(target);
-      enemy.navigationRefresh = 0.28 + (enemy.id % 5) * 0.035;
+      enemy.navigationRefresh = ENEMY_PATH_REFRESH_SECONDS + (enemy.id % 7) * 0.06;
     }
 
     const waypointRadius = Math.max(0.5, enemy.radius * 0.85);
@@ -974,7 +1180,7 @@ export class EnemyDirector {
 
   beginAttackStep() {
     const activeEnemyIds = this.enemies
-      .filter((enemy) => enemy.active)
+      .filter((enemy) => this.isEnemyInteractive(enemy))
       .map((enemy) => String(enemy.id));
     return this.attackCoordinator.beginStep(activeEnemyIds, this.currentDifficulty());
   }
@@ -1003,6 +1209,7 @@ export class EnemyDirector {
   }
 
   beginAttack(enemy, attackKind, target, direction, options = {}) {
+    if (!this.isEnemyInteractive(enemy)) return null;
     const definition = getEnemyArchetype(enemy.type);
     const attack = definition.attacks[attackKind];
     if (!attack) throw new RangeError(`${enemy.type} cannot use ${attackKind}`);
@@ -1024,6 +1231,8 @@ export class EnemyDirector {
         attack: attackKind,
         family,
         reason: this.attackCoordinator.lastDenial?.reason ?? "unavailable",
+        floor: this.encounterFloor,
+        room: this.encounterPlan?.room ?? null,
       }));
       return null;
     }
@@ -1072,6 +1281,8 @@ export class EnemyDirector {
       enemyId: enemy.id,
       family: lease.family,
       difficultyId: lease.difficultyId,
+      floor: this.encounterFloor,
+      room: this.encounterPlan?.room ?? null,
     }));
     return enemy.attackActionId;
   }
@@ -1364,8 +1575,6 @@ export class EnemyDirector {
   }
 
   updateProjectiles(dt, player, resolvePlayerDamage) {
-    const halfWidth = this.arena.width / 2 - 0.7;
-    const halfDepth = this.arena.depth / 2 - 0.7;
     for (const projectile of this.projectiles) {
       if (!projectile.active) continue;
       projectile.previousPosition.x = projectile.position.x;
@@ -1382,6 +1591,21 @@ export class EnemyDirector {
         projectile.position.z += projectile.velocity.z * dt;
       }
 
+      const containmentRadius = Math.min(projectile.radius, 0.34);
+      if (
+        !isCircleWalkable(this.arena, projectile.position, containmentRadius)
+        || ((projectile.mode === "direct" || projectile.mode === "lob")
+          && !isWalkableSegment(
+            this.arena,
+            projectile.previousPosition,
+            projectile.position,
+            containmentRadius,
+          ))
+      ) {
+        this.deactivateProjectile(projectile);
+        continue;
+      }
+
       if (projectile.life <= 0) {
         if (projectile.mode === "lob" || projectile.mode === "rune") this.detonateProjectile(projectile, player, resolvePlayerDamage);
         else this.deactivateProjectile(projectile);
@@ -1389,10 +1613,6 @@ export class EnemyDirector {
       }
 
       if (projectile.mode !== "direct") continue;
-      if (Math.abs(projectile.position.x) > halfWidth || Math.abs(projectile.position.z) > halfDepth) {
-        this.deactivateProjectile(projectile);
-        continue;
-      }
       const combinedRadius = projectile.radius + player.radius;
       if (segmentDistanceSquared(projectile.previousPosition, projectile.position, player.position) <= combinedRadius * combinedRadius) {
         this.deactivateProjectile(projectile);
@@ -1415,6 +1635,10 @@ export class EnemyDirector {
     projectile.position.x = projectile.target.x;
     projectile.position.z = projectile.target.z;
     projectile.height = 0;
+    if (!isCircleWalkable(this.arena, projectile.position, Math.min(projectile.radius, 0.34))) {
+      this.deactivateProjectile(projectile);
+      return;
+    }
     if (isInsideCircle(projectile.position, projectile.areaRadius, player.position, player.radius)) {
       this.resolvePlayerDamage(
         resolvePlayerDamage,
@@ -1441,22 +1665,31 @@ export class EnemyDirector {
   }
 
   findOpenPoint(point, radius) {
-    const halfWidth = this.arena.width / 2 - radius - 0.8;
-    const halfDepth = this.arena.depth / 2 - radius - 0.8;
-    const candidate = {
-      x: Math.max(-halfWidth, Math.min(halfWidth, point.x)),
-      z: Math.max(-halfDepth, Math.min(halfDepth, point.z)),
-    };
-    for (const obstacle of this.arena.obstacles) {
-      const blockedX = Math.abs(candidate.x - obstacle.x) < obstacle.width / 2 + radius;
-      const blockedZ = Math.abs(candidate.z - obstacle.z) < obstacle.depth / 2 + radius;
-      if (!blockedX || !blockedZ) continue;
-      const left = obstacle.x - obstacle.width / 2 - radius - 0.15;
-      const right = obstacle.x + obstacle.width / 2 + radius + 0.15;
-      candidate.x = Math.abs(candidate.x - left) < Math.abs(candidate.x - right) ? left : right;
-      candidate.x = Math.max(-halfWidth, Math.min(halfWidth, candidate.x));
+    const clearance = radius + (this.arena.walkableShape ? 0.08 : 0.8);
+    const repaired = nearestWalkablePoint(this.arena, point, clearance);
+    if (this.isOpenPoint(repaired, radius)) return repaired;
+    for (let ring = 1; ring <= 128; ring += 1) {
+      const distance = ring * 0.25;
+      for (let index = 0; index < 32; index += 1) {
+        const angle = (index / 32) * Math.PI * 2;
+        const candidate = {
+          x: repaired.x + Math.cos(angle) * distance,
+          z: repaired.z + Math.sin(angle) * distance,
+        };
+        if (this.isOpenPoint(candidate, radius)) return candidate;
+      }
     }
-    return candidate;
+    return repaired;
+  }
+
+  isOpenPoint(point, radius) {
+    const clearance = radius + (this.arena.walkableShape ? 0.08 : 0.8);
+    if (!isCircleWalkable(this.arena, point, clearance)) return false;
+    return !(this.arena.obstacles ?? []).some((obstacle) => {
+      const closestX = Math.max(obstacle.x - obstacle.width / 2, Math.min(obstacle.x + obstacle.width / 2, point.x));
+      const closestZ = Math.max(obstacle.z - obstacle.depth / 2, Math.min(obstacle.z + obstacle.depth / 2, point.z));
+      return Math.hypot(point.x - closestX, point.z - closestZ) < radius + 0.12;
+    });
   }
 
   queryClaimCandidates({ pass, from, to, radius, arc = null, direction = null }) {
@@ -1466,11 +1699,13 @@ export class EnemyDirector {
       if (!finitePoint(direction) || !Number.isFinite(arc) || arc <= 0) return [];
       const facing = Math.atan2(direction.z, direction.x);
       return this.enemies.filter((enemy) => (
-        enemy.active && circleIntersectsArc(from, facing, radius, arc, enemy.position, enemy.radius)
+        this.isEnemyInteractive(enemy)
+        && hasLineOfSight(from, enemy.position, this.arena, 0.08)
+        && circleIntersectsArc(from, facing, radius, arc, enemy.position, enemy.radius)
       ));
     }
     return this.enemies.filter((enemy) => {
-      if (!enemy.active) return false;
+      if (!this.isEnemyInteractive(enemy) || !hasLineOfSight(from, enemy.position, this.arena, 0.08)) return false;
       const combinedRadius = radius + enemy.radius;
       return segmentDistanceSquared(from, to, enemy.position) <= combinedRadius * combinedRadius;
     });
@@ -1483,7 +1718,7 @@ export class EnemyDirector {
   pullEnemyToward(enemy, origin, requested) {
     const requestedDistance = Math.max(0, Number.isFinite(requested) ? requested : 0);
     const boundedDistance = Math.min(MAX_CLAIM_PULL, requestedDistance);
-    if (!enemy?.active || !this.arena || !finitePoint(origin) || boundedDistance <= 0) {
+    if (!this.isEnemyInteractive(enemy) || !this.arena || !finitePoint(origin) || boundedDistance <= 0) {
       return Object.freeze({
         targetId: enemy?.id ?? null,
         requested: requestedDistance,
@@ -1517,6 +1752,9 @@ export class EnemyDirector {
 
   resolveCombatHit(enemy, hit) {
     if (!enemy?.active) return Object.freeze({ accepted: false, reason: "inactive", defeated: false, hit: null });
+    if (!this.isEnemyInteractive(enemy)) {
+      return Object.freeze({ accepted: false, reason: "emerging", defeated: false, hit: null });
+    }
     if (enemy.type === "queen" && enemy.state === "phaseTransition") {
       return Object.freeze({ accepted: false, reason: "uninterruptible", defeated: false, hit: null });
     }
@@ -1608,6 +1846,7 @@ export class EnemyDirector {
         origin: enemy.origin,
         position: immutablePoint(enemy.position),
       }));
+      if (enemy.schedulerEnemyId) this.encounterScheduler?.killEnemy(enemy.schedulerEnemyId);
     } else if (previousPoise > 0 && enemy.poise <= 0) {
       this.interruptForStagger(enemy, hit?.actionId ?? null);
     }
@@ -1649,6 +1888,8 @@ export class EnemyDirector {
         enemyId: enemy.id,
         family,
         reason,
+        floor: this.encounterFloor,
+        room: this.encounterPlan?.room ?? null,
       }));
     }
     return released;
@@ -1684,7 +1925,23 @@ export class EnemyDirector {
   }
 
   hasCombatRemaining() {
-    return this.hasLivingEnemies() || this.pendingWaves.length > 0;
+    const directActorsRemain = this.enemies.some((enemy) => enemy.active && !enemy.schedulerEnemyId);
+    return directActorsRemain || Boolean(this.encounterScheduler?.hasCombatRemaining());
+  }
+
+  clearEncounter(reason = "clearedExternally") {
+    for (const enemy of this.enemies) {
+      if (!enemy.active) continue;
+      this.clearEnemyCommitment(enemy, reason);
+      enemy.active = false;
+      enemy.lifecycle.state = ENEMY_LIFECYCLE_STATES.DEFEATED;
+      enemy.lifecycle.remainingSeconds = 0;
+    }
+    this.attackCoordinator.reset(reason);
+    this.encounterScheduler = null;
+    this.schedulerEnemyActors.clear();
+    this.pendingWaves.length = 0;
+    this.deactivateProjectiles();
   }
 
   activeBoss() {
@@ -1709,6 +1966,10 @@ export class EnemyDirector {
     if (this.stableOriginDismissed) return null;
     this.stableOriginDismissed = true;
     const actors = [];
+    const pendingEntries = this.encounterScheduler?.batchStates.reduce((count, state) => (
+      count + state.batch.entries.slice(state.nextEntryIndex)
+        .filter((entry) => entry.origin === ENEMY_ORIGINS.STABLE).length
+    ), 0) ?? 0;
     for (const enemy of this.enemies) {
       if (!enemy.active || enemy.origin !== ENEMY_ORIGINS.STABLE) continue;
       this.clearEnemyCommitment(enemy, "dismissed");
@@ -1722,11 +1983,13 @@ export class EnemyDirector {
       projectiles += 1;
       this.deactivateProjectile(projectile);
     }
-    let pendingEntries = 0;
+    this.encounterScheduler?.cancelWhere(
+      (entry) => entry.origin === ENEMY_ORIGINS.STABLE,
+      "stableOriginDismissed",
+    );
     this.pendingWaves = this.pendingWaves.flatMap((wave) => {
       const entries = wave.entries.filter((entry) => {
         if (entry.origin !== ENEMY_ORIGINS.STABLE) return true;
-        pendingEntries += 1;
         return false;
       });
       return entries.length > 0 ? [{ ...wave, entries }] : [];
@@ -1748,6 +2011,8 @@ export class EnemyDirector {
     this.attackCoordinator.reset("stressSpawn");
     this.enemies.length = 0;
     this.encounterPlan = null;
+    this.encounterScheduler = null;
+    this.schedulerEnemyActors.clear();
     this.pendingWaves.length = 0;
     this.waveDelay = 0;
     for (let index = 0; index < count; index += 1) {

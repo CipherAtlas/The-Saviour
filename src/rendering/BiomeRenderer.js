@@ -1,5 +1,10 @@
 import * as THREE from "three";
 import { getBiome } from "../generation/biomes.js";
+import {
+  getPerimeterWallSegments,
+  getWalkableRegions,
+  isPointWalkable,
+} from "../game/arenaGeometry.js";
 
 function groupByModel(entries) {
   const grouped = new Map();
@@ -25,6 +30,89 @@ function collectMeshes(scene) {
 }
 
 const MAX_DECALS_PER_ROOM = 7;
+
+function ascendingUnique(values) {
+  return [...new Set(values)].sort((left, right) => left - right);
+}
+
+function regionEdges(region) {
+  return {
+    minX: region.x - region.width / 2,
+    maxX: region.x + region.width / 2,
+    minZ: region.z - region.depth / 2,
+    maxZ: region.z + region.depth / 2,
+  };
+}
+
+/**
+ * Partition the region union into non-overlapping model-sized floor pieces.
+ * Keeping this data-only makes the rendered footprint directly testable.
+ */
+export function createShapedFloorPieces(arena, tileWidth, tileDepth) {
+  if (!(tileWidth > 0) || !(tileDepth > 0)) throw new RangeError("Floor tile dimensions must be positive.");
+  const regions = getWalkableRegions(arena);
+  const xEdges = ascendingUnique(regions.flatMap((entry) => {
+    const bounds = regionEdges(entry);
+    return [bounds.minX, bounds.maxX];
+  }));
+  const zEdges = ascendingUnique(regions.flatMap((entry) => {
+    const bounds = regionEdges(entry);
+    return [bounds.minZ, bounds.maxZ];
+  }));
+  const pieces = [];
+
+  for (let xIndex = 0; xIndex < xEdges.length - 1; xIndex += 1) {
+    const cellMinX = xEdges[xIndex];
+    const cellMaxX = xEdges[xIndex + 1];
+    for (let zIndex = 0; zIndex < zEdges.length - 1; zIndex += 1) {
+      const cellMinZ = zEdges[zIndex];
+      const cellMaxZ = zEdges[zIndex + 1];
+      if (!isPointWalkable(arena, {
+        x: (cellMinX + cellMaxX) / 2,
+        z: (cellMinZ + cellMaxZ) / 2,
+      })) continue;
+
+      const columns = Math.max(1, Math.ceil((cellMaxX - cellMinX) / tileWidth));
+      const rows = Math.max(1, Math.ceil((cellMaxZ - cellMinZ) / tileDepth));
+      const width = (cellMaxX - cellMinX) / columns;
+      const depth = (cellMaxZ - cellMinZ) / rows;
+      for (let column = 0; column < columns; column += 1) {
+        for (let row = 0; row < rows; row += 1) {
+          pieces.push(Object.freeze({
+            x: cellMinX + (column + 0.5) * width,
+            z: cellMinZ + (row + 0.5) * depth,
+            width,
+            depth,
+          }));
+        }
+      }
+    }
+  }
+  return Object.freeze(pieces);
+}
+
+export function createPerimeterWallPieces(arena, maximumLength) {
+  if (!(maximumLength > 0)) throw new RangeError("Wall piece length must be positive.");
+  const pieces = [];
+  for (const segment of getPerimeterWallSegments(arena)) {
+    const count = Math.max(1, Math.ceil(segment.length / maximumLength));
+    const length = segment.length / count;
+    const dx = (segment.end.x - segment.start.x) / segment.length;
+    const dz = (segment.end.z - segment.start.z) / segment.length;
+    for (let index = 0; index < count; index += 1) {
+      const distance = (index + 0.5) * length;
+      pieces.push(Object.freeze({
+        perimeterId: segment.id,
+        x: segment.start.x + dx * distance,
+        z: segment.start.z + dz * distance,
+        length,
+        rotation: Math.atan2(-segment.normal.x, -segment.normal.z),
+        normal: segment.normal,
+      }));
+    }
+  }
+  return Object.freeze(pieces);
+}
 
 function appendRibbon(positions, indices, start, end, width) {
   const dx = end.x - start.x;
@@ -142,7 +230,7 @@ export class BiomeRenderer {
 
   async build(arena) {
     const token = ++this.buildToken;
-    const biome = getBiome(arena.biome);
+    const biome = getBiome(arena.environmentTheme ?? arena.biome);
     this.group.visible = false;
     await this.catalog.preloadBiome(biome.id);
     const modelKeys = [
@@ -165,29 +253,32 @@ export class BiomeRenderer {
 
   addFloor(arena, biome) {
     const template = this.template(biome.floorModel);
-    const transforms = [];
     const tileWidth = Math.max(1, template.size.x);
     const tileDepth = Math.max(1, template.size.z);
-    for (let x = -arena.width / 2 + tileWidth / 2; x < arena.width / 2; x += tileWidth) {
-      for (let z = -arena.depth / 2 + tileDepth / 2; z < arena.depth / 2; z += tileDepth) {
-        transforms.push({ x, y: -template.maxY, z, rotation: 0, scaleX: 1, scaleY: 1, scaleZ: 1 });
-      }
-    }
+    const transforms = createShapedFloorPieces(arena, tileWidth, tileDepth).map((piece) => ({
+      x: piece.x,
+      y: -template.maxY,
+      z: piece.z,
+      rotation: 0,
+      scaleX: piece.width / Math.max(0.25, template.size.x),
+      scaleY: 1,
+      scaleZ: piece.depth / Math.max(0.25, template.size.z),
+    }));
     this.addInstancedModel(template, transforms, { castShadow: false, receiveShadow: true });
   }
 
   addWalls(arena, biome) {
     const template = this.template(biome.wallModel);
-    const transforms = [];
     const segment = Math.max(2, template.size.x);
-    for (let x = -arena.width / 2 + segment / 2; x < arena.width / 2; x += segment) {
-      transforms.push({ x, y: -template.minY, z: -arena.depth / 2, rotation: 0, scaleX: 1, scaleY: 1, scaleZ: 1 });
-      transforms.push({ x, y: -template.minY, z: arena.depth / 2, rotation: Math.PI, scaleX: 1, scaleY: 1, scaleZ: 1 });
-    }
-    for (let z = -arena.depth / 2 + segment / 2; z < arena.depth / 2; z += segment) {
-      transforms.push({ x: -arena.width / 2, y: -template.minY, z, rotation: Math.PI / 2, scaleX: 1, scaleY: 1, scaleZ: 1 });
-      transforms.push({ x: arena.width / 2, y: -template.minY, z, rotation: -Math.PI / 2, scaleX: 1, scaleY: 1, scaleZ: 1 });
-    }
+    const transforms = createPerimeterWallPieces(arena, segment).map((piece) => ({
+      x: piece.x,
+      y: -template.minY,
+      z: piece.z,
+      rotation: piece.rotation,
+      scaleX: piece.length / Math.max(0.25, template.size.x),
+      scaleY: 1,
+      scaleZ: 1,
+    }));
     this.addInstancedModel(template, transforms, { castShadow: true, receiveShadow: true });
   }
 
