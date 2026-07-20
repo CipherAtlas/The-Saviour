@@ -15,9 +15,9 @@ const TIMELINE_EVENTS = new Set([
   "playerHit",
   "enemyDefeated",
   "blessingChosen",
-  "dialogueStarted",
-  "dialogueAdvanced",
-  "dialogueCompleted",
+  "bookendStarted",
+  "bookendAdvanced",
+  "bookendCompleted",
   "witchMagicCeased",
   "endingDecisionStarted",
   "endingChoiceResolved",
@@ -132,8 +132,8 @@ export class PlaytestReporter {
     this.rooms = new Map();
     this.currentRoomKey = null;
     this.floorsReached = new Set();
-    this.dialogueChoices = [];
-    this.narrativeSequences = [];
+    this.bookendChoices = [];
+    this.bookendSequences = [];
     this.endingDecision = { startedAt: null, resolvedAt: null, durationSeconds: null, outcome: null };
     this.endingDecisionStartedAtMs = null;
     this.blessings = [];
@@ -213,7 +213,7 @@ export class PlaytestReporter {
     const signature = JSON.stringify(intent.uiAction);
     if (signature === this.lastIntentSignature) return;
     this.lastIntentSignature = signature;
-    if (intent.uiAction.type === "continueDialogue") this.dialogueChoices.push({ atSeconds: round(this.elapsed), action: "continue" });
+    if (intent.uiAction.type === "continueBookend") this.bookendChoices.push({ atSeconds: round(this.elapsed), action: "continue" });
   }
 
   recordDiagnostic(diagnostic) {
@@ -284,10 +284,8 @@ export class PlaytestReporter {
         rank: detail.rank,
       });
       if (detail.path in this.pathRanks) this.pathRanks[detail.path] += 1;
-    } else if (["roomRewardOffered", "blessingOffered"].includes(event.type)) {
-      this.recordNarrativeSequence(detail.dialogue?.[0]?.sequenceId);
-    } else if (event.type === "dialogueStarted") {
-      this.recordNarrativeSequence(detail.sequenceId);
+    } else if (event.type === "bookendStarted") {
+      this.recordBookendSequence(detail.sequenceId);
     } else if (event.type === "endingDecisionStarted") {
       this.endingDecision.startedAt = round(this.elapsed);
       this.endingDecisionStartedAtMs = Number.isFinite(detail.decision?.startedAtMs)
@@ -318,9 +316,9 @@ export class PlaytestReporter {
     if (TIMELINE_EVENTS.has(event.type)) this.addTimeline(event.type, detail);
   }
 
-  recordNarrativeSequence(sequenceId) {
-    if (!sequenceId || this.narrativeSequences.includes(sequenceId)) return;
-    this.narrativeSequences.push(sequenceId);
+  recordBookendSequence(sequenceId) {
+    if (!sequenceId || this.bookendSequences.includes(sequenceId)) return;
+    this.bookendSequences.push(sequenceId);
   }
 
   startRoom(floor, room, boss) {
@@ -386,8 +384,8 @@ export class PlaytestReporter {
         chamberRewards: [...this.chamberRewards],
         blessings: [...this.blessings],
         pathRanks: { ...this.pathRanks },
-        dialogueChoices: [...this.dialogueChoices],
-        narrativeSequences: [...this.narrativeSequences],
+        bookendChoices: [...this.bookendChoices],
+        bookendSequences: [...this.bookendSequences],
         endingDecision: { ...this.endingDecision },
       },
       combat: {
@@ -534,7 +532,7 @@ export class PlaytestReporter {
       recommendations.push({ priority: "high", category: "performance", finding: "Frame pacing missed the playtest budget.", action: "Profile the busiest room and reduce the dominant render or simulation cost before adding more content." });
     }
 
-    if (funMoments.length === 0 && this.outcome.victory) funMoments.push("Completing the dungeon arc and resolving the final dialogue provided a clear payoff.");
+    if (funMoments.length === 0 && this.outcome.victory) funMoments.push("Completing the dungeon and resolving the final choice provided a clear payoff.");
     const penalties = friction.reduce((sum, item) => sum + (item.includes("Performance") || item.includes("ended before") ? 18 : 9), 0);
     const bonuses = strengths.length * 8 + funMoments.length * 5;
     const funScore = clampScore(45 + bonuses - penalties);

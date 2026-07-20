@@ -1,4 +1,4 @@
-import { NARRATIVE_TIMING } from "./gameConfig.js";
+import { ENDING_TIMING } from "./gameConfig.js";
 
 function requireTimestamp(value, name) {
   if (!Number.isFinite(value)) throw new TypeError(`${name} must be a finite timestamp.`);
@@ -19,7 +19,7 @@ function immutableResult(id, resolvedAtMs) {
 }
 
 export class EndingSequence {
-  constructor(timing = NARRATIVE_TIMING) {
+  constructor(timing = ENDING_TIMING) {
     this.decisionDurationMs = requireDuration(timing.decisionDurationMs, "decisionDurationMs");
     this.defaultFadeDurationMs = requireDuration(timing.fadeDurationMs, "fadeDurationMs");
     this.reset();

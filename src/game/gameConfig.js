@@ -1,4 +1,4 @@
-export const GAME_TITLE = "Reaper of the Hollow Crown";
+export const GAME_TITLE = "The Saviour";
 
 export const RUN_CONFIG = Object.freeze({
   totalFloors: 10,
@@ -10,7 +10,7 @@ export const RUN_CONFIG = Object.freeze({
   floorRecoveryPercent: 0.24,
 });
 
-export const NARRATIVE_TIMING = Object.freeze({
+export const ENDING_TIMING = Object.freeze({
   decisionDurationMs: 5_000,
   fadeDurationMs: 1_200,
   endingStrike: Object.freeze({
@@ -88,6 +88,7 @@ export const HIT_STOP_CONFIG = Object.freeze({
     chargePartial: Object.freeze({ duration: 2 / 60, tier: "light" }),
     chargeFull: Object.freeze({ duration: 3 / 60, tier: "medium" }),
     chargePerfect: Object.freeze({ duration: 4 / 60, tier: "heavy" }),
+    lineCharge: Object.freeze({ duration: 4 / 60, tier: "heavy" }),
     claimRecall: Object.freeze({ duration: 3 / 60, tier: "medium" }),
   }),
 });
@@ -160,6 +161,16 @@ export const CHARGE_CONFIG = Object.freeze({
   }),
 });
 
+export const STRAIGHT_CHARGE_CONFIG = Object.freeze({
+  costSegments: 1,
+  dashAllowance: 1,
+  holdThreshold: 0.18,
+  buildupDuration: 0.72,
+  minimumPower: 0.68,
+  minimumRange: 0.8,
+  minimumWidth: 0.86,
+});
+
 export const SCYTHE_ATTACKS = Object.freeze([
   Object.freeze({
     name: "Crescent Cut",
@@ -224,6 +235,22 @@ export const HEAVY_ATTACK = Object.freeze({
   nextComboIndex: null,
 });
 
+export const STRAIGHT_CHARGE_ATTACK = Object.freeze({
+  name: "Grave Line",
+  shape: "line",
+  duration: 0.62,
+  activeStart: 0.17,
+  activeEnd: 0.31,
+  range: 9.4,
+  width: 2.45,
+  damage: 82,
+  poiseDamage: 72,
+  knockback: 12,
+  moveScale: 0.32,
+  cancelToDashAt: 0.34,
+  nextComboIndex: null,
+});
+
 export const DASH_ATTACK = Object.freeze({
   name: "Reaping Passage",
   duration: 0.28,
@@ -260,7 +287,9 @@ export const PERFORMANCE_BUDGET = Object.freeze({
 });
 
 export const DEFAULT_DIFFICULTY_ID = "standard";
-export const DIFFICULTY_IDS = Object.freeze(["story", "standard", "ruthless"]);
+export const DIFFICULTY_IDS = Object.freeze(["relaxed", "standard", "ruthless"]);
+export const DEFAULT_RUN_TYPE = "normal";
+export const RUN_TYPE_IDS = Object.freeze(["normal", "speedrun"]);
 
 /**
  * Immutable scalar and behavioral rules copied into a run when difficulty is confirmed.
@@ -274,10 +303,10 @@ function difficultyProfile(definition) {
 }
 
 export const DIFFICULTY = Object.freeze({
-  story: difficultyProfile({
-    id: "story",
-    label: "Story",
-    description: "More recovery and fewer overlapping threats, with every mechanic and full narrative preserved.",
+  relaxed: difficultyProfile({
+    id: "relaxed",
+    label: "Relaxed",
+    description: "More recovery and fewer overlapping threats, with the complete combat and build system preserved.",
     enemyHealth: 0.82,
     enemyDamage: 0.76,
     enemySpeed: 0.94,
@@ -297,7 +326,7 @@ export const DIFFICULTY = Object.freeze({
     enemySpeed: 1,
     windupMultiplier: 1,
     cooldownMultiplier: 1,
-    attackBudgets: { total: 4, melee: 2, ranged: 2, area: 1 },
+    attackBudgets: { total: 5, melee: 3, ranged: 2, area: 1 },
     compositionPressure: 1,
     poiseMultiplier: 1,
     bossCadenceMultiplier: 1,
@@ -308,10 +337,10 @@ export const DIFFICULTY = Object.freeze({
     description: "Tighter telegraphs, coordinated overlaps, and specialist-heavy squads demand a coherent build and precise play.",
     enemyHealth: 1.15,
     enemyDamage: 1.14,
-    enemySpeed: 1.05,
+    enemySpeed: 1.08,
     windupMultiplier: 0.88,
     cooldownMultiplier: 0.84,
-    attackBudgets: { total: 5, melee: 3, ranged: 2, area: 2 },
+    attackBudgets: { total: 6, melee: 3, ranged: 3, area: 2 },
     compositionPressure: 1.24,
     poiseMultiplier: 1.14,
     bossCadenceMultiplier: 1.2,

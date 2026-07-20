@@ -17,6 +17,17 @@ export function circleIntersectsArc(origin, facing, range, arc, target, targetRa
   return Math.abs(normalizeAngle(targetAngle - facing)) <= arc / 2 + angularPadding;
 }
 
+export function circleIntersectsLine(origin, facing, range, width, target, targetRadius = 0) {
+  const dx = target.x - origin.x;
+  const dz = target.z - origin.z;
+  const forwardX = Math.cos(facing);
+  const forwardZ = Math.sin(facing);
+  const distanceAlong = dx * forwardX + dz * forwardZ;
+  if (distanceAlong < -targetRadius || distanceAlong > range + targetRadius) return false;
+  const distanceAcross = Math.abs(-dx * forwardZ + dz * forwardX);
+  return distanceAcross <= width / 2 + targetRadius;
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }

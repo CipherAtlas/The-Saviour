@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { UPGRADE_SEQUENCE_IDS } from "../src/game/dialogueContent.js";
 import { RunStatsAccumulator } from "../src/game/RunStatsAccumulator.js";
 import {
   SUSPENDED_RUN_KEY,
+  SUSPENDED_RUN_VERSION,
   SuspendedRunStore,
 } from "../src/settings/SuspendedRunStore.js";
 
@@ -38,7 +38,6 @@ function snapshot(overrides = {}) {
   });
   statistics.record({ type: "upgradeRerolled" });
   const statisticsDraft = statistics.snapshotDraft();
-  const completedUpgradeSequenceIds = UPGRADE_SEQUENCE_IDS.slice(0, 3);
   return {
     seed: "SUSPEND-SEED",
     difficultyId: "standard",
@@ -55,8 +54,6 @@ function snapshot(overrides = {}) {
     blessingIds: ["final-mercy"],
     rerollsUsedByFloor: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     runFlags: {},
-    seenRunSequenceIds: ["opening.ring", ...completedUpgradeSequenceIds],
-    completedUpgradeSequenceIds,
     statisticsDraft,
     ...overrides,
   };
@@ -68,13 +65,36 @@ test("suspended runs are stamped, validated, persisted, and returned deeply immu
 
   assert.equal(store.save(snapshot()), true);
   const loaded = store.loadValid();
-  assert.equal(loaded.version, 1);
+  assert.equal(loaded.version, SUSPENDED_RUN_VERSION);
+  assert.equal(loaded.runType, "normal");
+  assert.deepEqual(loaded.speedrun, { elapsedSeconds: 0, finished: false });
   assert.equal(loaded.savedAt, 123_456);
   assert.equal(loaded.seed, "SUSPEND-SEED");
   assert.deepEqual(loaded.upgradeRanks, [["quickened-step", 1], ["whetted-crescent", 1]]);
   assert.equal(Object.isFrozen(loaded), true);
   assert.equal(Object.isFrozen(loaded.statisticsDraft.actions), true);
   assert.throws(() => { loaded.player.health = 1; }, TypeError);
+});
+
+test("version-two legacy suspends migrate without retired presentation state or lost progress", () => {
+  const legacy = {
+    version: 2,
+    savedAt: 99,
+    ...snapshot(),
+    difficultyId: "story",
+    runType: "normal",
+    speedrun: { elapsedSeconds: 0, finished: false },
+    seenRunSequenceIds: ["opening.ring"],
+    completedUpgradeSequenceIds: [],
+  };
+  legacy.statisticsDraft = { ...legacy.statisticsDraft, version: 1, difficultyId: "story" };
+  const storage = new MemoryStorage({ [SUSPENDED_RUN_KEY]: JSON.stringify(legacy) });
+  const store = new SuspendedRunStore(storage);
+  const loaded = store.loadValid();
+  assert.equal(loaded.version, SUSPENDED_RUN_VERSION);
+  assert.equal(loaded.runType, "normal");
+  assert.equal(loaded.difficultyId, "relaxed");
+  assert.deepEqual(loaded.speedrun, { elapsedSeconds: 0, finished: false });
 });
 
 test("room-boundary progression counts must match the next floor and room", () => {
@@ -108,21 +128,6 @@ test("draft final ranks must equal merged chamber and blessing ranks", () => {
   statisticsDraft.finalRanks["final-mercy"] = 2;
 
   assert.equal(store.save(snapshot({ statisticsDraft })), false);
-});
-
-test("completed upgrade sequences must exactly match chronological progression", () => {
-  const store = new SuspendedRunStore(new MemoryStorage(), { now: () => 1 });
-  const firstTwo = UPGRADE_SEQUENCE_IDS.slice(0, 2);
-  assert.equal(store.save(snapshot({
-    seenRunSequenceIds: ["opening.ring", ...firstTwo],
-    completedUpgradeSequenceIds: firstTwo,
-  })), false);
-
-  const wrongThree = [UPGRADE_SEQUENCE_IDS[0], UPGRADE_SEQUENCE_IDS[1], UPGRADE_SEQUENCE_IDS[3]];
-  assert.equal(store.save(snapshot({
-    seenRunSequenceIds: ["opening.ring", ...wrongThree],
-    completedUpgradeSequenceIds: wrongThree,
-  })), false);
 });
 
 test("invalid IDs and contradictory authoritative fields remove only the bad suspend slot", () => {

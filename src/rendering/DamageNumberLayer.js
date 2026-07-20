@@ -19,6 +19,7 @@ const CLEAR_PHASES = new Set([
   "portalTraversal",
   "roomLoadError",
   "title",
+  "paused",
   "dead",
   "victory",
   "endingChoice",
@@ -202,6 +203,7 @@ export class DamageNumberLayer {
       this.records[index] = createRecord(node);
     }
     this.root.append(fragment);
+    this.root.hidden = false;
     this.candidate = createRecord();
     this.pending = createRecord();
     this.projectedVector = new THREE.Vector3();
@@ -258,6 +260,7 @@ export class DamageNumberLayer {
     }
     if (type === "phaseChanged") {
       const phase = event.detail?.phase;
+      this.root.hidden = phase === "paused";
       if (phase === "roomLoading") this.clear(false);
       else if (CLEAR_PHASES.has(phase)) this.clear(true);
       return false;
@@ -384,8 +387,12 @@ export class DamageNumberLayer {
   }
 
   update(dt, camera, { phase = "playing", hitStopActive = false } = {}) {
-    const frozen = phase === "paused" || hitStopActive;
-    const delta = Number.isFinite(dt) && dt > 0 && !frozen ? dt : 0;
+    this.root.hidden = phase === "paused";
+    if (this.root.hidden) {
+      this.stats.projected = 0;
+      return;
+    }
+    const delta = Number.isFinite(dt) && dt > 0 && !hitStopActive ? dt : 0;
     let projected = 0;
     for (let index = 0; index < this.records.length; index += 1) {
       const record = this.records[index];

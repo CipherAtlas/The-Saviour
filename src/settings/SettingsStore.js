@@ -1,5 +1,5 @@
 const SETTINGS_KEY = "hollow-crown-settings";
-const SETTINGS_VERSION = 4;
+const SETTINGS_VERSION = 5;
 
 export const DEFAULT_SETTINGS = Object.freeze({
   version: SETTINGS_VERSION,
@@ -19,13 +19,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
     reducedMotion: false,
   }),
   audio: Object.freeze({
-    master: 0.8,
-    music: 0.68,
+    master: 0.5,
+    music: 0.5,
     musicIntensity: 0.82,
     dynamicMusic: true,
-    sfx: 0.85,
-    ui: 0.7,
-    voice: 0.8,
+    sfx: 0.5,
+    ui: 0.5,
     muteUnfocused: true,
   }),
   gameplay: Object.freeze({
@@ -63,8 +62,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
 const ENUMS = Object.freeze({
   "graphics.shadows": ["off", "low", "medium", "high"],
   "graphics.fpsLimit": ["60", "90", "120", "unlimited"],
-  "gameplay.difficulty": ["story", "standard", "ruthless"],
-  "gameplay.lastDifficultyId": ["story", "standard", "ruthless"],
+  "gameplay.difficulty": ["relaxed", "standard", "ruthless"],
+  "gameplay.lastDifficultyId": ["relaxed", "standard", "ruthless"],
   "gameplay.chargeMode": ["hold", "toggle"],
   "accessibility.colorPalette": ["default", "deuteranopia", "tritanopia"],
   "controls.touchControls": ["auto", "on", "off"],
@@ -81,7 +80,6 @@ const RANGES = Object.freeze({
   "audio.musicIntensity": [0, 1],
   "audio.sfx": [0, 1],
   "audio.ui": [0, 1],
-  "audio.voice": [0, 1],
   "gameplay.aimAssist": [0, 1],
   "gameplay.autoTarget": [0, 1],
   "accessibility.uiScale": [0.8, 1.35],
@@ -136,15 +134,18 @@ function normalizeValue(path, value) {
 function normalizeSettings(candidate = {}) {
   const result = clone(DEFAULT_SETTINGS);
   const needsControllerDefaults = candidate.version !== SETTINGS_VERSION;
+  const source = clone(candidate);
+  if (source?.gameplay?.difficulty === "story") source.gameplay.difficulty = "relaxed";
+  if (source?.gameplay?.lastDifficultyId === "story") source.gameplay.lastDifficultyId = "relaxed";
 
   for (const path of [...Object.keys(RANGES), ...Object.keys(ENUMS), ...BOOLEAN_PATHS]) {
-    const value = readPath(candidate, path);
+    const value = readPath(source, path);
     if (value !== undefined) {
       writePath(result, path, normalizeValue(path, value));
     }
   }
 
-  const candidateBindings = candidate.controls?.bindings;
+  const candidateBindings = source.controls?.bindings;
   if (candidateBindings && typeof candidateBindings === "object") {
     for (const action of Object.keys(result.controls.bindings)) {
       const bindings = candidateBindings[action];
@@ -160,7 +161,7 @@ function normalizeSettings(candidate = {}) {
     }
   }
 
-  if (candidate.gameplay?.lastDifficultyId === undefined && candidate.gameplay?.difficulty !== undefined) {
+  if (source.gameplay?.lastDifficultyId === undefined && source.gameplay?.difficulty !== undefined) {
     result.gameplay.lastDifficultyId = result.gameplay.difficulty;
   }
 

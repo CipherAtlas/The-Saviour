@@ -10,6 +10,7 @@ import {
   PLAYER_CONFIG,
   RUN_CONFIG,
   SCYTHE_ATTACKS,
+  STRAIGHT_CHARGE_ATTACK,
 } from "../src/game/gameConfig.js";
 
 function createInput() {
@@ -63,7 +64,7 @@ function createGame(seed = "CLAIM-INTEGRATION") {
   const events = [];
   game.on((event) => events.push(event));
   game.startRun(seed);
-  while (game.phase === "dialogue") game.skipDialogue();
+  while (game.phase === "bookend") game.continueBookend();
   return { game, input, events };
 }
 
@@ -140,6 +141,36 @@ test("Harvest grants once on an empty floor and persists unspent units across ro
   empty.game.loadRoom();
   assert.equal(empty.game.combat.harvest.snapshot().units, HARVEST_CONFIG.floorMinimumUnits);
   assert.equal(empty.events.filter((event) => event.type === "harvestChanged" && event.detail.reason === "floorMinimum").length, 2);
+});
+
+test("Grave Line spends the Claim bar before hitting only enemies inside its committed lane", () => {
+  const { game, input, events } = createGame("GRAVE-LINE-INTEGRATION");
+  const [center, edge, side, behind] = prepareStationaryArena(game, [
+    { x: 7, z: 0 },
+    { x: 6, z: 1.7 },
+    { x: 6, z: 2.4 },
+    { x: -2, z: 0 },
+  ]);
+  game.rng = { chance: () => false };
+  events.length = 0;
+  input.press("attack", 1_000, true);
+  for (let frame = 0; frame < 150 && !events.some((event) => event.type === "lineChargeReleased"); frame += 1) {
+    game.updateFixed(RUN_CONFIG.fixedStep);
+  }
+  const spendIndex = events.findIndex((event) => event.type === "harvestChanged" && event.detail.reason === "lineCharge");
+  const releaseIndex = events.findIndex((event) => event.type === "lineChargeReleased");
+  assert.ok(spendIndex >= 0 && spendIndex < releaseIndex);
+  assert.equal(game.combat.harvest.snapshot().units, 0);
+  assert.equal(events[releaseIndex].detail.forced, true);
+  assert.equal(events.find((event) => event.type === "attack")?.detail.shape, "line");
+
+  for (let frame = 0; frame < 50 && events.filter((event) => event.type === "enemyHit").length < 2; frame += 1) {
+    game.updateFixed(RUN_CONFIG.fixedStep);
+  }
+  const hitIds = events.filter((event) => event.type === "enemyHit").map((event) => event.detail.id);
+  assert.deepEqual(hitIds.sort(), [center.id, edge.id].sort());
+  assert.equal(side.health, side.maxHealth);
+  assert.equal(behind.health, behind.maxHealth);
 });
 
 test("Claim spend precedes startup and swept outbound/recall hits retain action linkage and pull order", () => {
@@ -311,6 +342,7 @@ test("selective hit-stop applies the exact finisher, critical, charge, and Claim
     ["partial", chargedAttack("partial"), false, "chargePartial"],
     ["full", chargedAttack("full"), false, "chargeFull"],
     ["perfect-overlap", chargedAttack("perfect"), true, "chargePerfect"],
+    ["line", Object.freeze({ ...STRAIGHT_CHARGE_ATTACK, chargeKind: "line" }), false, "lineCharge"],
   ];
   for (const [name, attack, critical, policyName] of cases) {
     const { game, events } = createGame(`HIT-STOP-${name}`);
@@ -422,7 +454,7 @@ test("paused and non-playing updates preserve hit-stop while run, room, and term
   game.phase = "paused";
   game.updateFixed(RUN_CONFIG.fixedStep);
   assert.equal(game.hitStop.remaining(), duration);
-  game.phase = "dialogue";
+  game.phase = "bookend";
   game.updateFixed(RUN_CONFIG.fixedStep);
   assert.equal(game.hitStop.remaining(), duration);
   game.phase = "playing";
@@ -503,7 +535,7 @@ test("run and room replacement flush stale raw Claim presses before simulation",
   game.on((event) => events.push(event));
   input.press("claim", 1);
   game.startRun("STALE-RUN-EDGE");
-  while (game.phase === "dialogue") game.skipDialogue();
+  while (game.phase === "bookend") game.continueBookend();
   events.length = 0;
   game.updateFixed(RUN_CONFIG.fixedStep);
   assert.equal(events.some((event) => event.type === "claimStarted"), false);
@@ -511,7 +543,7 @@ test("run and room replacement flush stale raw Claim presses before simulation",
 
   input.press("claim", 2);
   game.loadRoom();
-  while (game.phase === "dialogue") game.skipDialogue();
+  while (game.phase === "bookend") game.continueBookend();
   events.length = 0;
   game.updateFixed(RUN_CONFIG.fixedStep);
   assert.equal(events.some((event) => event.type === "claimStarted"), false);
@@ -553,7 +585,7 @@ test("both terminal ending resolutions cancel Claim once without duplicate compl
     activateClaim(game, input, 1);
     game.beginEndingDecision(0);
     if (ending === "kill") game.tryKillPrincess(1);
-    else game.updateNarrativeClock(5_000);
+    else game.updateEndingClock(5_000);
     game.beginEndingFade(6_000);
     game.completeEnding();
     game.completeEnding();

@@ -26,7 +26,7 @@ function completedRun({ runId, difficultyId = "standard", ending = "kill", durat
   });
   stats.record({ type: "roomReady", detail: { floor: 6 } });
   stats.record({ type: "enemyHit", detail: { hitOrigin: "player", damage: 44, critical: true } });
-  stats.record({ type: "enemyDefeated", detail: { type: "wraith", origin: "princess" } });
+  stats.record({ type: "enemyDefeated", detail: { type: "wraith", origin: "volatile" } });
   stats.record({ type: "playerHit", detail: { appliedAmount: 12 } });
   stats.record({ type: "playerHealed", detail: { amount: 8 } });
   stats.record({ type: "dash" });
@@ -46,7 +46,7 @@ test("lifetime statistics aggregate finalized runs once and preserve difficulty 
   const storage = new MemoryStorage();
   const store = new StatisticsStore(storage);
   const first = completedRun({ runId: "run-1", difficultyId: "standard", ending: "kill", duration: 20 });
-  const second = completedRun({ runId: "run-2", difficultyId: "story", ending: "timeout", duration: 30 });
+  const second = completedRun({ runId: "run-2", difficultyId: "relaxed", ending: "timeout", duration: 30 });
 
   store.recordActivePlaytime(75);
   assert.equal(store.recordCompletedRun(first), true);
@@ -57,12 +57,12 @@ test("lifetime statistics aggregate finalized runs once and preserve difficulty 
   assert.equal(value.totalActivePlaytimeSeconds, 75);
   assert.equal(value.attempts, 2);
   assert.equal(value.completions.standard.kill, 1);
-  assert.equal(value.completions.story.timeout, 1);
+  assert.equal(value.completions.relaxed.timeout, 1);
   assert.equal(value.bestCompletionTimeSeconds.standard, 20);
-  assert.equal(value.bestCompletionTimeSeconds.story, 30);
+  assert.equal(value.bestCompletionTimeSeconds.relaxed, 30);
   assert.equal(value.deepestFloor.standard, 6);
   assert.equal(value.kills.byType.wraith, 2);
-  assert.equal(value.kills.byOrigin.princess, 2);
+  assert.equal(value.kills.byOrigin.volatile, 2);
   assert.equal(value.damageDealt, 88);
   assert.equal(value.damageTaken, 24);
   assert.equal(value.healingReceived, 16);

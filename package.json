@@ -1,5 +1,5 @@
 {
-  "name": "reaper-of-the-hollow-crown",
+  "name": "the-saviour",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -17,4 +17,3 @@
     "vite": "8.1.5"
   }
 }
-

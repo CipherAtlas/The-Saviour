@@ -32,7 +32,7 @@ function createGame(seed) {
   const events = [];
   game.on((event) => events.push(event));
   game.startRun(seed);
-  while (game.phase === "dialogue") game.skipDialogue();
+  while (game.phase === "bookend") game.continueBookend();
   for (const enemy of game.director.enemies) enemy.active = false;
   game.director.pendingWaves.length = 0;
   game.phase = "playing";
@@ -49,7 +49,7 @@ function damageAttempt(overrides = {}) {
     family: overrides.family ?? "circle",
     enemyId: overrides.enemyId ?? 41,
     enemyType: overrides.enemyType ?? "reaver",
-    enemyOrigin: overrides.enemyOrigin ?? "witch",
+    enemyOrigin: overrides.enemyOrigin ?? "stable",
     projectileId: overrides.projectileId ?? null,
   });
 }

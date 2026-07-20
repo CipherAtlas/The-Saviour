@@ -36,3 +36,11 @@ test("each biome exposes a distinct encounter and layout gameplay identity", () 
   assert.equal(encounterSignatures.size, Object.keys(BIOMES).length);
   assert.equal(layoutSignatures.size, Object.keys(BIOMES).length);
 });
+
+test("environment models never alternate between blocking obstacles and collisionless props", () => {
+  const obstacleModels = new Set(Object.values(BIOMES).flatMap((biome) => biome.obstacleModels));
+  const propModels = new Set(Object.values(BIOMES).flatMap((biome) => biome.propModels));
+  const conflictingModels = [...obstacleModels].filter((modelKey) => propModels.has(modelKey));
+
+  assert.deepEqual(conflictingModels, []);
+});

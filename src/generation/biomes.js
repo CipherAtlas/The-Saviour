@@ -18,8 +18,8 @@ export const BIOMES = Object.freeze({
     floorModel: "floor-stone",
     wallModel: "wall",
     decal: { style: "keep-ward", color: 0x5da6db },
-    obstacleModels: ["pillar", "pillar-decorated", "rubble-large"],
-    propModels: ["banner-red", "torch-mounted", "barrel-large", "crates-stacked", "sword-shield-broken"],
+    obstacleModels: ["pillar", "pillar-decorated", "rubble-large", "crates-stacked"],
+    propModels: ["banner-red", "torch-mounted", "barrel-large", "sword-shield-broken"],
     palette: { sky: 0x090c12, fog: 0x111823, hemisphere: 0x8fa8c1, ground: 0x251a1d, key: 0xffd49a, accent: 0x4c9bd6 },
     gameplay: {
       identity: "disciplined front lines and readable cover lanes",
@@ -33,8 +33,8 @@ export const BIOMES = Object.freeze({
     floorModel: "floor-dirt-rocky",
     wallModel: "wall-broken",
     decal: { style: "ossuary-reliquary", color: 0x70d1c9 },
-    obstacleModels: ["column", "rubble-half", "wall-cracked"],
-    propModels: ["candle-triple", "shelf-candles", "torch-lit", "rubble-large", "chest"],
+    obstacleModels: ["column", "rubble-half", "wall-cracked", "rubble-large"],
+    propModels: ["candle-triple", "shelf-candles", "torch-lit", "chest"],
     palette: { sky: 0x070d0f, fog: 0x102226, hemisphere: 0x9bc8c2, ground: 0x241b19, key: 0xe7d6ad, accent: 0x55c4bf },
     gameplay: {
       identity: "dense undead pressure anchored by shields and ritualists",
@@ -48,8 +48,8 @@ export const BIOMES = Object.freeze({
     floorModel: "floor-grate",
     wallModel: "wall-cracked",
     decal: { style: "foundry-vent", color: 0xff6a2e },
-    obstacleModels: ["pillar", "wall-broken", "crates-stacked"],
-    propModels: ["barrel-large", "barrel-small", "torch-lit", "floor-spikes", "rubble-half"],
+    obstacleModels: ["pillar", "wall-broken", "crates-stacked", "rubble-half"],
+    propModels: ["barrel-large", "barrel-small", "torch-lit", "floor-spikes"],
     palette: { sky: 0x120806, fog: 0x2b120d, hemisphere: 0xd58b67, ground: 0x25100b, key: 0xffb15c, accent: 0xff4d1f },
     gameplay: {
       identity: "mobile attackers and spaced area denial across long lanes",

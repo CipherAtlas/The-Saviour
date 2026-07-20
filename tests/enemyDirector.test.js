@@ -55,8 +55,8 @@ function poiseBreak(enemy, actionId) {
   });
 }
 
-test("Story attack budgets admit stable enemy IDs and defer excess melee pressure", () => {
-  const { director, events } = makeDirector(DIFFICULTY.story);
+test("Relaxed attack budgets admit stable enemy IDs and defer excess melee pressure", () => {
+  const { director, events } = makeDirector(DIFFICULTY.relaxed);
   const enemies = Array.from({ length: 4 }, () => {
     const enemy = director.spawnEnemy("thrall", { x: 2.4, z: 0 }, 1);
     enemy.attackCooldown = 0;
@@ -75,8 +75,8 @@ test("Story attack budgets admit stable enemy IDs and defer excess melee pressur
   assert.ok(events
     .filter(({ type }) => type === "enemyAttackDeferred")
     .every(({ detail }) => detail.reason === "familyBudget"));
-  assert.equal(enemies[0].attackWindup, ENEMY_ARCHETYPES.thrall.attacks.lunge.windup * DIFFICULTY.story.windupMultiplier);
-  assert.equal(enemies[0].maxPoise, Math.round(42 * DIFFICULTY.story.poiseMultiplier));
+  assert.equal(enemies[0].attackWindup, ENEMY_ARCHETYPES.thrall.attacks.lunge.windup * DIFFICULTY.relaxed.windupMultiplier);
+  assert.equal(enemies[0].maxPoise, Math.round(42 * DIFFICULTY.relaxed.poiseMultiplier));
 });
 
 test("Standard preserves authored windup cooldown and poise while Ruthless changes boss cadence", () => {
@@ -149,7 +149,7 @@ test("stagger defeat inactivity phase change and dismissal cannot strand leases"
 
   const dismissed = director.spawnEnemy("boneguard", { x: -3, z: 0 }, 8);
   director.beginAttack(dismissed, "shieldSlam", PLAYER.position, { x: 1, z: 0 });
-  director.dismissWitchOrigin();
+  director.dismissStableOrigin();
 
   assert.equal(director.attackCoordinator.snapshot().leases.length, 0);
   assert.deepEqual(
@@ -178,6 +178,30 @@ test("large boss damage advances through both ordered phase transitions", () => 
   assert.equal(queen.bossPhase, 3);
   assert.equal(queen.state, "phaseTransition");
   assert.deepEqual(events.filter(({ type }) => type === "bossPhaseChanged").map(({ detail }) => detail.phase), [2, 3]);
+});
+
+test("pursuit routes around an obstacle instead of pinning an enemy against its face", () => {
+  const { director } = makeDirector(DIFFICULTY.standard, "ENEMY-STUCK-REPRO");
+  director.arena = {
+    ...ARENA,
+    width: 24,
+    depth: 18,
+    obstacles: [{ x: 0, z: 0, width: 2, depth: 8 }],
+  };
+  const enemy = director.spawnEnemy("thrall", { x: -6, z: 0 }, 1, {
+    originPhase: 0,
+    formationIndex: 0,
+  });
+  enemy.attackCooldown = 999;
+  const player = {
+    position: { x: 6, z: 0 },
+    previousPosition: { x: 6, z: 0 },
+    radius: 0.58,
+  };
+
+  for (let step = 0; step < 600; step += 1) director.update(1 / 60, player, () => {});
+
+  assert.ok(enemy.position.x > 1 + enemy.radius, `enemy remained blocked at x=${enemy.position.x}`);
 });
 
 test("entering phase three dismisses Witch guards and forbids every new summon path", () => {

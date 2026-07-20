@@ -29,11 +29,64 @@ function profileFor(attack, attackKind, comboIndex) {
   return PROFILES.light;
 }
 
+function sampleStraightScytheAnimation(attack, time) {
+  const duration = Math.max(0.001, attack.duration);
+  const activeStart = Math.max(0.001, Math.min(duration, attack.activeStart));
+  const activeEnd = Math.max(activeStart + 0.001, Math.min(duration, attack.activeEnd));
+  if (time < activeStart) {
+    const progress = clamp01(time / activeStart);
+    const eased = smoothstep(progress);
+    return {
+      phase: "windup",
+      phaseProgress: progress,
+      sweepProgress: 0,
+      sweepAngle: 0,
+      poseWeight: eased,
+      scaleMultiplier: 1 + eased * 0.08,
+      bladeLift: eased * 0.72,
+      trailStrength: 0,
+      thrustProgress: 0,
+    };
+  }
+  if (time <= activeEnd) {
+    const progress = clamp01((time - activeStart) / Math.max(0.001, activeEnd - activeStart));
+    const thrustProgress = easeOutCubic(progress);
+    const pulse = Math.sin(progress * Math.PI);
+    return {
+      phase: "active",
+      phaseProgress: progress,
+      sweepProgress: thrustProgress,
+      sweepAngle: 0,
+      poseWeight: 1,
+      scaleMultiplier: 1.08 + pulse * 0.12,
+      bladeLift: 0.72 - thrustProgress * 0.94,
+      trailStrength: 0.64 + pulse * 0.36,
+      thrustProgress,
+    };
+  }
+  const progress = clamp01((time - activeEnd) / Math.max(0.001, duration - activeEnd));
+  const eased = smoothstep(progress);
+  return {
+    phase: "recovery",
+    phaseProgress: progress,
+    sweepProgress: 1,
+    sweepAngle: 0,
+    poseWeight: 1 - eased,
+    scaleMultiplier: 1 + (1 - progress) * 0.08,
+    bladeLift: -0.22 + eased * 0.22,
+    trailStrength: 0.34 * (1 - progress),
+    thrustProgress: 1,
+  };
+}
+
 export function samplePlayerScytheAnimation(attack, attackTime, options = {}) {
   const duration = Math.max(0.001, attack.duration);
   const activeStart = Math.max(0.001, Math.min(duration, attack.activeStart));
   const activeEnd = Math.max(activeStart + 0.001, Math.min(duration, attack.activeEnd));
   const time = clamp01(attackTime / duration) * duration;
+  if (attack.shape === "line" || options.attackKind === "line") {
+    return sampleStraightScytheAnimation(attack, time);
+  }
   const arc = Math.max(0.001, options.arcOverride ?? attack.arc);
   const swing = Math.sign(attack.swing ?? 1) || 1;
   const profile = profileFor(attack, options.attackKind, options.comboIndex);

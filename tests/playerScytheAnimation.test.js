@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CLAIM_CONFIG, SCYTHE_ATTACKS } from "../src/game/gameConfig.js";
+import { CLAIM_CONFIG, SCYTHE_ATTACKS, STRAIGHT_CHARGE_ATTACK } from "../src/game/gameConfig.js";
 import { samplePlayerScytheAnimation, sampleReapersClaimAnimation } from "../src/rendering/playerScytheAnimation.js";
 
 function closeTo(actual, expected, tolerance = 0.000001) {
@@ -126,6 +126,18 @@ test("an assisted ground arc uses the same sampler without changing combat data"
   closeTo(start.sweepAngle, -assistedArc / 2);
   closeTo(end.sweepAngle, assistedArc / 2);
   closeTo(attack.arc, originalArc);
+});
+
+test("Grave Line keeps the physical scythe on-axis through windup, strike, and recovery", () => {
+  const attack = STRAIGHT_CHARGE_ATTACK;
+  const times = [0, attack.activeStart, (attack.activeStart + attack.activeEnd) / 2, attack.activeEnd, attack.duration];
+  const poses = times.map((time) => samplePlayerScytheAnimation(attack, time, { attackKind: "line" }));
+  assert.deepEqual(poses.map((pose) => pose.sweepAngle), [0, 0, 0, 0, 0]);
+  assert.equal(poses[0].phase, "windup");
+  assert.equal(poses[2].phase, "active");
+  assert.equal(poses.at(-1).phase, "recovery");
+  assert.ok(poses[2].trailStrength > 0.9);
+  assert.ok(poses[1].bladeLift > poses[3].bladeLift);
 });
 
 test("Claim phase boundaries and midpoints seek distinct synchronized body contracts", () => {

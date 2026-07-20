@@ -42,7 +42,7 @@ function enemy(id, type = "thrall", overrides = {}) {
   return {
     id,
     type,
-    origin: "witch",
+    origin: "stable",
     originPhase: 0,
     active: true,
     dismissed: false,

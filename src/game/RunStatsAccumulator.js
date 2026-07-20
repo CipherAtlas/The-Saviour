@@ -1,11 +1,11 @@
-const RUN_STATS_VERSION = 1;
-const DIFFICULTY_IDS = Object.freeze(["story", "standard", "ruthless"]);
+const RUN_STATS_VERSION = 2;
+const DIFFICULTY_IDS = Object.freeze(["relaxed", "standard", "ruthless"]);
 const PATH_IDS = Object.freeze(["Reaper", "Shade", "Grave"]);
-const ORIGIN_IDS = Object.freeze(["witch", "princess"]);
+const ORIGIN_IDS = Object.freeze(["stable", "volatile"]);
 const RUN_TIME_PHASES = new Set([
   "playing",
   "portalTraversal",
-  "dialogue",
+  "bookend",
   "endingChoice",
   "endingStrike",
   "endingFade",

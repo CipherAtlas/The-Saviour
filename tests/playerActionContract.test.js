@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { BLESSINGS } from "../src/game/blessings.js";
 import { Game } from "../src/game/Game.js";
-import { NARRATIVE_TIMING, PLAYER_CONFIG, RUN_CONFIG, SCYTHE_ATTACKS } from "../src/game/gameConfig.js";
+import { ENDING_TIMING, PLAYER_CONFIG, RUN_CONFIG, SCYTHE_ATTACKS } from "../src/game/gameConfig.js";
 import { RUN_UPGRADES } from "../src/game/runUpgrades.js";
 
 function createInput() {
@@ -52,7 +52,7 @@ function createGame(seed) {
   const events = [];
   game.on((event) => events.push(event));
   game.startRun(seed);
-  while (game.phase === "dialogue") game.skipDialogue();
+  while (game.phase === "bookend") game.continueBookend();
   return { game, input, events };
 }
 
@@ -65,16 +65,16 @@ function damageAttempt(overrides = {}) {
     family: overrides.family ?? "circle",
     enemyId: overrides.enemyId ?? null,
     enemyType: overrides.enemyType ?? "reaver",
-    enemyOrigin: overrides.enemyOrigin ?? "witch",
+    enemyOrigin: overrides.enemyOrigin ?? "stable",
     projectileId: overrides.projectileId ?? null,
   });
 }
 
 test("actor-facing timing and hit severity thresholds are deeply frozen and ordered", () => {
-  const strike = NARRATIVE_TIMING.endingStrike;
+  const strike = ENDING_TIMING.endingStrike;
   assert.deepEqual(strike, { A0: 0, T: 0.14, C: 0.34, R: 0.78 });
   assert.ok(strike.A0 < strike.T && strike.T < strike.C && strike.C < strike.R);
-  assert.equal(Object.isFrozen(NARRATIVE_TIMING), true);
+  assert.equal(Object.isFrozen(ENDING_TIMING), true);
   assert.equal(Object.isFrozen(strike), true);
   assert.equal(Object.isFrozen(PLAYER_CONFIG.hitSeverity), true);
   assert.ok(PLAYER_CONFIG.hitSeverity.heavyThresholdRatio > 0);
@@ -242,7 +242,7 @@ test("Death Defiance cancels Claim and every player action before one immutable 
 
 test("kill resolution runs one fixed-step ending strike and preserves coarse-step event order", () => {
   const { game, input, events } = createGame("ENDING-STRIKE-ACTION-CONTRACT");
-  game.resetNarrativeState();
+  game.resetPresentationState();
   events.length = 0;
   game.beginEndingDecision(1_000);
   events.length = 0;
@@ -252,14 +252,14 @@ test("kill resolution runs one fixed-step ending strike and preserves coarse-ste
   assert.equal(game.tryKillPrincess(1_002), false);
   const actionId = events.find((event) => event.type === "endingStrikeStarted").detail.actionId;
   assert.equal(events.some((event) => event.type === "princessStruck"), false);
-  game.updateNarrativeClock(1_000_000);
+  game.updateEndingClock(1_000_000);
   assert.equal(game.endingStrike.elapsed, 0);
 
   assert.equal(game.togglePause(2_000), true);
-  game.updateFixed(NARRATIVE_TIMING.endingStrike.R);
+  game.updateFixed(ENDING_TIMING.endingStrike.R);
   assert.equal(game.endingStrike.elapsed, 0);
   assert.equal(game.togglePause(3_000), true);
-  game.updateFixed(NARRATIVE_TIMING.endingStrike.R);
+  game.updateFixed(ENDING_TIMING.endingStrike.R);
 
   const ordered = events
     .filter((event) => ["endingChoiceResolved", "endingStrikeStarted", "princessStruck", "endingStrikeCompleted"].includes(event.type));
@@ -270,12 +270,12 @@ test("kill resolution runs one fixed-step ending strike and preserves coarse-ste
     "endingStrikeCompleted",
   ]);
   assert.ok(ordered.slice(1).every((event) => event.detail.actionId === actionId));
-  assert.equal(ordered[2].detail.contact, NARRATIVE_TIMING.endingStrike.C);
-  assert.equal(ordered[3].detail.elapsed, NARRATIVE_TIMING.endingStrike.R);
+  assert.equal(ordered[2].detail.contact, ENDING_TIMING.endingStrike.C);
+  assert.equal(ordered[3].detail.elapsed, ENDING_TIMING.endingStrike.R);
   assert.ok(ordered.every((event) => Object.isFrozen(event.detail)));
   assert.equal(Object.isFrozen(ordered[1].detail.timing), true);
-  assert.equal(game.phase, "dialogue");
-  assert.equal(game.activeNarrative.id, "ending.kill");
+  assert.equal(game.phase, "bookend");
+  assert.equal(game.activeBookend, "ending.kill");
   assert.ok(input.flushed.length > 0);
 
   const uiSource = readFileSync(new URL("../src/ui/GameUi.js", import.meta.url), "utf8");

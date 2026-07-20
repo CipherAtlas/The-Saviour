@@ -3,6 +3,7 @@ import test from "node:test";
 import { RunSessionController } from "../src/game/RunSessionController.js";
 import { RunStatsAccumulator } from "../src/game/RunStatsAccumulator.js";
 import { SettingsStore } from "../src/settings/SettingsStore.js";
+import { SpeedrunRecordsStore } from "../src/settings/SpeedrunRecordsStore.js";
 import { StatisticsStore } from "../src/settings/StatisticsStore.js";
 import {
   SUSPENDED_RUN_KEY,
@@ -44,11 +45,15 @@ function runDraft({
 function roomOneSnapshot({
   seed = "SESSION-SEED",
   difficultyId = "standard",
+  runType = "normal",
+  speedrun = { elapsedSeconds: 0, finished: false },
   statisticsDraft = runDraft({ seed, difficultyId }),
 } = {}) {
   return {
     seed,
     difficultyId,
+    runType,
+    speedrun,
     nextFloor: 1,
     nextRoom: 1,
     player: { health: 130 },
@@ -59,8 +64,6 @@ function roomOneSnapshot({
     blessingIds: [],
     rerollsUsedByFloor: Array(10).fill(0),
     runFlags: {},
-    seenRunSequenceIds: [],
-    completedUpgradeSequenceIds: [],
     statisticsDraft,
   };
 }
@@ -71,24 +74,29 @@ class FakeGame {
     this.startedSeeds = [];
     this.resumedSnapshots = [];
     this.createdDrafts = [];
+    this.startedRunTypes = [];
     this.returnToTitleCount = 0;
     this.abandonCount = 0;
   }
 
-  startRun(seed) {
+  startRun(seed, options = {}) {
     this.startedSeeds.push(seed);
+    this.startedRunTypes.push(options.runType ?? "normal");
   }
 
   resumeRun(snapshot) {
     this.resumedSnapshots.push(snapshot);
+    this.startedRunTypes.push(snapshot.runType ?? "normal");
     return this.resumeResult;
   }
 
-  createSuspendedRunSnapshot(statisticsDraft) {
+  createSuspendedRunSnapshot(statisticsDraft, speedrun) {
     this.createdDrafts.push(statisticsDraft);
     return roomOneSnapshot({
       seed: statisticsDraft.seed,
       difficultyId: statisticsDraft.difficultyId,
+      runType: this.startedRunTypes.at(-1) ?? "normal",
+      speedrun,
       statisticsDraft,
     });
   }
@@ -107,16 +115,18 @@ function harness({ storage = new MemoryStorage(), game = new FakeGame(), platfor
   const settings = new SettingsStore(storage);
   const suspendedRuns = new SuspendedRunStore(storage, { now: () => 45_000 });
   const statistics = new StatisticsStore(storage);
+  const speedrunRecords = new SpeedrunRecordsStore(storage);
   const controller = new RunSessionController({
     game,
     settings,
     suspendedRuns,
     statistics,
+    speedrunRecords,
     now: () => 42_000,
     runIdFactory: (seed, now) => `run:${seed}:${now}`,
     platform,
   });
-  return { controller, game, settings, statistics, storage, suspendedRuns };
+  return { controller, game, settings, speedrunRecords, statistics, storage, suspendedRuns };
 }
 
 test("a new run clears an old suspend and the first arena boundary replaces it", () => {
@@ -124,10 +134,10 @@ test("a new run clears an old suspend and the first arena boundary replaces it",
   assert.equal(context.suspendedRuns.save(roomOneSnapshot({ seed: "OLD-SEED" })), true);
   assert.equal(context.controller.titleState().continueRun.floor, 1);
 
-  assert.equal(context.controller.startNewRun("NEW-SEED", "story"), true);
+  assert.equal(context.controller.startNewRun("NEW-SEED", "relaxed"), true);
   assert.equal(context.suspendedRuns.loadValid(), null);
   assert.deepEqual(context.game.startedSeeds, ["NEW-SEED"]);
-  assert.equal(context.settings.get("gameplay.difficulty"), "story");
+  assert.equal(context.settings.get("gameplay.difficulty"), "relaxed");
 
   assert.equal(context.controller.handleEvent({ type: "dash", detail: {} }), true);
   assert.equal(context.suspendedRuns.loadValid(), null);
@@ -138,7 +148,7 @@ test("a new run clears an old suspend and the first arena boundary replaces it",
 
   const replacement = context.suspendedRuns.loadValid();
   assert.equal(replacement.seed, "NEW-SEED");
-  assert.equal(replacement.difficultyId, "story");
+  assert.equal(replacement.difficultyId, "relaxed");
   assert.equal(replacement.statisticsDraft.actions.dashes, 1);
   assert.equal(context.game.createdDrafts.length, 1);
 });
@@ -223,13 +233,78 @@ test("foreground playtime excludes paused and background samples", () => {
   assert.equal(context.controller.sampleTime(5, "playing", true), true);
   assert.equal(context.controller.sampleTime(4, "paused", true), true);
   assert.equal(context.controller.sampleTime(7, "playing", false), false);
-  assert.equal(context.controller.sampleTime(3, "dialogue", true), true);
+  assert.equal(context.controller.sampleTime(3, "bookend", true), true);
 
   const draft = context.controller.activeRun.snapshotDraft();
   assert.equal(draft.durationSeconds, 8);
   assert.equal(draft.combatSeconds, 5);
   assert.equal(draft.activePlaytimeSeconds, 8);
   assert.equal(context.statistics.getSnapshot().totalActivePlaytimeSeconds, 8);
+});
+
+test("Speedrun enforces Ruthless, times every active decision phase, freezes on Witch death, and records separately", () => {
+  const context = harness();
+  assert.equal(context.settings.get("gameplay.difficulty"), "standard");
+  assert.equal(context.controller.startSpeedrun("SPEED-SEED"), true);
+  assert.deepEqual(context.game.startedRunTypes, ["speedrun"]);
+  assert.equal(context.settings.get("gameplay.difficulty"), "standard");
+
+  context.controller.sampleTime(1, "playing", true);
+  context.controller.sampleTime(2, "reward", true);
+  context.controller.sampleTime(3, "blessing", true);
+  context.controller.sampleTime(4, "portalTraversal", true);
+  context.controller.sampleTime(5, "roomLoading", true);
+  context.controller.sampleTime(6, "paused", true);
+  context.controller.sampleTime(7, "playing", false);
+  assert.deepEqual(context.controller.speedrunSnapshot(), {
+    active: true,
+    elapsedSeconds: 10,
+    finished: false,
+  });
+
+  context.controller.handleEvent({ type: "enemyDefeated", detail: { type: "queen", origin: "stable" } });
+  context.controller.sampleTime(5, "playing", true);
+  assert.equal(context.controller.speedrunSnapshot().elapsedSeconds, 10);
+  assert.equal(context.controller.speedrunSnapshot().finished, true);
+  context.controller.handleEvent({
+    type: "runEnded",
+    detail: { completed: true, victory: true, ending: "kill", runType: "speedrun" },
+  });
+
+  assert.equal(context.statistics.getSnapshot().attempts, 0);
+  assert.equal(context.statistics.getSnapshot().totalActivePlaytimeSeconds, 0);
+  assert.deepEqual(context.speedrunRecords.getSnapshot().best, {
+    timeSeconds: 10,
+    seed: "SPEED-SEED",
+    ending: "kill",
+  });
+  assert.equal(context.controller.lastRunSummary().runType, "speedrun");
+  assert.equal(context.controller.lastRunSummary().speedrunTimeSeconds, 10);
+  assert.equal(context.controller.lastRunSummary().isPersonalBest, true);
+});
+
+test("Speedrun continuation restores its run type and elapsed clock without changing normal difficulty", () => {
+  const context = harness();
+  context.controller.startSpeedrun("SPEED-CONTINUE");
+  context.controller.sampleTime(12.34, "playing", true);
+  context.controller.handleEvent({ type: "arenaChanged", detail: { floor: 1, room: 1, boss: false } });
+  assert.equal(context.controller.suspendToTitle(), true);
+  assert.deepEqual(context.controller.titleState().continueRun, {
+    difficultyId: "ruthless",
+    runType: "speedrun",
+    elapsedSeconds: 12.34,
+    floor: 1,
+    room: 1,
+    savedAt: 45_000,
+  });
+
+  assert.equal(context.controller.continueRun(), true);
+  assert.equal(context.settings.get("gameplay.difficulty"), "standard");
+  assert.deepEqual(context.controller.speedrunSnapshot(), {
+    active: true,
+    elapsedSeconds: 12.34,
+    finished: false,
+  });
 });
 
 test("suspending to title preserves Continue and releases the active session", () => {

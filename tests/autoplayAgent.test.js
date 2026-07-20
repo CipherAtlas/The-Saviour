@@ -183,13 +183,13 @@ test("projectile evasion is redirected away from an arena corner", () => {
   assert.ok(intents[0].worldMove.z > 0.1);
 });
 
-test("dialogue, reward, blessing, and portal phases use only their public action contracts", () => {
-  const dialogue = createAgent(createState({
-    phase: "dialogue",
-    dialogue: { active: true },
+test("bookend, reward, blessing, and portal phases use only their public action contracts", () => {
+  const bookend = createAgent(createState({
+    phase: "bookend",
+    bookend: { active: true },
   }));
-  dialogue.agent.tick(1 / 60);
-  assert.deepEqual(dialogue.intents[0].uiAction, { type: "continueDialogue" });
+  bookend.agent.tick(1 / 60);
+  assert.deepEqual(bookend.intents[0].uiAction, { type: "continueBookend" });
 
   const ending = createAgent(createState({ phase: "endingChoice", ending: { stage: "decision" } }));
   ending.agent.tick(1 / 60);
@@ -266,13 +266,9 @@ test("the reporter emits a serializable full-run assessment", () => {
   reporter.recordEvent({ type: "enemyHit", detail: { type: "wraith", damage: 35, critical: true } });
   reporter.recordEvent({ type: "enemyDefeated", detail: { type: "wraith" } });
   reporter.recordEvent({ type: "playerHit", detail: { amount: 12, source: "wraith" } });
-  reporter.recordEvent({ type: "dialogueStarted", detail: { sequenceId: "opening.ring" } });
-  reporter.recordEvent({ type: "roomRewardOffered", detail: {
-    dialogue: [{ sequenceId: "floor.f01.upgrade.r01" }],
-  } });
-  reporter.recordEvent({ type: "blessingOffered", detail: {
-    dialogue: [{ sequenceId: "floor.f01.upgrade.threshold" }],
-  } });
+  reporter.recordEvent({ type: "bookendStarted", detail: { sequenceId: "intro" } });
+  reporter.recordEvent({ type: "roomRewardOffered", detail: {} });
+  reporter.recordEvent({ type: "blessingOffered", detail: {} });
   reporter.recordEvent({ type: "roomCleared", detail: { floor: 1, room: 1 } }, 24);
   reporter.recordEvent({ type: "roomRewardChosen", detail: {
     floor: 1, room: 1, id: "whetted-crescent", name: "Whetted Crescent", path: "Reaper", rank: 1,
@@ -309,11 +305,7 @@ test("the reporter emits a serializable full-run assessment", () => {
   assert.equal(report.progression.rooms[0].clearSeconds, 24);
   assert.equal(report.progression.chamberRewards.length, 1);
   assert.equal(report.progression.pathRanks.Reaper, 1);
-  assert.deepEqual(report.progression.narrativeSequences, [
-    "opening.ring",
-    "floor.f01.upgrade.r01",
-    "floor.f01.upgrade.threshold",
-  ]);
+  assert.deepEqual(report.progression.bookendSequences, ["intro"]);
   assert.equal(report.performance.fpsP05, 72);
   assert.equal(report.experience.recommendations.some((item) => item.category === "performance"), false);
   assert.ok(report.experience.whatWasGood.length > 0);

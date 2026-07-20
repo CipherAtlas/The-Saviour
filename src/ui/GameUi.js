@@ -1,24 +1,27 @@
-import { GLOSSARY_ENTRIES, GLOSSARY_UNLOCK_NOTIFICATION } from "../game/glossaryContent.js";
 import { createRunSeed } from "../generation/seededRandom.js";
-import { DIFFICULTY, PLAYER_CONFIG } from "../game/gameConfig.js";
+import { DIFFICULTY, PLAYER_CONFIG, STRAIGHT_CHARGE_CONFIG } from "../game/gameConfig.js";
 import {
-  characterArtAsset,
-  narrativeBackgroundAsset,
-  NarrativeImageReadinessCache,
-  NARRATIVE_SCENE_IMAGE_CACHE_LIMIT,
-  prepareNarrativeImage,
-} from "../game/narrativeAssetManifest.js";
+  bookendBackgroundAsset,
+  bookendCharacterAsset,
+  BookendImageCache,
+  prepareBookendImage,
+} from "../game/bookendAssetManifest.js";
 import { publicAssetUrl } from "../publicAssetUrl.js";
+import { AnimatedLogo } from "./AnimatedLogo.js";
 
 const HARVEST_MAX_UNITS = 300;
 const HARVEST_UNITS_PER_SEGMENT = 100;
-const DIALOGUE_HISTORY_RENDER_LIMIT = 120;
 const CLAIM_STATUS = Object.freeze({
   outbound: "Throw",
   recalling: "Recall",
   empoweredWindow: "Catch attack",
   empoweredCleave: "Cleave",
   recovery: "Recover",
+});
+const DIFFICULTY_MENU_COPY = Object.freeze({
+  relaxed: "More recovery. Fewer threats.",
+  standard: "The intended experience.",
+  ruthless: "Faster threats. Less mercy.",
 });
 
 function clamp01(value) {
@@ -33,6 +36,16 @@ function formatDuration(seconds) {
   return hours > 0
     ? `${hours}h ${String(minutes).padStart(2, "0")}m`
     : `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+export function formatSpeedrunTime(seconds) {
+  const totalHundredths = Math.max(0, Math.floor((Number(seconds) || 0) * 100 + 0.000001));
+  const hours = Math.floor(totalHundredths / 360_000);
+  const minutes = Math.floor((totalHundredths % 360_000) / 6_000);
+  const remainderSeconds = Math.floor((totalHundredths % 6_000) / 100);
+  const hundredths = totalHundredths % 100;
+  const clock = `${String(minutes).padStart(2, "0")}:${String(remainderSeconds).padStart(2, "0")}.${String(hundredths).padStart(2, "0")}`;
+  return hours > 0 ? `${hours}:${clock}` : clock;
 }
 
 function titleCaseId(value) {
@@ -95,20 +108,35 @@ export function adjustFocusedMenuControl(control, direction) {
   return false;
 }
 
-export function combatResourceViewModel(harvest = {}, claim = {}) {
+export function combatResourceViewModel(harvest = {}, claim = {}, primaryCharge = {}) {
   const units = Math.max(0, Math.min(HARVEST_MAX_UNITS, Math.floor(Number(harvest.units) || 0)));
   const filledSegments = Math.floor(units / HARVEST_UNITS_PER_SEGMENT);
-  const phase = claim.phase ?? "idle";
-  const claimStatus = phase === "idle"
-    ? filledSegments > 0 ? "Ready" : "Empty"
-    : CLAIM_STATUS[phase] ?? "Recover";
+  const chargingLine = primaryCharge.chargingPrimary === true;
+  const chargeRatio = chargingLine
+    ? clamp01(Number(primaryCharge.primaryCharge) / STRAIGHT_CHARGE_CONFIG.buildupDuration)
+    : 0;
+  const claimPhase = claim.phase ?? "idle";
+  const phase = chargingLine ? "lineCharge" : claimPhase;
+  const claimStatus = chargingLine
+    ? `Grave Line ${Math.round(chargeRatio * 100)}%`
+    : claimPhase === "idle"
+      ? filledSegments > 0 ? "Ready" : "Empty"
+      : CLAIM_STATUS[claimPhase] ?? "Recover";
+  const chargeSegmentIndex = chargingLine ? Math.max(0, filledSegments - 1) : -1;
   const segments = Array.from({ length: 3 }, (_, index) => {
     const segmentUnits = Math.max(0, Math.min(HARVEST_UNITS_PER_SEGMENT, units - index * HARVEST_UNITS_PER_SEGMENT));
+    if (index === chargeSegmentIndex) {
+      return {
+        state: "charging",
+        fillPercent: Math.round(chargeRatio * 100),
+        marker: chargeRatio >= 0.98 ? "◆" : "▶",
+      };
+    }
     const state = segmentUnits === 0
       ? "empty"
       : segmentUnits < HARVEST_UNITS_PER_SEGMENT
         ? "partial"
-        : phase === "idle" ? "ready" : "filled";
+        : claimPhase === "idle" ? "ready" : "filled";
     return {
       state,
       fillPercent: segmentUnits,
@@ -123,43 +151,39 @@ export function combatResourceViewModel(harvest = {}, claim = {}) {
     segments,
     unitsText: `${units} / ${HARVEST_MAX_UNITS} units`,
     filledText: `${filledSegments} / 3 filled`,
-    ariaValueText: `${units} of ${HARVEST_MAX_UNITS} Harvest units; ${filledSegments} of 3 segments filled; Claim ${claimStatus}`,
+    ariaValueText: `${units} of ${HARVEST_MAX_UNITS} Harvest units; ${filledSegments} of 3 segments filled; ${chargingLine ? claimStatus : `Claim ${claimStatus}`}`,
   };
 }
 
 export class GameUi {
-  constructor(root, game, settings, input, audio, settingsMenu, narrativeProgress, runSession = null) {
+  constructor(root, game, settings, input, audio, settingsMenu, runSession = null) {
     this.root = root;
     this.game = game;
     this.settings = settings;
     this.input = input;
     this.audio = audio;
     this.settingsMenu = settingsMenu;
-    this.narrativeProgress = narrativeProgress;
     this.runSession = runSession;
     this.assetsReady = false;
+    this.loadFailed = false;
+    this.visiblePhase = game.phase;
+    this.loadingTransitionToken = 0;
     this.menuOverlay = null;
     this.menuReturnFocus = null;
     this.pendingRunSeed = null;
     this.lastMessageTimer = null;
     this.harvestFeedbackTimer = null;
     this.harvestFeedbackState = "";
-    this.lastGlossaryToastTimer = null;
     this.lastDashPercent = -1;
     this.lastDashLabel = "";
     this.lastCombatResourceSignature = "";
-    this.glossaryTrigger = null;
-    this.glossaryUnlocked = this.narrativeProgress?.isGlossaryUnlocked?.() === true;
-    this.activeGlossaryEntryId = Object.values(GLOSSARY_ENTRIES)[0]?.id ?? null;
+    this.lastSpeedrunClock = "";
     this.endingOutcome = null;
-    this.dialogueFocusSequenceId = null;
-    this.dialogueOverlayReturnFocus = null;
-    this.dialogueArtBeatId = null;
-    this.dialogueArtToken = 0;
-    this.dialoguePreloadSequenceId = null;
-    this.dialogueImageCache = new NarrativeImageReadinessCache({
-      maxEntries: NARRATIVE_SCENE_IMAGE_CACHE_LIMIT,
-    });
+    this.bookendFocusSequenceId = null;
+    this.bookendArtBeatId = null;
+    this.bookendArtToken = 0;
+    this.bookendPreloadSequenceId = null;
+    this.bookendImageCache = new BookendImageCache();
     this.activeInputDevice = this.input.activeDevice ?? "keyboardMouse";
     this.build();
     this.harvestMeter = this.root.querySelector("[data-hud='harvest-meter']");
@@ -172,15 +196,12 @@ export class GameUi {
     this.bindActions();
     this.setupTouchControls();
     this.updateControlsHint(this.activeInputDevice);
-    this.updateDialogueInputHint(this.activeInputDevice);
+    this.updateBookendInputHint(this.activeInputDevice);
     this.input.onActiveDeviceChanged?.((event) => {
       this.activeInputDevice = event.detail?.current ?? event.detail?.device ?? null;
       this.updateControlsHint(this.activeInputDevice);
-      this.updateDialogueInputHint(this.activeInputDevice);
+      this.updateBookendInputHint(this.activeInputDevice);
     });
-    this.renderGlossary();
-    this.updateGlossaryAccess();
-    this.narrativeProgress?.subscribe?.(() => this.updateGlossaryAccess());
     this.applySettings(settings.getAll());
     this.showPhase(game.phase);
     this.refreshTitleState();
@@ -189,6 +210,8 @@ export class GameUi {
   build() {
     const titleBackgroundUrl = publicAssetUrl("assets/vn/backgrounds/dungeon-threshold.png");
     const titlePrinceUrl = publicAssetUrl("assets/vn/zephyr-c-determined.png");
+    const brandIconUrl = publicAssetUrl("assets/branding/the-saviour-icon.png");
+    const upgradeDialBackgroundUrl = publicAssetUrl("assets/ui/upgrade-scythe-dial-background.png");
     this.root.style.setProperty("--menu-panel-background-image", `url("${titleBackgroundUrl}")`);
     this.root.insertAdjacentHTML("afterbegin", `
       <section class="screen title-screen" data-screen="title" aria-labelledby="title-heading">
@@ -199,34 +222,51 @@ export class GameUi {
           <div class="title-motes"><i></i><i></i><i></i><i></i><i></i></div>
         </div>
         <div class="title-content">
-          <p class="eyebrow">A scythe-combat action roguelite</p>
-          <h1 id="title-heading"><span>Reaper</span><span class="title-bridge">of the</span><span>Hollow Crown</span></h1>
+          <div class="title-brand-logo" data-logo-slot="title"></div>
+          <h1 id="title-heading"><span>The Saviour</span></h1>
           <p class="title-copy">Ten floors. One stolen princess. A Witch waiting below. Follow the bond, cut through the dark, and learn what devotion cannot see.</p>
-          <div class="load-status" data-loading>
-            <div class="load-status-line"><span data-loading-label>Preparing the descent</span><span data-loading-percent>0%</span></div>
-            <div class="load-track"><div class="load-fill" data-loading-bar></div></div>
-          </div>
           <nav class="title-actions" aria-label="Main menu">
-            <button class="button primary hidden" data-action="continue-run" data-menu-index="01" disabled>Continue</button>
-            <button class="button title-new-run" data-action="new-run" data-menu-index="02" disabled>Preparing models…</button>
-            <button class="button title-utility" data-action="open-records" data-menu-index="03">Records</button>
-            <button class="button title-utility glossary-title-button locked" data-action="open-glossary" data-menu-index="04" disabled aria-describedby="glossary-lock-note">Glossary · Locked</button>
-            <button class="button title-utility" data-action="open-settings" data-menu-index="05">Settings</button>
-            <button class="button title-utility" data-action="open-credits" data-menu-index="06">Credits</button>
-            <button class="button title-utility hidden" data-action="quit" data-menu-index="07">Quit</button>
+            <button class="button primary hidden" data-action="continue-run" disabled>Continue</button>
+            <button class="button title-new-run" data-action="new-run" disabled>Preparing models…</button>
+            <button class="button title-speedrun" data-action="speedrun" disabled>Preparing models…</button>
+            <button class="button title-utility" data-action="open-records">Records</button>
+            <button class="button title-utility" data-action="open-settings">Settings</button>
+            <button class="button title-utility" data-action="open-credits">Credits</button>
+            <button class="button title-utility hidden" data-action="quit">Quit</button>
           </nav>
-          <p class="glossary-lock-note" id="glossary-lock-note">Recovered records become available after an ending.</p>
           <p class="title-status" data-title-status role="status" aria-live="polite"></p>
         </div>
       </section>
 
+      <section class="screen loading-screen hidden" data-screen="loading" role="status" aria-label="Loading The Saviour">
+        <div class="loading-brand-logo" data-logo-slot="loading"></div>
+      </section>
+
       <section class="modal menu-modal hidden" data-screen="difficulty" data-menu-overlay role="dialog" aria-modal="true" aria-labelledby="difficulty-title">
         <div class="panel menu-panel difficulty-panel">
-          <p class="eyebrow">Choose the pressure</p>
-          <h2 id="difficulty-title">Difficulty</h2>
-          <p class="panel-copy">The full story and every mechanic remain present. This choice is locked until the descent ends.</p>
+          <header class="difficulty-heading">
+            <h2 id="difficulty-title">Difficulty</h2>
+          </header>
           <div class="difficulty-grid" data-difficulty-grid></div>
-          <button class="button quiet" data-action="close-menu">Back</button>
+          <button class="button quiet difficulty-back" data-action="close-menu">Back</button>
+        </div>
+      </section>
+
+      <section class="modal menu-modal hidden" data-screen="speedrun-rules" data-menu-overlay role="dialog" aria-modal="true" aria-labelledby="speedrun-rules-title">
+        <div class="panel menu-panel speedrun-rules-panel">
+          <p class="eyebrow">Race the Hollow Realm</p>
+          <h2 id="speedrun-rules-title">Speedrun</h2>
+          <p class="panel-copy">The full ten-floor descent, stripped to combat and build decisions.</p>
+          <dl class="speedrun-rules">
+            <div><dt>Bookends</dt><dd>Intro and ending VN skipped</dd></div>
+            <div><dt>Pressure</dt><dd>Fixed Ruthless balance</dd></div>
+            <div><dt>Clock starts</dt><dd>First playable frame</dd></div>
+            <div><dt>Clock includes</dt><dd>Combat, portals, upgrades, and blessings</dd></div>
+            <div><dt>Clock stops</dt><dd>The instant the Witch dies</dd></div>
+            <div><dt>Finale</dt><dd>Five-second decision remains, untimed</dd></div>
+          </dl>
+          <p class="speedrun-rules-note">Speedrun records remain separate from standard descents.</p>
+          <div class="button-row"><button class="button primary" data-action="start-speedrun">Start Speedrun</button><button class="button quiet" data-action="close-menu">Back</button></div>
         </div>
       </section>
 
@@ -244,7 +284,7 @@ export class GameUi {
           <div class="credits-content">
             <section><span class="credits-index" aria-hidden="true">01</span><div><h3>Music</h3><p>“Lamentation,” “Darkest Child,” “Darkest Child var A,” “Constancy” Parts One–Three, “Death of Kings,” and “Unlight” by Kevin MacLeod (incompetech.com), licensed under Creative Commons Attribution 4.0.</p></div></section>
             <section><span class="credits-index" aria-hidden="true">02</span><div><h3>Characters and dungeon models</h3><p>KayKit packs by Kay Lousberg, licensed CC0 1.0 Universal.</p></div></section>
-            <section><span class="credits-index" aria-hidden="true">03</span><div><h3>Narrative and menu illustration</h3><p>Project-original production based on the approved character and scene direction.</p></div></section>
+            <section><span class="credits-index" aria-hidden="true">03</span><div><h3>Bookend and menu illustration</h3><p>Project-original production based on the approved character and scene direction.</p></div></section>
             <p class="credits-license">Full attribution, source links, modifications, and checksums are recorded in <code>public/assets/LICENSES.md</code>.</p>
           </div>
         </div>
@@ -275,7 +315,7 @@ export class GameUi {
                 <span>Harvest</span>
                 <span data-hud="harvest-units">0 / 300 units</span>
               </div>
-              <div class="harvest-meter" role="progressbar" aria-label="Harvest for Reaper's Claim" aria-valuemin="0" aria-valuemax="300" aria-valuenow="0" aria-valuetext="0 of 300 Harvest units; 0 of 3 segments filled; Claim Empty" data-hud="harvest-meter">
+              <div class="harvest-meter" role="progressbar" aria-label="Harvest for Reaper's Claim and Grave Line" aria-valuemin="0" aria-valuemax="300" aria-valuenow="0" aria-valuetext="0 of 300 Harvest units; 0 of 3 segments filled; Claim Empty" data-hud="harvest-meter">
                 <span class="harvest-segment" data-harvest-segment="0" data-state="empty"><span class="harvest-segment-fill"></span><span class="harvest-segment-marker" aria-hidden="true">○</span></span>
                 <span class="harvest-segment" data-harvest-segment="1" data-state="empty"><span class="harvest-segment-fill"></span><span class="harvest-segment-marker" aria-hidden="true">○</span></span>
                 <span class="harvest-segment" data-harvest-segment="2" data-state="empty"><span class="harvest-segment-fill"></span><span class="harvest-segment-marker" aria-hidden="true">○</span></span>
@@ -289,7 +329,7 @@ export class GameUi {
               <span class="path-grave">Grave <strong data-path-rank="Grave">0</strong></span>
             </div>
           </div>
-          <div class="objective-panel" data-hud="objective">Defeat the Witch's servants</div>
+          <div class="objective-panel" data-hud="objective">Defeat all enemies</div>
         </div>
         <div class="boss-panel hidden" data-hud="boss-panel">
           <div class="boss-name">The Witch</div>
@@ -301,9 +341,9 @@ export class GameUi {
         </div>
       </section>
 
-      <section class="modal vn-screen hidden" data-screen="dialogue" role="dialog" aria-modal="true" aria-labelledby="dialogue-speaker">
+      <section class="modal vn-screen hidden" data-screen="bookend" role="dialog" aria-modal="true" aria-labelledby="bookend-speaker">
         <div class="vn-art" aria-hidden="true">
-          <img class="vn-background hidden" data-dialogue="background" alt="" />
+          <img class="vn-background hidden" data-bookend="background" alt="" />
           <div class="vn-background-fallback"></div>
           <div class="vn-atmosphere"></div>
           <div class="vn-cutout-slot" data-vn-stage="left"><img alt="" /></div>
@@ -311,87 +351,66 @@ export class GameUi {
           <div class="vn-cutout-slot" data-vn-stage="center"><img alt="" /></div>
           <div class="vn-cutout-slot" data-vn-stage="right"><img alt="" /></div>
         </div>
-        <div class="vn-chrome" data-dialogue="chrome">
+        <div class="vn-chrome" data-bookend="chrome">
           <div class="vn-topbar">
             <div class="vn-scene-meta">
-              <span data-dialogue="position">1 / 1</span>
-              <span data-dialogue="read-state">New text</span>
-            </div>
-            <div class="vn-tools" aria-label="Visual novel controls">
-              <button class="vn-tool" data-action="dialogue-auto" aria-pressed="false">Auto</button>
-              <button class="vn-tool" data-action="dialogue-backlog" aria-expanded="false">History</button>
-              <button class="vn-tool" data-action="dialogue-hide">Hide UI</button>
-              <button class="vn-tool" data-action="dialogue-fast-forward" aria-pressed="false">Hold FF</button>
-              <button class="vn-tool" data-action="dialogue-skip-request">Skip</button>
+              <span data-bookend="position">1 / 1</span>
             </div>
           </div>
-          <div class="vn-dialogue-box" data-dialogue="panel">
-            <div class="vn-nameplate" id="dialogue-speaker" data-dialogue="speaker"></div>
+          <div class="vn-dialogue-box" data-bookend="panel">
+            <div class="vn-nameplate" id="bookend-speaker" data-bookend="speaker"></div>
             <p class="vn-dialogue-text">
-              <span data-dialogue="text"></span><span class="vn-caret" aria-hidden="true"></span>
-              <span class="sr-only" data-dialogue="announcer" aria-live="polite"></span>
+              <span data-bookend="text"></span><span class="vn-caret" aria-hidden="true"></span>
+              <span class="sr-only" data-bookend="announcer" aria-live="polite"></span>
             </p>
             <div class="vn-dialogue-footer">
-              <span class="vn-input-hint" data-dialogue="input-hint">Advance · tap</span>
-              <button class="button primary vn-advance" data-action="dialogue-continue">Reveal line</button>
+              <span class="vn-input-hint" data-bookend="input-hint">Advance · tap</span>
+              <button class="button primary vn-advance" data-action="bookend-continue">Continue</button>
             </div>
           </div>
         </div>
-        <button class="button vn-show-ui hidden" data-action="dialogue-show-ui">Show dialogue UI</button>
-        <aside class="vn-overlay vn-backlog hidden" data-dialogue="backlog" role="dialog" aria-modal="true" aria-labelledby="dialogue-history-title">
-          <div class="vn-overlay-heading">
-            <div><p class="eyebrow">This descent</p><h2 id="dialogue-history-title">Dialogue history</h2></div>
-            <button class="button quiet" data-action="dialogue-backlog-close">Close</button>
-          </div>
-          <div class="vn-history-list" data-dialogue="history"></div>
-        </aside>
-        <section class="vn-overlay vn-skip-confirm hidden" data-dialogue="skip-confirm" role="alertdialog" aria-modal="true" aria-labelledby="dialogue-skip-title" aria-describedby="dialogue-skip-copy">
-          <p class="eyebrow">Leave this scene?</p>
-          <h2 id="dialogue-skip-title">Skip remaining dialogue</h2>
-          <p id="dialogue-skip-copy">Unseen lines will remain unread in History and fast-forward will not unlock them.</p>
-          <div class="button-row">
-            <button class="button danger" data-action="dialogue-skip-confirm">Skip scene</button>
-            <button class="button primary" data-action="dialogue-skip-cancel">Keep reading</button>
-          </div>
-        </section>
       </section>
 
-      <section class="modal hidden" data-screen="reward">
+      <section class="modal hidden" data-screen="reward" role="dialog" aria-modal="true" aria-labelledby="reward-title">
         <div class="panel upgrade-panel">
-          <p class="eyebrow">Chamber reward</p>
-          <h2>Shape your descent</h2>
-          <p class="panel-copy">Choose a focused rank before opening the next chamber.</p>
+          <img class="upgrade-dial-art" src="${upgradeDialBackgroundUrl}" alt="" aria-hidden="true">
+          <header class="upgrade-heading">
+            <p class="eyebrow">Chamber reward</p>
+            <h2 id="reward-title">Shape your descent</h2>
+          </header>
           <div class="upgrade-grid" data-room-rewards></div>
           <div class="upgrade-actions">
             <button class="button reroll-button" data-action="reroll-upgrades">Reroll choices · once this floor</button>
-            <p class="reroll-status" data-reroll-status role="status" aria-live="polite"></p>
           </div>
         </div>
       </section>
 
-      <section class="modal hidden" data-screen="blessing">
+      <section class="modal hidden" data-screen="blessing" role="dialog" aria-modal="true" aria-labelledby="blessing-title">
         <div class="panel upgrade-panel">
-          <p class="eyebrow">The threshold yields</p>
-          <h2>Choose a major blessing</h2>
-          <p class="panel-copy">Commit to a powerful rank before descending to the next floor.</p>
+          <img class="upgrade-dial-art" src="${upgradeDialBackgroundUrl}" alt="" aria-hidden="true">
+          <header class="upgrade-heading">
+            <p class="eyebrow">The threshold yields</p>
+            <h2 id="blessing-title">Choose a major blessing</h2>
+            <p class="panel-copy">Commit to a powerful rank before descending to the next floor.</p>
+          </header>
           <div class="upgrade-grid" data-blessings></div>
           <div class="upgrade-actions">
             <button class="button reroll-button" data-action="reroll-upgrades">Reroll choices · once this floor</button>
-            <p class="reroll-status" data-reroll-status role="status" aria-live="polite"></p>
           </div>
         </div>
       </section>
 
-      <section class="modal hidden" data-screen="pause" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+      <section class="modal pause-modal hidden" data-screen="pause" role="dialog" aria-modal="true" aria-labelledby="pause-title">
         <div class="panel pause-panel">
-          <p class="eyebrow">The realm holds its breath</p>
-          <h2 id="pause-title">Paused</h2>
-          <div class="button-row">
+          <header class="pause-heading">
+            <h2 id="pause-title">Paused</h2>
+          </header>
+          <nav class="pause-actions" aria-label="Pause menu">
             <button class="button primary" data-action="resume">Resume</button>
-            <button class="button" data-action="suspend-run">Suspend at last threshold</button>
+            <button class="button" data-action="suspend-run" aria-label="Suspend at last threshold">Suspend Run</button>
             <button class="button" data-action="pause-settings">Settings</button>
             <button class="button danger" data-action="request-abandon-run">Abandon run</button>
-          </div>
+          </nav>
         </div>
       </section>
 
@@ -431,25 +450,12 @@ export class GameUi {
         </div>
       </section>
 
-      <section class="modal glossary-modal hidden" data-screen="glossary" role="dialog" aria-modal="true" aria-labelledby="glossary-title">
-        <div class="panel glossary-panel">
-          <div class="menu-panel-heading glossary-heading">
-            <div>
-              <p class="eyebrow">Recovered records</p>
-              <h2 id="glossary-title">Glossary</h2>
-            </div>
-            <button class="button quiet glossary-close" data-action="close-glossary" aria-label="Close glossary">Close</button>
-          </div>
-          <p class="glossary-intro">The records below reframe the descent. They become available only after the choice beneath the final floor.</p>
-          <div class="glossary-layout">
-            <nav class="glossary-index" data-glossary-entries role="tablist" aria-label="Recovered glossary entries"></nav>
-            <article class="glossary-detail" data-glossary-detail role="tabpanel" tabindex="0"></article>
-          </div>
-        </div>
-      </section>
-
       <div class="ending-fade hidden" data-ending="fade" aria-hidden="true"></div>
-      <div class="glossary-toast hidden" data-glossary-toast role="status" aria-live="polite"></div>
+      <div class="speedrun-timer hidden" data-speedrun-timer role="timer" aria-label="Speedrun timer">
+        <span>Speedrun</span>
+        <strong data-speedrun-time>00:00.00</strong>
+        <small data-speedrun-state>Ruthless</small>
+      </div>
 
       <div class="touch-controls" data-touch-controls>
         <div class="touch-stick touch-move-stick" data-touch-stick role="application" aria-label="Movement stick"><div class="touch-knob" data-touch-knob></div></div>
@@ -461,32 +467,54 @@ export class GameUi {
           <button class="touch-button touch-claim" data-touch-action="claim">Claim</button>
         </div>
       </div>`);
+    this.titleLogo = new AnimatedLogo(this.root.querySelector("[data-logo-slot='title']"), {
+      imageUrl: brandIconUrl,
+      mode: AnimatedLogo.MODES.MAIN_MENU,
+    });
+    this.loadingLogo = new AnimatedLogo(this.root.querySelector("[data-logo-slot='loading']"), {
+      imageUrl: brandIconUrl,
+      mode: AnimatedLogo.MODES.LOADING,
+    });
+    this.loadingLogo.setProgress(null);
   }
 
   bindActions() {
     this.root.addEventListener("click", async (event) => {
-      if (event.target === this.root.querySelector("[data-screen='glossary']")) {
-        this.closeGlossary();
-        return;
-      }
       if (event.target.matches?.("[data-menu-overlay]") && event.target.dataset.screen !== "confirmation") {
         this.closeMenuOverlay();
         return;
       }
       const button = event.target.closest("[data-action]");
       if (!button) {
-        if (this.game.phase === "dialogue" && event.target.closest("[data-dialogue='panel']")) {
-          this.game.continueDialogue(event.timeStamp);
+        if (this.game.phase === "bookend" && event.target.closest("[data-bookend='panel']")) {
+          this.game.continueBookend();
         }
         return;
       }
       const action = button.dataset.action;
+      if (action === "speedrun") {
+        this.openSpeedrunRules(button, createRunSeed());
+        return;
+      }
       if (action === "new-run") {
+        if (this.game.runType === "speedrun" && button.closest("[data-screen='ending']")) {
+          await this.startSpeedrun(createRunSeed());
+          return;
+        }
         this.openDifficulty(button, createRunSeed());
         return;
       }
       if (action === "retry") {
+        if (this.game.runType === "speedrun") {
+          await this.startSpeedrun(this.game.seed ?? createRunSeed());
+          return;
+        }
         this.openDifficulty(button, this.game.seed ?? createRunSeed(), this.game.difficultyId);
+        return;
+      }
+      if (action === "start-speedrun") {
+        const seed = this.pendingRunSeed ?? createRunSeed();
+        await this.startSpeedrun(seed);
         return;
       }
       if (action === "choose-difficulty") {
@@ -508,7 +536,6 @@ export class GameUi {
         return;
       }
       if (action === "open-settings" || action === "pause-settings") {
-        this.closeGlossary();
         this.closeMenuOverlay({ restoreFocus: false });
         this.settingsMenu.open(undefined, button);
         return;
@@ -531,7 +558,7 @@ export class GameUi {
           trigger: button,
           eyebrow: "Erase the ledger",
           title: "Reset all records?",
-          copy: "Attempts, endings, combat totals, and best times will be erased. Settings and story unlocks remain intact.",
+          copy: "Attempts, endings, combat totals, Speedrun records, and best times will be erased. Settings remain intact.",
           confirmLabel: "Reset records",
           onConfirm: () => {
             this.runSession?.resetStatistics();
@@ -596,38 +623,14 @@ export class GameUi {
         globalThis.location?.reload?.();
         return;
       }
-      if (action === "dialogue-continue") this.game.continueDialogue(event.timeStamp);
-      if (action === "dialogue-auto") this.game.toggleDialogueAuto(event.timeStamp);
-      if (action === "dialogue-backlog") this.game.openDialogueBacklog(event.timeStamp);
-      if (action === "dialogue-backlog-close") this.game.closeDialogueBacklog(event.timeStamp);
-      if (action === "dialogue-hide" || action === "dialogue-show-ui") this.game.toggleDialogueUi(event.timeStamp);
-      if (action === "dialogue-skip-request") this.game.requestDialogueSkip(event.timeStamp);
-      if (action === "dialogue-skip-confirm") this.game.confirmDialogueSkip(event.timeStamp);
-      if (action === "dialogue-skip-cancel") this.game.cancelDialogueOverlay(event.timeStamp);
+      if (action === "bookend-continue") this.game.continueBookend();
       if (action === "reroll-upgrades") this.game.rerollUpgradeOffer();
       if (action === "kill-princess") this.game.tryKillPrincess(event.timeStamp);
-      if (action === "open-glossary") this.openGlossary(button);
-      if (action === "close-glossary") this.closeGlossary();
     });
-
-    const fastForward = this.root.querySelector("[data-action='dialogue-fast-forward']");
-    const releaseFastForward = (event) => {
-      fastForward.setAttribute("aria-pressed", "false");
-      if (this.game.phase === "dialogue") this.game.setDialogueFastForward(false, event.timeStamp);
-      if (fastForward.hasPointerCapture?.(event.pointerId)) fastForward.releasePointerCapture(event.pointerId);
-    };
-    fastForward.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      fastForward.setPointerCapture(event.pointerId);
-      fastForward.setAttribute("aria-pressed", "true");
-      this.game.setDialogueFastForward(true, event.timeStamp);
-    });
-    fastForward.addEventListener("pointerup", releaseFastForward);
-    fastForward.addEventListener("pointercancel", releaseFastForward);
 
     this.root.addEventListener("keydown", (event) => {
       const menuScope = this.activeMenuScope();
-      if (menuScope && this.game.phase !== "dialogue") {
+      if (menuScope) {
         if (event.key === "Tab") {
           this.trapTab(event, menuScope);
           return;
@@ -636,39 +639,10 @@ export class GameUi {
           event.preventDefault();
           event.stopPropagation();
           if (this.settingsMenu.isOpen) this.settingsMenu.close();
-          else if (!this.root.querySelector("[data-screen='glossary']").classList.contains("hidden")) this.closeGlossary();
           else if (this.menuOverlay === "confirmation") this.root.querySelector("[data-action='cancel-confirmation']")?.click();
           else if (this.menuOverlay) this.closeMenuOverlay();
           else if (this.game.phase === "paused") this.game.togglePause(event.timeStamp);
           return;
-        }
-      }
-      if (this.game.phase !== "dialogue") return;
-      const view = this.game.dialogue.snapshot();
-      if (event.key !== "Tab") return;
-      const screen = this.root.querySelector("[data-screen='dialogue']");
-      const scope = view?.backlogOpen
-        ? this.root.querySelector("[data-dialogue='backlog']")
-        : view?.skipConfirmationOpen
-          ? this.root.querySelector("[data-dialogue='skip-confirm']")
-          : view?.uiHidden
-            ? this.root.querySelector("[data-action='dialogue-show-ui']")
-            : screen;
-      const controls = scope.matches?.("button")
-        ? [scope]
-        : [...scope.querySelectorAll("button")].filter((control) => !control.disabled && !control.closest(".hidden"));
-      if (controls.length > 0) {
-        const first = controls[0];
-        const last = controls.at(-1);
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first.focus();
-        } else if (!scope.contains?.(document.activeElement) && document.activeElement !== scope) {
-          event.preventDefault();
-          first.focus();
         }
       }
     });
@@ -700,10 +674,9 @@ export class GameUi {
   activeMenuScope() {
     if (this.settingsMenu?.isOpen) return this.settingsMenu.element;
     if (this.menuOverlay) return this.root.querySelector(`[data-screen='${this.menuOverlay}']`);
-    const glossary = this.root.querySelector("[data-screen='glossary']");
-    if (!glossary.classList.contains("hidden")) return glossary;
     const phaseScreen = {
       title: "title",
+      bookend: "bookend",
       paused: "pause",
       reward: "reward",
       blessing: "blessing",
@@ -744,12 +717,32 @@ export class GameUi {
       button.className = `difficulty-card${profile.id === preferredDifficulty ? " selected" : ""}`;
       button.dataset.action = "choose-difficulty";
       button.dataset.difficulty = profile.id;
-      button.innerHTML = `<span class="difficulty-label">${profile.label}</span><span>${profile.description}</span><small>${profile.id === "story" ? "Longer warnings · lighter pressure" : profile.id === "ruthless" ? "Tighter warnings · denser squads" : "Authored timing · intended pressure"}</small>`;
+      button.innerHTML = `<span class="difficulty-label">${profile.label}</span><span class="difficulty-summary">${DIFFICULTY_MENU_COPY[profile.id] ?? profile.description}</span>`;
       if (profile.id === preferredDifficulty) button.setAttribute("aria-current", "true");
       grid.append(button);
     }
     this.openMenuOverlay("difficulty", trigger);
     queueMicrotask(() => grid.querySelector(".selected")?.focus());
+  }
+
+  openSpeedrunRules(trigger, seed) {
+    if (!this.assetsReady) {
+      this.setTitleStatus("The realm is still loading.");
+      return;
+    }
+    this.pendingRunSeed = seed;
+    this.openMenuOverlay("speedrun-rules", trigger);
+    queueMicrotask(() => this.root.querySelector("[data-action='start-speedrun']")?.focus());
+  }
+
+  async startSpeedrun(seed) {
+    this.closeMenuOverlay({ restoreFocus: false });
+    this.resetEndingPresentation();
+    await this.audio.resume();
+    const started = this.runSession?.startSpeedrun(seed)
+      ?? (this.game.startRun(seed, { runType: "speedrun" }), true);
+    if (!started) this.setTitleStatus("The Speedrun could not begin. Try a fresh attempt.");
+    return started;
   }
 
   openConfirmation({ trigger, eyebrow, title, copy, confirmLabel, onConfirm }) {
@@ -775,7 +768,9 @@ export class GameUi {
     continueButton.classList.toggle("hidden", !suspended);
     continueButton.disabled = !this.assetsReady || !suspended;
     continueButton.textContent = suspended
-      ? `Continue · Floor ${suspended.floor}, Chamber ${suspended.room} · ${titleCaseId(suspended.difficultyId)}`
+      ? suspended.runType === "speedrun"
+        ? `Continue Speedrun · ${formatSpeedrunTime(suspended.elapsedSeconds)} · Floor ${suspended.floor}, Chamber ${suspended.room}`
+        : `Continue · Floor ${suspended.floor}, Chamber ${suspended.room} · ${titleCaseId(suspended.difficultyId)}`
       : "Continue";
     const quitButton = this.root.querySelector("[data-action='quit']");
     quitButton.classList.toggle("hidden", state.canQuit !== true);
@@ -794,6 +789,7 @@ export class GameUi {
       return;
     }
     const { statistics, derived } = model;
+    const speedrun = model.speedrun ?? { attempts: 0, completions: 0, best: null };
     const overview = document.createElement("div");
     overview.className = "records-overview";
     overview.innerHTML = `
@@ -814,6 +810,30 @@ export class GameUi {
       comparison.append(article);
     }
     content.append(comparison);
+
+    const speedrunRecord = document.createElement("section");
+    speedrunRecord.className = "records-speedrun";
+    const speedrunTitle = document.createElement("h3");
+    speedrunTitle.textContent = "Speedrun · Ruthless";
+    const speedrunRows = document.createElement("dl");
+    const bestRows = [
+      ["Attempts", String(speedrun.attempts)],
+      ["Witch clears", String(speedrun.completions)],
+      ["Best time", speedrun.best ? formatSpeedrunTime(speedrun.best.timeSeconds) : "—"],
+      ["Best seed", speedrun.best?.seed ?? "—"],
+      ["Decision", speedrun.best ? speedrun.best.ending === "kill" ? "Mercy" : "Hesitation" : "—"],
+    ];
+    for (const [label, value] of bestRows) {
+      const row = document.createElement("div");
+      const term = document.createElement("dt");
+      const description = document.createElement("dd");
+      term.textContent = label;
+      description.textContent = value;
+      row.append(term, description);
+      speedrunRows.append(row);
+    }
+    speedrunRecord.append(speedrunTitle, speedrunRows);
+    content.append(speedrunRecord);
     const preferences = document.createElement("p");
     preferences.className = "records-preferences";
     preferences.textContent = statistics.attempts === 0
@@ -826,11 +846,17 @@ export class GameUi {
       warning.textContent = "Records are available for this session, but persistent browser storage is unavailable.";
       content.prepend(warning);
     }
+    if (model.speedrunStorageError) {
+      const warning = document.createElement("p");
+      warning.className = "storage-warning";
+      warning.textContent = "Speedrun records are available for this session, but persistent browser storage is unavailable.";
+      content.prepend(warning);
+    }
   }
 
   handleMenuInput(timeStamp = performance.now()) {
     const scope = this.activeMenuScope();
-    if (!scope || this.game.phase === "dialogue") return false;
+    if (!scope || this.game.phase === "bookend") return false;
     const moveUp = this.input.consumePressed("moveUp");
     const moveLeft = this.input.consumePressed("moveLeft");
     const moveDown = this.input.consumePressed("moveDown");
@@ -843,7 +869,6 @@ export class GameUi {
     const back = this.input.consumePressed("pause") ?? this.input.consumePressed("dash");
     if (back) {
       if (this.settingsMenu.isOpen) this.settingsMenu.close();
-      else if (!this.root.querySelector("[data-screen='glossary']").classList.contains("hidden")) this.closeGlossary();
       else if (this.menuOverlay === "confirmation") this.root.querySelector("[data-action='cancel-confirmation']")?.click();
       else if (this.menuOverlay) this.closeMenuOverlay();
       else if (this.game.phase === "paused") this.game.togglePause(back.timeStamp ?? timeStamp);
@@ -851,10 +876,6 @@ export class GameUi {
     }
 
     const activeControl = document.activeElement;
-    if (activeControl?.matches?.(".glossary-index-button") && verticalDirection !== 0) {
-      this.moveGlossarySelection(verticalDirection);
-      return true;
-    }
     if (verticalDirection === 0 && horizontalDirection !== 0 && adjustFocusedMenuControl(activeControl, horizontalDirection)) {
       return true;
     }
@@ -880,35 +901,32 @@ export class GameUi {
     return false;
   }
 
-  setLoadingProgress(progress) {
-    const status = this.root.querySelector("[data-loading]");
-    if (!status) return;
-    status.classList.remove("ready", "error");
-    this.root.querySelector("[data-loading-label]").textContent = `Loading ${progress.label}`;
-    this.root.querySelector("[data-loading-percent]").textContent = `${Math.round(progress.ratio * 100)}%`;
-    this.root.querySelector("[data-loading-bar]").style.transform = `scaleX(${progress.ratio})`;
-  }
-
-  setReady() {
-    const status = this.root.querySelector("[data-loading]");
+  async setReady() {
+    const transitionToken = ++this.loadingTransitionToken;
+    this.setLoadingProgress({ ratio: 1 });
+    await this.loadingLogo.playCompletion();
+    if (transitionToken !== this.loadingTransitionToken) return false;
     this.assetsReady = true;
-    status.classList.add("ready");
-    this.root.querySelector("[data-loading-label]").textContent = "Models cached · realm ready";
-    this.root.querySelector("[data-loading-percent]").textContent = "100%";
-    this.root.querySelector("[data-loading-bar]").style.transform = "scaleX(1)";
+    this.loadFailed = false;
     for (const button of this.root.querySelectorAll("[data-screen='title'] [data-action='new-run']")) {
       button.disabled = false;
       button.textContent = "New Descent";
     }
+    const speedrunButton = this.root.querySelector("[data-screen='title'] [data-action='speedrun']");
+    if (speedrunButton) {
+      speedrunButton.disabled = false;
+      speedrunButton.textContent = "Speedrun";
+    }
+    this.showPhase(this.game.phase);
     this.refreshTitleState();
+    return true;
   }
 
   setLoadError() {
+    this.loadingTransitionToken += 1;
     this.assetsReady = false;
-    const status = this.root.querySelector("[data-loading]");
-    status.classList.add("error");
-    this.root.querySelector("[data-loading-label]").textContent = "The realm failed to open · reload to retry";
-    this.root.querySelector("[data-loading-percent]").textContent = "";
+    this.loadFailed = true;
+    this.loadingLogo.resetCompletion();
     const statusMessage = this.root.querySelector("[data-title-status]");
     statusMessage.replaceChildren();
     const retry = document.createElement("button");
@@ -916,13 +934,47 @@ export class GameUi {
     retry.dataset.action = "reload-game";
     retry.textContent = "Reload assets";
     statusMessage.append(retry);
+    this.showPhase(this.game.phase);
     this.refreshTitleState();
+  }
+
+  setLoadingProgress(progress = null) {
+    const ratio = Number(progress?.ratio);
+    const normalized = Number.isFinite(ratio) ? clamp01(ratio) : null;
+    this.loadingLogo.setProgress(normalized);
+    const loadingScreen = this.root.querySelector("[data-screen='loading']");
+    loadingScreen.setAttribute(
+      "aria-label",
+      normalized === null
+        ? "Loading The Saviour"
+        : `Loading The Saviour, ${Math.round(normalized * 100)} percent`,
+    );
+  }
+
+  completeRoomLoad() {
+    return this.loadingLogo.playCompletion();
+  }
+
+  async finishLoadingTransition(nextPhase) {
+    const transitionToken = ++this.loadingTransitionToken;
+    await this.loadingLogo.playCompletion();
+    if (transitionToken !== this.loadingTransitionToken) return;
+    this.showPhase(nextPhase);
   }
 
   handleEvent(event) {
     const { type, detail = {} } = event;
     if (type === "phaseChanged") {
-      this.showPhase(detail.phase);
+      if (detail.phase === "roomLoading") {
+        this.loadingTransitionToken += 1;
+        this.loadingLogo.resetCompletion();
+        this.setLoadingProgress(null);
+        this.showPhase(detail.phase);
+      } else if (this.visiblePhase === "roomLoading") {
+        void this.finishLoadingTransition(detail.phase);
+      } else {
+        this.showPhase(detail.phase);
+      }
       if (detail.phase === "title") this.refreshTitleState();
       if (detail.phase === "roomLoading") this.setObjective("Opening the next chamber…");
     }
@@ -931,16 +983,16 @@ export class GameUi {
       this.setTitleStatus("");
     }
     if (type === "roomReady") {
-      this.setObjective(this.game.arena?.boss ? "Defeat the Witch" : "Defeat the Witch's servants");
+      this.setObjective(this.game.arena?.boss ? "Defeat the Witch" : "Defeat all enemies");
     }
     if (type === "hudChanged") this.updateHud(detail);
     if (type === "harvestChanged") this.showHarvestFeedback(detail);
     if (type === "arenaChanged") {
-      this.setObjective(detail.boss ? "Defeat the Witch" : "Defeat the Witch's servants");
+      this.setObjective(detail.boss ? "Defeat the Witch" : "Defeat all enemies");
       this.root.querySelector("[data-hud='boss-panel']").classList.toggle("hidden", !detail.boss);
     }
-    if (type === "dialogueStarted" || type === "dialogueAdvanced") {
-      this.showDialogue(detail, { focus: type === "dialogueStarted" });
+    if (type === "bookendStarted" || type === "bookendAdvanced") {
+      this.showBookend(detail, { focus: type === "bookendStarted" });
     }
     if (type === "roomRewardOffered") {
       this.setObjective("Choose a chamber reward");
@@ -956,10 +1008,6 @@ export class GameUi {
     if (type === "endingChoiceResolved") this.resolveEndingChoice(detail.ending);
     if (type === "endingFadeStarted" || type === "endingFadeUpdated") this.updateEndingFade(detail);
     if (type === "endingCompleted") this.completeEnding(detail.ending);
-    if (type === "glossaryUnlocked") {
-      this.updateGlossaryAccess(true);
-      this.showGlossaryToast(GLOSSARY_UNLOCK_NOTIFICATION.text);
-    }
     if (type === "roomCleared") this.showMessage("Chamber conquered.");
     if (type === "portalOpened") this.setObjective("Follow the golden arrow and enter the center portal");
     if (type === "roomRecovered") this.showMessage(`The threshold restores ${Math.round(detail.amount)} health.`);
@@ -979,34 +1027,31 @@ export class GameUi {
   }
 
   showPhase(phase) {
+    this.visiblePhase = phase;
     const terminal = ["dead", "victory", "endingComplete"].includes(phase);
-    this.root.querySelector("[data-screen='title']").classList.toggle("hidden", phase !== "title");
-    this.root.querySelector("[data-screen='hud']").classList.toggle("hidden", ["title", "dialogue", "dead", "victory", "endingComplete", "endingChoice", "endingStrike", "endingFade"].includes(phase));
+    const brandLoading = phase === "roomLoading"
+      || (phase === "title" && !this.assetsReady && !this.loadFailed);
+    this.root.querySelector("[data-screen='loading']").classList.toggle("hidden", !brandLoading);
+    this.root.querySelector("[data-screen='title']").classList.toggle("hidden", phase !== "title" || brandLoading);
+    this.root.querySelector("[data-screen='hud']").classList.toggle("hidden", ["title", "roomLoading", "bookend", "dead", "victory", "endingComplete", "endingChoice", "endingStrike", "endingFade"].includes(phase));
     this.root.querySelector("[data-screen='pause']").classList.toggle("hidden", phase !== "paused");
-    this.root.querySelector("[data-screen='dialogue']").classList.toggle("hidden", phase !== "dialogue");
+    this.root.querySelector("[data-screen='bookend']").classList.toggle("hidden", phase !== "bookend");
     this.root.querySelector("[data-screen='reward']").classList.toggle("hidden", phase !== "reward");
     this.root.querySelector("[data-screen='blessing']").classList.toggle("hidden", phase !== "blessing");
     this.root.querySelector("[data-screen='ending-decision']").classList.toggle("hidden", phase !== "endingChoice");
     this.root.querySelector("[data-screen='ending']").classList.toggle("hidden", !terminal);
     this.root.querySelector("[data-touch-controls]").classList.toggle("hidden", !["playing", "portalTraversal"].includes(phase));
-    if (phase !== "dialogue") {
-      const dialoguePaused = phase === "paused" && this.game.pausedPhase === "dialogue";
-      if (!dialoguePaused) {
-        this.dialogueArtToken += 1;
-        this.dialogueArtBeatId = null;
-        this.dialoguePreloadSequenceId = null;
-        this.hideDialogueArt();
-        this.dialogueFocusSequenceId = null;
-        this.dialogueOverlayReturnFocus = null;
-        this.root.querySelector("[data-screen='dialogue']").classList.remove("ui-hidden");
-        this.root.querySelector("[data-action='dialogue-fast-forward']").setAttribute("aria-pressed", "false");
-      }
+    if (phase !== "bookend") {
+      this.bookendArtToken += 1;
+      this.bookendArtBeatId = null;
+      this.bookendPreloadSequenceId = null;
+      this.hideBookendArt();
+      this.bookendFocusSequenceId = null;
     }
-    if (phase !== "title") this.closeGlossary();
-    if (["roomLoading", "playing", "portalTraversal", "dialogue", "endingChoice", "endingStrike", "endingFade"].includes(phase)) {
+    if (["roomLoading", "playing", "portalTraversal", "bookend", "endingChoice", "endingStrike", "endingFade"].includes(phase)) {
       this.closeMenuOverlay({ restoreFocus: false });
     }
-    if (phase === "title") {
+    if (phase === "title" && !brandLoading) {
       this.refreshTitleState();
       queueMicrotask(() => {
         if (!this.menuOverlay && !this.settingsMenu.isOpen) {
@@ -1029,6 +1074,28 @@ export class GameUi {
     }
   }
 
+  updateSpeedrunTimer(snapshot) {
+    const timer = this.root.querySelector("[data-speedrun-timer]");
+    if (!timer) return;
+    const visible = snapshot?.active === true;
+    timer.classList.toggle("hidden", !visible);
+    if (!visible) {
+      this.lastSpeedrunClock = "";
+      return;
+    }
+    const clock = formatSpeedrunTime(snapshot.elapsedSeconds);
+    if (clock !== this.lastSpeedrunClock) {
+      timer.querySelector("[data-speedrun-time]").textContent = clock;
+      timer.setAttribute("aria-label", `Speedrun time ${clock}`);
+      this.lastSpeedrunClock = clock;
+    }
+    timer.classList.toggle("finished", snapshot.finished === true);
+    const state = timer.querySelector("[data-speedrun-state]");
+    state.textContent = snapshot.finished
+      ? "Witch defeated · time locked"
+      : this.game.phase === "paused" ? "Paused" : "Ruthless";
+  }
+
   updateCombatResources(game) {
     if (!game.player) return;
     const cooldownDuration = PLAYER_CONFIG.dash.cooldown * game.player.dashCooldownMultiplier;
@@ -1036,7 +1103,11 @@ export class GameUi {
       ? Math.max(0, Math.min(1, 1 - game.combat.dashCooldown / cooldownDuration))
       : 1;
     const percent = Math.round(ratio * 100);
-    const label = game.combat.isDashing ? "Dashing" : percent >= 100 ? "Ready" : `${percent}%`;
+    const chargeDashSpent = (game.combat.primaryHoldArmed || game.combat.chargingPrimary)
+      && game.combat.primaryChargeDashesUsed >= STRAIGHT_CHARGE_CONFIG.dashAllowance;
+    const label = game.combat.isDashing ? "Dashing"
+      : chargeDashSpent ? "Charge dash spent"
+        : percent >= 100 ? "Ready" : `${percent}%`;
     if (percent !== this.lastDashPercent) {
       this.root.querySelector("[data-hud='dash-bar']").style.transform = `scaleX(${ratio})`;
       this.root.querySelector("[data-hud='dash-meter']").setAttribute("aria-valuenow", String(percent));
@@ -1049,16 +1120,17 @@ export class GameUi {
 
     const harvest = game.combat.harvest?.snapshot?.() ?? { units: 0 };
     const claim = game.combat.claim?.snapshot?.() ?? { phase: "idle" };
-    const model = combatResourceViewModel(harvest, claim);
-    const signature = `${model.units}:${model.phase}`;
+    const model = combatResourceViewModel(harvest, claim, game.combat);
+    const signature = `${model.units}:${model.phase}:${Math.round((game.combat.primaryCharge ?? 0) * 100)}`;
     if (signature === this.lastCombatResourceSignature) return;
     this.lastCombatResourceSignature = signature;
     this.harvestMeter.setAttribute("aria-valuenow", String(model.units));
     this.harvestMeter.setAttribute("aria-valuetext", model.ariaValueText);
     this.harvestUnits.textContent = model.unitsText;
     this.harvestFilled.textContent = model.filledText;
-    this.claimStatus.textContent = `Claim · ${model.claimStatus}`;
+    this.claimStatus.textContent = model.phase === "lineCharge" ? model.claimStatus : `Claim · ${model.claimStatus}`;
     this.claimStatus.dataset.state = model.phase === "idle" ? model.claimStatus.toLowerCase() : model.phase;
+    this.harvestMeter.dataset.action = model.phase;
     for (const [index, segment] of model.segments.entries()) {
       const element = this.harvestSegments[index];
       element.dataset.state = segment.state;
@@ -1070,21 +1142,21 @@ export class GameUi {
   updateControlsHint(device) {
     if (!this.controlsHint) return;
     if (device === "gamepad") {
-      this.controlsHint.textContent = "Left stick move · Right stick aim · X Strike · Y Reap · RB Claim · A Dash · Menu pause";
+      this.controlsHint.textContent = "Left stick move · Right stick aim · Tap X combo / hold X Grave Line (1 dash) · Y Reap · RB Claim · A Dash · Menu pause";
       return;
     }
     if (device === "touch") {
-      this.controlsHint.textContent = "Left stick move · Right stick aim · Strike · Reap · Dash · Claim";
+      this.controlsHint.textContent = "Left stick move · Right stick aim · Tap Strike combo / hold Grave Line (1 dash) · Reap · Dash · Claim";
       return;
     }
-    this.controlsHint.textContent = "WASD move · Mouse aim · LMB Strike · Q Reap · R Claim · Shift / RMB Dash · Esc pause";
+    this.controlsHint.textContent = "WASD move · Mouse aim · Tap LMB combo / hold Grave Line (1 dash) · Q Reap · R Claim · Shift / RMB Dash · Esc pause";
   }
 
-  updateDialogueInputHint(device) {
-    const hint = this.root.querySelector("[data-dialogue='input-hint']");
+  updateBookendInputHint(device) {
+    const hint = this.root.querySelector("[data-bookend='input-hint']");
     if (!hint) return;
     if (device === "touch") {
-      hint.textContent = "Tap reader controls · hold FF to fast-forward";
+      hint.textContent = "Tap Continue";
       return;
     }
     const prefix = device === "gamepad" ? "Gamepad:" : null;
@@ -1095,15 +1167,7 @@ export class GameUi {
         : bindings.find((binding) => !binding.startsWith("Gamepad:"));
       return bindingLabel(match ?? action);
     };
-    hint.textContent = [
-      `Advance ${actionBinding("attack")}/${actionBinding("interact")}`,
-      `Auto ${actionBinding("heavy")}`,
-      `History ${actionBinding("dash")}`,
-      `Hide ${actionBinding("moveUp")}`,
-      `Hold FF ${actionBinding("claim")}`,
-      `Skip ${actionBinding("moveDown")}`,
-      `Pause ${actionBinding("pause")}`,
-    ].join(" · ");
+    hint.textContent = `Continue ${actionBinding("attack")}/${actionBinding("interact")}`;
   }
 
   showHarvestFeedback(detail) {
@@ -1140,74 +1204,36 @@ export class GameUi {
     this.root.querySelector("[data-hud='boss-bar']").style.transform = `scaleX(${Math.max(0, health / maxHealth)})`;
   }
 
-  showDialogue(detail, { focus = false } = {}) {
-    const screen = this.root.querySelector("[data-screen='dialogue']");
+  showBookend(detail, { focus = false } = {}) {
+    const screen = this.root.querySelector("[data-screen='bookend']");
     screen.dataset.sequenceId = detail.sequenceId;
     screen.dataset.beatId = detail.beatId;
     screen.dataset.stage = detail.stage;
-    screen.classList.toggle("ui-hidden", detail.uiHidden);
 
-    if (this.dialogueArtBeatId !== detail.beatId) this.prepareDialogueArt(detail);
-    if (this.dialoguePreloadSequenceId !== detail.sequenceId) {
-      this.dialoguePreloadSequenceId = detail.sequenceId;
-      this.preloadDialogueSceneArt(detail);
+    if (this.bookendArtBeatId !== detail.beatId) this.prepareBookendArt(detail);
+    if (this.bookendPreloadSequenceId !== detail.sequenceId) {
+      this.bookendPreloadSequenceId = detail.sequenceId;
+      this.preloadBookendSceneArt(detail);
     }
 
-    this.root.querySelector("[data-dialogue='speaker']").textContent = detail.speaker;
-    this.root.querySelector("[data-dialogue='text']").textContent = detail.revealedText ?? detail.text;
-    this.root.querySelector("[data-dialogue='announcer']").textContent = detail.phase === "awaitingAdvance" ? detail.text : "";
+    this.root.querySelector("[data-bookend='speaker']").textContent = detail.speaker;
+    this.root.querySelector("[data-bookend='text']").textContent = detail.text;
+    this.root.querySelector("[data-bookend='announcer']").textContent = detail.text;
     const position = Math.max(1, Number(detail.position) || 1);
     const total = Math.max(position, Number(detail.total) || position);
-    this.root.querySelector("[data-dialogue='position']").textContent = `${position} / ${total}`;
-    this.root.querySelector("[data-dialogue='read-state']").textContent = detail.isRead ? "Previously read" : "New text";
-
-    const advance = this.root.querySelector("[data-action='dialogue-continue']");
-    advance.textContent = detail.phase === "revealing"
-      ? "Reveal line"
-      : position >= total ? "Finish scene" : "Continue";
-    this.root.querySelector("[data-action='dialogue-auto']").setAttribute("aria-pressed", String(detail.autoEnabled));
-    this.root.querySelector("[data-action='dialogue-fast-forward']").setAttribute("aria-pressed", String(detail.fastForwardHeld));
-    this.root.querySelector("[data-action='dialogue-backlog']").setAttribute("aria-expanded", String(detail.backlogOpen));
-
-    const showUi = this.root.querySelector("[data-action='dialogue-show-ui']");
-    showUi.classList.toggle("hidden", !detail.uiHidden);
-    this.renderDialogueHistory(detail.history);
-
-    const backlog = this.root.querySelector("[data-dialogue='backlog']");
-    const backlogWasOpen = !backlog.classList.contains("hidden");
-    backlog.classList.toggle("hidden", !detail.backlogOpen);
-    const confirmation = this.root.querySelector("[data-dialogue='skip-confirm']");
-    const confirmationWasOpen = !confirmation.classList.contains("hidden");
-    confirmation.classList.toggle("hidden", !detail.skipConfirmationOpen);
-
-    const overlayOpened = (detail.backlogOpen && !backlogWasOpen)
-      || (detail.skipConfirmationOpen && !confirmationWasOpen);
-    const overlayClosed = (!detail.backlogOpen && backlogWasOpen)
-      || (!detail.skipConfirmationOpen && confirmationWasOpen);
-    if (overlayOpened && document.activeElement instanceof HTMLElement) {
-      this.dialogueOverlayReturnFocus = document.activeElement;
-    }
-
-    if (detail.backlogOpen && !backlogWasOpen) {
-      queueMicrotask(() => backlog.querySelector("[data-action='dialogue-backlog-close']")?.focus());
-    } else if (detail.skipConfirmationOpen && !confirmationWasOpen) {
-      queueMicrotask(() => confirmation.querySelector("[data-action='dialogue-skip-cancel']")?.focus());
-    } else if (overlayClosed) {
-      const returnFocus = this.dialogueOverlayReturnFocus;
-      this.dialogueOverlayReturnFocus = null;
-      queueMicrotask(() => {
-        if (returnFocus?.isConnected) returnFocus.focus();
-        else advance.focus();
-      });
-    } else if (focus && this.dialogueFocusSequenceId !== detail.sequenceId) {
-      this.dialogueFocusSequenceId = detail.sequenceId;
+    this.root.querySelector("[data-bookend='position']").textContent = `${position} / ${total}`;
+    const advance = this.root.querySelector("[data-action='bookend-continue']");
+    advance.textContent = position >= total ? "Begin" : "Continue";
+    if (detail.kind === "ending" && position >= total) advance.textContent = "Continue";
+    if (focus && this.bookendFocusSequenceId !== detail.sequenceId) {
+      this.bookendFocusSequenceId = detail.sequenceId;
       queueMicrotask(() => advance.focus());
     }
   }
 
-  hideDialogueArt() {
-    const screen = this.root.querySelector("[data-screen='dialogue']");
-    const background = this.root.querySelector("[data-dialogue='background']");
+  hideBookendArt() {
+    const screen = this.root.querySelector("[data-screen='bookend']");
+    const background = this.root.querySelector("[data-bookend='background']");
     if (!screen || !background) return;
     background.onload = null;
     background.onerror = null;
@@ -1226,57 +1252,53 @@ export class GameUi {
     }
   }
 
-  preloadDialogueSceneArt(detail) {
+  preloadBookendSceneArt(detail) {
     try {
-      const currentBackgroundPath = narrativeBackgroundAsset(detail.background).path;
-      const currentArtPath = characterArtAsset(detail.artState).path;
-      const paths = [];
-      const sequence = this.game.dialogue.sequence(detail.sequenceId);
-      for (const beat of sequence.beats) {
-        const background = narrativeBackgroundAsset(beat.background);
-        const art = characterArtAsset(beat.artState);
-        if (background.ready && background.path !== currentBackgroundPath) paths.push(background.path);
-        if (art.path !== currentArtPath) paths.push(art.path);
-      }
-      return this.dialogueImageCache.preloadScene(paths);
+      const paths = [
+        bookendBackgroundAsset(detail.background).path,
+        bookendCharacterAsset(detail.artState).path,
+      ];
+      if (detail.nextBackground) paths.push(bookendBackgroundAsset(detail.nextBackground).path);
+      if (detail.nextArtState) paths.push(bookendCharacterAsset(detail.nextArtState).path);
+      return this.bookendImageCache.preload(paths);
     } catch {
       return Promise.resolve([]);
     }
   }
 
-  loadDialogueImage(path) {
-    return prepareNarrativeImage(path);
+  loadBookendImage(path) {
+    return prepareBookendImage(path);
   }
 
-  prepareDialogueArt(detail) {
-    const screen = this.root.querySelector("[data-screen='dialogue']");
-    const background = this.root.querySelector("[data-dialogue='background']");
-    const backgroundAsset = narrativeBackgroundAsset(detail.background);
-    const artAsset = characterArtAsset(detail.artState);
+  prepareBookendArt(detail) {
+    const screen = this.root.querySelector("[data-screen='bookend']");
+    const background = this.root.querySelector("[data-bookend='background']");
+    const backgroundAsset = bookendBackgroundAsset(detail.background);
+    const artAsset = bookendCharacterAsset(detail.artState);
     const activeSlot = this.root.querySelector(`[data-vn-stage='${detail.stage}']`);
     const cutout = activeSlot?.querySelector("img");
-    const token = ++this.dialogueArtToken;
-    this.dialogueArtBeatId = detail.beatId;
+    const token = ++this.bookendArtToken;
+    this.bookendArtBeatId = detail.beatId;
     const outgoingArtReady = background.getAttribute("src") !== null
       && [...this.root.querySelectorAll("[data-vn-stage]")].some((slot) => (
         slot.classList.contains("active")
         && slot.querySelector("img")?.getAttribute("src") !== null
       ));
-    if (!outgoingArtReady) this.hideDialogueArt();
+    if (!outgoingArtReady) this.hideBookendArt();
     screen.dataset.artState = outgoingArtReady ? "transitioning" : "loading";
 
-    const currentReady = backgroundAsset.ready && activeSlot && cutout
+    const currentReady = activeSlot && cutout
       ? Promise.all([
-        this.loadDialogueImage(backgroundAsset.path),
-        this.loadDialogueImage(artAsset.path),
+        this.loadBookendImage(backgroundAsset.path),
+        this.loadBookendImage(artAsset.path),
       ])
-      : Promise.reject(new Error(`Narrative art is unavailable for beat ${detail.beatId}.`));
+      : Promise.reject(new Error(`Bookend art is unavailable for beat ${detail.beatId}.`));
 
     return currentReady.then(([nextBackground, nextCutout]) => {
-      if (token !== this.dialogueArtToken || this.dialogueArtBeatId !== detail.beatId) return;
+      if (token !== this.bookendArtToken || this.bookendArtBeatId !== detail.beatId) return;
 
       nextBackground.className = "vn-background";
-      nextBackground.dataset.dialogue = "background";
+      nextBackground.dataset.bookend = "background";
       nextBackground.dataset.assetId = backgroundAsset.id;
       nextBackground.alt = "";
       nextCutout.alt = "";
@@ -1291,47 +1313,33 @@ export class GameUi {
       screen.dataset.backgroundReady = "true";
       screen.dataset.artState = "ready";
     }).catch(() => {
-      if (token !== this.dialogueArtToken || this.dialogueArtBeatId !== detail.beatId) return;
-      if (!outgoingArtReady) this.hideDialogueArt();
+      if (token !== this.bookendArtToken || this.bookendArtBeatId !== detail.beatId) return;
+      if (!outgoingArtReady) this.hideBookendArt();
       screen.dataset.artState = "error";
     });
   }
 
-  renderDialogueHistory(history = []) {
-    const list = this.root.querySelector("[data-dialogue='history']");
-    list.replaceChildren();
-    if (history.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "vn-history-empty";
-      empty.textContent = "Completed lines from this scene will appear here.";
-      list.append(empty);
-      return;
-    }
-    const visibleHistory = history.slice(-DIALOGUE_HISTORY_RENDER_LIMIT);
-    if (visibleHistory.length < history.length) {
-      const limitNotice = document.createElement("p");
-      limitNotice.className = "vn-history-limit";
-      limitNotice.textContent = `Showing the latest ${DIALOGUE_HISTORY_RENDER_LIMIT} lines.`;
-      list.append(limitNotice);
-    }
-    for (const beat of visibleHistory) {
-      const article = document.createElement("article");
-      article.className = "vn-history-beat";
-      const speaker = document.createElement("h3");
-      speaker.textContent = beat.speaker;
-      const text = document.createElement("p");
-      text.textContent = beat.text;
-      article.append(speaker, text);
-      list.append(article);
-    }
-    list.lastElementChild?.scrollIntoView?.({ block: "nearest" });
-  }
-
   showUpgradeChoices(grid, choices, choose) {
     grid.replaceChildren();
+    const buttons = [];
     for (const choice of choices) {
       const button = document.createElement("button");
       button.className = `upgrade-card path-${choice.path.toLowerCase()}`;
+      button.type = "button";
+      const art = document.createElement("img");
+      art.className = "upgrade-card-art";
+      art.src = publicAssetUrl(`assets/ui/upgrade-option-${choice.path.toLowerCase()}-sprite.png`);
+      art.alt = "";
+      art.setAttribute("aria-hidden", "true");
+      art.draggable = false;
+      const stud = document.createElement("img");
+      stud.className = "upgrade-card-stud";
+      stud.src = publicAssetUrl(`assets/ui/upgrade-option-${choice.path.toLowerCase()}-stud.png`);
+      stud.alt = "";
+      stud.setAttribute("aria-hidden", "true");
+      stud.draggable = false;
+      const content = document.createElement("span");
+      content.className = "upgrade-card-content";
       const header = document.createElement("span");
       header.className = "upgrade-card-header";
       const path = document.createElement("span");
@@ -1340,51 +1348,48 @@ export class GameUi {
       const rank = document.createElement("span");
       rank.className = "upgrade-rank";
       rank.textContent = choice.maxRank === null ? "Restoration" : `Rank ${choice.nextRank}/${choice.maxRank}`;
-      header.append(path, rank);
+      header.append(path);
       const name = document.createElement("h3");
       name.textContent = choice.name;
-      const description = document.createElement("p");
-      description.textContent = choice.description;
-      button.append(header, name, description);
+      content.append(header, name, rank);
+      const details = document.createElement("dl");
+      details.className = "upgrade-details";
+      const appendDetail = (labelText, valueText, kind = "text") => {
+        const item = document.createElement("div");
+        item.dataset.detail = kind;
+        const label = document.createElement("dt");
+        const value = document.createElement("dd");
+        label.textContent = labelText;
+        value.textContent = valueText;
+        item.append(label, value);
+        details.append(item);
+      };
       if (choice.preview?.rows?.length > 0) {
-        const preview = document.createElement("dl");
-        preview.className = "upgrade-preview";
         for (const row of choice.preview.rows) {
-          const item = document.createElement("div");
-          const label = document.createElement("dt");
-          const value = document.createElement("dd");
-          label.textContent = row.label;
-          value.textContent = `${row.beforeText} → ${row.afterText}`;
-          item.append(label, value);
-          preview.append(item);
+          appendDetail(row.label, `${row.beforeText} → ${row.afterText}`, "value");
         }
-        button.append(preview);
       }
-      const facts = [];
-      if (choice.tags?.length) facts.push(...choice.tags.map(titleCaseId));
-      if (choice.prerequisites?.length) facts.push(`Needs ${choice.prerequisites.map(titleCaseId).join(", ")}`);
-      if (choice.excludes?.length) facts.push(`Excludes ${choice.excludes.map(titleCaseId).join(", ")}`);
-      if (choice.synergies?.length) facts.push(`Pairs with ${choice.synergies.map(titleCaseId).join(", ")}`);
-      if (choice.transformation?.status === "live") facts.push("Transforms an action");
-      if (facts.length > 0) {
-        const list = document.createElement("span");
-        list.className = "upgrade-facts";
-        list.textContent = facts.join(" · ");
-        button.append(list);
-      }
+      const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`;
+      const profile = [];
+      if (choice.prerequisites?.length) profile.push(countLabel(choice.prerequisites.length, "requirement"));
+      if (choice.excludes?.length) profile.push(countLabel(choice.excludes.length, "conflict"));
+      if (choice.synergies?.length) profile.push(countLabel(choice.synergies.length, "synergy", "synergies"));
+      if (choice.transformation?.status === "live") profile.push("Action upgrade");
+      if (profile.length > 0) appendDetail("Build", profile.join(" · "), "summary");
+      if (details.childElementCount > 0) content.append(details);
+      button.append(art, stud, content);
       button.addEventListener("click", () => choose(choice.id));
+      buttons.push(button);
       grid.append(button);
     }
-    queueMicrotask(() => grid.querySelector("button")?.focus());
+    queueMicrotask(() => buttons[Math.min(1, buttons.length - 1)]?.focus());
   }
 
   setRerollState(screenId, available) {
     const screen = this.root.querySelector(`[data-screen='${screenId}']`);
     const button = screen.querySelector("[data-action='reroll-upgrades']");
-    const status = screen.querySelector("[data-reroll-status]");
     button.disabled = !available;
     button.textContent = available ? "Reroll choices · once this floor" : "Reroll unavailable this floor";
-    status.textContent = available ? "One deterministic reroll remains on this floor." : "";
   }
 
   showRoomRewards(rewards = [], rerollAvailable = false) {
@@ -1470,12 +1475,31 @@ export class GameUi {
   }
 
   showEnding(detail) {
-    this.renderRunSummary(this.runSession?.lastRunSummary?.());
+    const summary = this.runSession?.lastRunSummary?.();
+    this.renderRunSummary(summary);
     const completed = detail.completed === true || detail.ending === "kill" || detail.ending === "timeout";
     const ending = detail.ending ?? this.endingOutcome;
     const eyebrow = this.root.querySelector("[data-ending='eyebrow']");
     const title = this.root.querySelector("[data-ending='title']");
     const copy = this.root.querySelector("[data-ending='copy']");
+    const retry = this.root.querySelector("[data-screen='ending'] [data-action='retry']");
+    const newRun = this.root.querySelector("[data-screen='ending'] [data-action='new-run']");
+    const speedrun = summary?.runType === "speedrun" || this.game.runType === "speedrun";
+    retry.textContent = speedrun ? "Retry Seed" : "Retry seed";
+    newRun.textContent = speedrun ? "New Speedrun" : "New Descent";
+    if (speedrun) {
+      const time = summary?.speedrunTimeSeconds ?? this.runSession?.speedrunSnapshot?.().elapsedSeconds ?? 0;
+      if (completed) {
+        eyebrow.textContent = summary?.isPersonalBest ? "New personal best" : "Speedrun complete";
+        title.textContent = "The Witch is defeated";
+        copy.textContent = `${formatSpeedrunTime(time)} · Seed ${detail.seed ?? summary?.seed ?? this.game.seed} · ${ending === "kill" ? "Mercy chosen" : "Hesitation chosen"}`;
+      } else {
+        eyebrow.textContent = `Floor ${detail.floor} · Chamber ${detail.room}`;
+        title.textContent = "Speedrun ended";
+        copy.textContent = `${formatSpeedrunTime(time)} elapsed · Seed ${detail.seed ?? summary?.seed ?? this.game.seed}`;
+      }
+      return;
+    }
     if (completed && ending === "kill") {
       eyebrow.textContent = "The last mercy";
       title.textContent = "You found her";
@@ -1503,19 +1527,33 @@ export class GameUi {
     const outcome = summary.terminal?.kind === "ending"
       ? summary.terminal.id === "kill" ? "Mercy ending" : "Release ending"
       : titleCaseId(summary.terminal?.cause ?? "Defeated");
-    const rows = [
+    const speedrun = summary.runType === "speedrun";
+    const rows = speedrun ? [
+      ["Mode", "Speedrun"],
+      ["Outcome", summary.terminal?.kind === "ending"
+        ? summary.terminal.id === "kill" ? "Mercy decision" : "Hesitation decision"
+        : outcome],
+      ["Difficulty", "Ruthless"],
+      [summary.speedrunFinished ? "Witch time" : "Elapsed", formatSpeedrunTime(summary.speedrunTimeSeconds)],
+      ["Record", summary.isPersonalBest
+        ? "New personal best"
+        : summary.terminal?.kind === "ending" ? "Completed attempt" : "Attempt ended"],
+      ["Seed", summary.seed],
+    ] : [
       ["Outcome", outcome],
       ["Difficulty", titleCaseId(summary.difficultyId)],
       ["Time", formatDuration(summary.durationSeconds)],
+    ];
+    rows.push(
       ["Deepest floor", String(summary.deepestFloor)],
       ["Rooms cleared", String(summary.roomsCleared)],
       ["Enemies reaped", String(kills)],
       ["Damage dealt", String(Math.round(summary.damageDealt))],
       ["Highest hit", String(Math.round(summary.highestHit))],
       ["Preferred path", preferredPath],
-    ];
+    );
     const heading = document.createElement("h3");
-    heading.textContent = "Descent summary";
+    heading.textContent = speedrun ? "Speedrun summary" : "Descent summary";
     const list = document.createElement("dl");
     for (const [label, value] of rows) {
       const item = document.createElement("div");
@@ -1527,118 +1565,6 @@ export class GameUi {
       list.append(item);
     }
     root.append(heading, list);
-  }
-
-  renderGlossary() {
-    const index = this.root.querySelector("[data-glossary-entries]");
-    index.replaceChildren();
-    Object.values(GLOSSARY_ENTRIES).forEach((entry, entryIndex) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "glossary-index-button";
-      button.id = `glossary-tab-${entry.id}`;
-      button.dataset.glossaryEntry = entry.id;
-      button.setAttribute("role", "tab");
-      button.setAttribute("aria-controls", "glossary-detail");
-      const number = document.createElement("span");
-      number.className = "glossary-index-number";
-      number.setAttribute("aria-hidden", "true");
-      number.textContent = String(entryIndex + 1).padStart(2, "0");
-      const label = document.createElement("span");
-      label.textContent = entry.title;
-      button.append(number, label);
-      button.addEventListener("click", () => this.selectGlossaryEntry(entry.id));
-      button.addEventListener("keydown", (event) => {
-        const direction = {
-          ArrowUp: -1,
-          ArrowLeft: -1,
-          ArrowDown: 1,
-          ArrowRight: 1,
-          Home: "first",
-          End: "last",
-        }[event.key];
-        if (direction === undefined) return;
-        event.preventDefault();
-        event.stopPropagation();
-        this.moveGlossarySelection(direction);
-      });
-      index.append(button);
-    });
-    this.selectGlossaryEntry(this.activeGlossaryEntryId);
-  }
-
-  moveGlossarySelection(direction) {
-    const entries = Object.values(GLOSSARY_ENTRIES);
-    if (entries.length === 0) return;
-    const currentIndex = Math.max(0, entries.findIndex((entry) => entry.id === this.activeGlossaryEntryId));
-    const nextIndex = direction === "first"
-      ? 0
-      : direction === "last"
-        ? entries.length - 1
-        : (currentIndex + direction + entries.length) % entries.length;
-    this.selectGlossaryEntry(entries[nextIndex].id);
-    this.root.querySelector(`[data-glossary-entry="${entries[nextIndex].id}"]`)?.focus();
-  }
-
-  selectGlossaryEntry(entryId) {
-    const entry = GLOSSARY_ENTRIES[entryId] ?? Object.values(GLOSSARY_ENTRIES)[0];
-    if (!entry) return;
-    this.activeGlossaryEntryId = entry.id;
-    const detail = this.root.querySelector("[data-glossary-detail]");
-    const kicker = document.createElement("p");
-    kicker.className = "eyebrow";
-    kicker.textContent = "Recovered record";
-    const title = document.createElement("h3");
-    title.id = "glossary-detail-title";
-    title.textContent = entry.title;
-    const text = document.createElement("p");
-    text.textContent = entry.text;
-    detail.id = "glossary-detail";
-    detail.setAttribute("aria-labelledby", `glossary-tab-${entry.id}`);
-    detail.replaceChildren(kicker, title, text);
-    for (const button of this.root.querySelectorAll("[data-glossary-entry]")) {
-      const selected = button.dataset.glossaryEntry === entry.id;
-      button.classList.toggle("active", selected);
-      button.setAttribute("aria-selected", String(selected));
-      button.tabIndex = selected ? 0 : -1;
-    }
-  }
-
-  updateGlossaryAccess(unlocked = this.narrativeProgress?.isGlossaryUnlocked?.() === true) {
-    this.glossaryUnlocked = unlocked;
-    const button = this.root.querySelector("[data-action='open-glossary']");
-    button.disabled = !unlocked;
-    button.classList.toggle("locked", !unlocked);
-    button.textContent = unlocked ? "Glossary" : "Glossary · Locked";
-    button.setAttribute("aria-label", unlocked ? "Open unlocked glossary" : "Glossary locked until an ending is completed");
-    this.root.querySelector(".glossary-lock-note").classList.toggle("hidden", unlocked);
-  }
-
-  openGlossary(trigger) {
-    if (!this.glossaryUnlocked) {
-      this.showGlossaryToast("Complete either ending to recover the sealed records.");
-      return;
-    }
-    this.glossaryTrigger = trigger;
-    const modal = this.root.querySelector("[data-screen='glossary']");
-    modal.classList.remove("hidden");
-    queueMicrotask(() => modal.querySelector(".glossary-index-button.active")?.focus());
-  }
-
-  closeGlossary() {
-    const modal = this.root.querySelector("[data-screen='glossary']");
-    if (modal.classList.contains("hidden")) return;
-    modal.classList.add("hidden");
-    this.glossaryTrigger?.focus?.();
-    this.glossaryTrigger = null;
-  }
-
-  showGlossaryToast(text) {
-    const toast = this.root.querySelector("[data-glossary-toast]");
-    toast.textContent = text;
-    toast.classList.remove("hidden");
-    clearTimeout(this.lastGlossaryToastTimer);
-    this.lastGlossaryToastTimer = setTimeout(() => toast.classList.add("hidden"), 4200);
   }
 
   setupTouchControls() {
@@ -1703,11 +1629,23 @@ export class GameUi {
     const coarse = window.matchMedia("(pointer: coarse)").matches;
     const showTouch = values.controls.touchControls === "on" || (values.controls.touchControls === "auto" && coarse);
     this.root.querySelector("[data-touch-controls]").classList.toggle("enabled", showTouch);
-    this.updateDialogueInputHint(this.activeInputDevice);
+    const effectsDensity = clamp01(values.graphics.effectsDensity);
+    const particlesEnabled = !values.accessibility.reducedParticles;
+    this.titleLogo.configure({
+      reducedMotion: values.camera.reducedMotion,
+      particlesEnabled,
+      particleAmount: Math.round(6 * effectsDensity),
+    });
+    this.loadingLogo.configure({
+      reducedMotion: values.camera.reducedMotion,
+      particlesEnabled,
+      particleAmount: Math.round(9 * effectsDensity),
+    });
+    this.updateBookendInputHint(this.activeInputDevice);
   }
 
   hideForBenchmark() {
-    for (const screen of this.root.querySelectorAll(".screen, .modal, .hud, .touch-controls, .ending-fade, .glossary-toast")) {
+    for (const screen of this.root.querySelectorAll(".screen, .modal, .hud, .touch-controls, .ending-fade")) {
       screen.classList.add("hidden");
     }
   }

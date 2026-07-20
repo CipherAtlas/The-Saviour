@@ -32,22 +32,23 @@ test("leases obey stable natural enemy order and expose immutable resolved ident
 });
 
 test("family and total budgets create behavioral differences between difficulties", () => {
-  const story = new AttackCoordinator();
-  story.beginStep(["e1", "e2", "e3", "e4"], DIFFICULTY.story);
-  assert.ok(story.request({ enemyId: "e1", family: "area" }));
-  assert.equal(story.request({ enemyId: "e2", family: "area" }), null);
-  assert.equal(story.lastDenial.reason, "familyBudget");
-  assert.ok(story.request({ enemyId: "e3", family: "melee" }));
-  assert.ok(story.request({ enemyId: "e4", family: "ranged" }));
+  const relaxed = new AttackCoordinator();
+  relaxed.beginStep(["e1", "e2", "e3", "e4"], DIFFICULTY.relaxed);
+  assert.ok(relaxed.request({ enemyId: "e1", family: "area" }));
+  assert.equal(relaxed.request({ enemyId: "e2", family: "area" }), null);
+  assert.equal(relaxed.lastDenial.reason, "familyBudget");
+  assert.ok(relaxed.request({ enemyId: "e3", family: "melee" }));
+  assert.ok(relaxed.request({ enemyId: "e4", family: "ranged" }));
 
   const ruthless = new AttackCoordinator();
-  ruthless.beginStep(["e1", "e2", "e3", "e4", "e5", "e6"], DIFFICULTY.ruthless);
+  ruthless.beginStep(["e1", "e2", "e3", "e4", "e5", "e6", "e7"], DIFFICULTY.ruthless);
   assert.ok(ruthless.request({ enemyId: "e1", family: "area" }));
   assert.ok(ruthless.request({ enemyId: "e2", family: "area" }));
   assert.ok(ruthless.request({ enemyId: "e3", family: "melee" }));
   assert.ok(ruthless.request({ enemyId: "e4", family: "melee" }));
   assert.ok(ruthless.request({ enemyId: "e5", family: "ranged" }));
-  assert.equal(ruthless.request({ enemyId: "e6", family: "ranged" }), null);
+  assert.ok(ruthless.request({ enemyId: "e6", family: "ranged" }));
+  assert.equal(ruthless.request({ enemyId: "e7", family: "ranged" }), null);
   assert.equal(ruthless.lastDenial.reason, "totalBudget");
 });
 

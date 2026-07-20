@@ -8,11 +8,11 @@ const ROLE_GROUPS = Object.freeze({
 });
 
 export const ENEMY_ORIGINS = Object.freeze({
-  WITCH: "witch",
-  PRINCESS: "princess",
+  STABLE: "stable",
+  VOLATILE: "volatile",
 });
 
-const PRINCESS_ORIGIN_QUOTAS = Object.freeze([
+const VOLATILE_ORIGIN_QUOTAS = Object.freeze([
   Object.freeze([0, 0, 0]),
   Object.freeze([0, 1, 1]),
   Object.freeze([1, 1, 1]),
@@ -25,7 +25,7 @@ const PRINCESS_ORIGIN_QUOTAS = Object.freeze([
   Object.freeze([7, 8, 0]),
 ]);
 
-const PRINCESS_ORIGIN_AFFINITY = Object.freeze({
+const VOLATILE_ORIGIN_AFFINITY = Object.freeze({
   thrall: 1,
   wraith: 0.9,
   reaver: 0.75,
@@ -34,8 +34,8 @@ const PRINCESS_ORIGIN_AFFINITY = Object.freeze({
   boneguard: 0.15,
 });
 
-export function princessOriginQuota(floor, room, count) {
-  const floorQuotas = PRINCESS_ORIGIN_QUOTAS[Math.max(1, Math.min(10, floor)) - 1];
+export function volatileOriginQuota(floor, room, count) {
+  const floorQuotas = VOLATILE_ORIGIN_QUOTAS[Math.max(1, Math.min(10, floor)) - 1];
   const quota = floorQuotas?.[Math.max(1, Math.min(3, room)) - 1] ?? 0;
   return Math.min(count, quota);
 }
@@ -73,15 +73,15 @@ function addGuaranteedRoles(types, weights, floor, room, rng) {
 }
 
 function assignOrigins(types, floor, room, rng) {
-  const princessCount = princessOriginQuota(floor, room, types.length);
+  const volatileCount = volatileOriginQuota(floor, room, types.length);
   const ranked = types.map((type, index) => ({
     index,
-    score: (PRINCESS_ORIGIN_AFFINITY[type] ?? 0) + rng.float(0, 0.35),
+    score: (VOLATILE_ORIGIN_AFFINITY[type] ?? 0) + rng.float(0, 0.35),
   })).sort((left, right) => right.score - left.score || left.index - right.index);
-  const princessIndexes = new Set(ranked.slice(0, princessCount).map((entry) => entry.index));
+  const volatileIndexes = new Set(ranked.slice(0, volatileCount).map((entry) => entry.index));
   return types.map((type, index) => ({
     type,
-    origin: princessIndexes.has(index) ? ENEMY_ORIGINS.PRINCESS : ENEMY_ORIGINS.WITCH,
+    origin: volatileIndexes.has(index) ? ENEMY_ORIGINS.VOLATILE : ENEMY_ORIGINS.STABLE,
     originPhase: rng.float(0, Math.PI * 2),
   }));
 }

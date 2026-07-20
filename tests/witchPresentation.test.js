@@ -55,7 +55,7 @@ function enemy(id, type = "queen", overrides = {}) {
   return {
     id,
     type,
-    origin: "witch",
+    origin: "stable",
     originPhase: 0,
     active: true,
     dismissed: false,

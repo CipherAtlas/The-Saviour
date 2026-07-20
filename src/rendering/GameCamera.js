@@ -66,11 +66,11 @@ export class GameCamera {
     const smoothing = 1 - Math.exp(-followRate * dt);
     this.focus.lerp(target, smoothing);
     this.trauma = Math.max(0, this.trauma - dt * 2.4);
-    const narrativeShake = this.settings.get("camera.reducedMotion")
+    const endingShake = this.settings.get("camera.reducedMotion")
       ? 0
       : Math.max(0, Math.min(1, endingUrgency)) * this.settings.get("camera.shake");
-    const shake = Math.max(this.trauma * this.trauma, narrativeShake * narrativeShake * 0.92);
-    const frequency = 1 + narrativeShake * 0.72;
+    const shake = Math.max(this.trauma * this.trauma, endingShake * endingShake * 0.92);
+    const frequency = 1 + endingShake * 0.72;
     const shakeX = Math.sin(this.time * 43.7 * frequency) * shake * 0.32;
     const shakeZ = Math.sin(this.time * 37.1 * frequency + 1.7) * shake * 0.25;
     let dynamicMultiplier = this.settings.get("camera.dynamicZoom") && bossActive ? CAMERA_CONFIG.bossZoomMultiplier : 1;

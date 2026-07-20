@@ -70,15 +70,15 @@ function transitionHarness() {
     return [stage, slot];
   }));
   let background = new FakeImage("/old-background.png");
-  background.dataset.dialogue = "background";
+  background.dataset.bookend = "background";
   background.replace = (image) => {
     background = image;
     image.replace = (replacement) => { background = replacement; };
   };
   const root = {
     querySelector(selector) {
-      if (selector === "[data-screen='dialogue']") return screen;
-      if (selector === "[data-dialogue='background']") return background;
+      if (selector === "[data-screen='bookend']") return screen;
+      if (selector === "[data-bookend='background']") return background;
       const stage = selector.match(/^\[data-vn-stage='(.+)'\]$/)?.[1];
       return stage ? slots.get(stage) : null;
     },
@@ -88,9 +88,9 @@ function transitionHarness() {
   };
   const ui = {
     root,
-    dialogueArtToken: 0,
-    dialogueArtBeatId: "old.beat",
-    hideDialogueArt() {
+    bookendArtToken: 0,
+    bookendArtBeatId: "old.beat",
+    hideBookendArt() {
       throw new Error("outgoing ready art must not be cleared while replacement images are pending");
     },
   };
@@ -102,15 +102,15 @@ test("VN transition retains outgoing art until both exact staging images are rea
   const backgroundReady = deferred();
   const cutoutReady = deferred();
   const paths = [];
-  harness.ui.loadDialogueImage = (path) => {
+  harness.ui.loadBookendImage = (path) => {
     paths.push(path);
     return paths.length === 1 ? backgroundReady.promise : cutoutReady.promise;
   };
 
-  const transition = GameUi.prototype.prepareDialogueArt.call(harness.ui, {
+  const transition = GameUi.prototype.prepareBookendArt.call(harness.ui, {
     beatId: "next.beat",
-    background: "royal-study-evening",
-    artState: "princess.human",
+    background: "containment-heart-broken",
+    artState: "princess.final-plea",
     stage: "right",
   });
 
@@ -139,12 +139,12 @@ test("VN transition retains outgoing art until both exact staging images are rea
 
 test("failed replacement retains the outgoing complete composition", async () => {
   const harness = transitionHarness();
-  harness.ui.loadDialogueImage = async () => { throw new Error("decode failed"); };
+  harness.ui.loadBookendImage = async () => { throw new Error("decode failed"); };
 
-  await GameUi.prototype.prepareDialogueArt.call(harness.ui, {
+  await GameUi.prototype.prepareBookendArt.call(harness.ui, {
     beatId: "failed.beat",
-    background: "royal-study-evening",
-    artState: "princess.human",
+    background: "containment-heart-broken",
+    artState: "princess.final-plea",
     stage: "right",
   });
 
@@ -158,15 +158,15 @@ test("a newer pending beat retains outgoing art and makes an older completion st
   const olderBackground = deferred();
   const olderCutout = deferred();
   let olderLoadCount = 0;
-  harness.ui.loadDialogueImage = () => {
+  harness.ui.loadBookendImage = () => {
     olderLoadCount += 1;
     return olderLoadCount === 1 ? olderBackground.promise : olderCutout.promise;
   };
 
-  const olderTransition = GameUi.prototype.prepareDialogueArt.call(harness.ui, {
+  const olderTransition = GameUi.prototype.prepareBookendArt.call(harness.ui, {
     beatId: "older.beat",
-    background: "royal-study-evening",
-    artState: "princess.human",
+    background: "containment-heart-broken",
+    artState: "princess.final-plea",
     stage: "right",
   });
   assert.equal(harness.screen.dataset.artState, "transitioning");
@@ -174,14 +174,14 @@ test("a newer pending beat retains outgoing art and makes an older completion st
   const newestBackground = new FakeImage("/newest-background.png");
   const newestCutout = new FakeImage("/newest-cutout.png");
   let newestLoadCount = 0;
-  harness.ui.loadDialogueImage = async () => {
+  harness.ui.loadBookendImage = async () => {
     newestLoadCount += 1;
     return newestLoadCount === 1 ? newestBackground : newestCutout;
   };
-  await GameUi.prototype.prepareDialogueArt.call(harness.ui, {
+  await GameUi.prototype.prepareBookendArt.call(harness.ui, {
     beatId: "newest.beat",
     background: "ring-void",
-    artState: "prince.resolved",
+    artState: "prince.determined",
     stage: "center",
   });
 

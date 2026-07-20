@@ -5,7 +5,7 @@ import {
 } from "../game/RunStatsAccumulator.js";
 
 export const STATISTICS_KEY = "hollow-crown-statistics";
-export const STATISTICS_VERSION = 1;
+export const STATISTICS_VERSION = 2;
 
 const ENDING_IDS = Object.freeze(["kill", "timeout"]);
 const ACTION_IDS = Object.freeze([
@@ -94,6 +94,39 @@ function createEmptyStatistics() {
     }])),
     recordedRunIds: [],
   };
+}
+
+function migrateDifficultyRecord(record, fallback) {
+  if (!isRecord(record)) return record;
+  return {
+    relaxed: record.relaxed ?? record.story ?? fallback,
+    standard: record.standard ?? fallback,
+    ruthless: record.ruthless ?? fallback,
+  };
+}
+
+function migrateStatistics(candidate) {
+  if (!isRecord(candidate) || candidate.version !== 1) return candidate;
+  const migrated = clone(candidate);
+  migrated.version = STATISTICS_VERSION;
+  migrated.completions = migrateDifficultyRecord(migrated.completions, { kill: 0, timeout: 0 });
+  migrated.bestCompletionTimeSeconds = migrateDifficultyRecord(migrated.bestCompletionTimeSeconds, null);
+  migrated.deepestFloor = migrateDifficultyRecord(migrated.deepestFloor, 0);
+  for (const history of Object.values(migrated.upgradeHistory ?? {})) {
+    history.byDifficulty = migrateDifficultyRecord(history.byDifficulty, 0);
+  }
+  for (const history of Object.values(migrated.pathHistory ?? {})) {
+    history.byDifficulty = migrateDifficultyRecord(history.byDifficulty, 0);
+  }
+  const origins = migrated.kills?.byOrigin;
+  if (isRecord(origins)) {
+    const stable = (origins.stable ?? 0) + (origins.witch ?? 0);
+    const volatile = (origins.volatile ?? 0) + (origins.princess ?? 0);
+    migrated.kills.byOrigin = {};
+    if (stable > 0) migrated.kills.byOrigin.stable = stable;
+    if (volatile > 0) migrated.kills.byOrigin.volatile = volatile;
+  }
+  return migrated;
 }
 
 function validCountMap(value) {
@@ -214,7 +247,7 @@ export class StatisticsStore {
     try {
       const raw = this.storage.getItem(STATISTICS_KEY);
       if (raw === null) return createEmptyStatistics();
-      const value = validateLifetimeStatistics(JSON.parse(raw));
+      const value = validateLifetimeStatistics(migrateStatistics(JSON.parse(raw)));
       if (value) return clone(value);
       this.lastError = "invalid";
     } catch {

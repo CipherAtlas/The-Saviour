@@ -15,7 +15,7 @@ test("damage-number taxonomy prioritizes block over critical and rounds accepted
   assert.equal(blocked.taxonomy, "blocked");
   assert.equal(blocked.amount, 13);
   assert.equal(blocked.targetId, "enemy:7");
-  assert.equal(blocked.y, 3.1);
+  assert.equal(blocked.y, 3.2);
   assert.equal(blocked.lifetime, DAMAGE_NUMBER_STYLES.blocked.lifetime);
 
   const critical = damageNumberModel({ ...base, detail: { ...base.detail, blocked: false } });

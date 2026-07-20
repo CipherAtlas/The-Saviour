@@ -21,8 +21,8 @@ test("run statistics consume canonical combat, progression, origin, and terminal
   stats.record(event("roomReady", { floor: 7 }));
   stats.record(event("roomCleared", { floor: 7, room: 2 }));
   stats.record(event("enemyHit", { hitOrigin: "player", damage: 42, critical: true }));
-  stats.record(event("enemyHit", { hitOrigin: "witch", damage: 900, critical: true }));
-  stats.record(event("enemyDefeated", { type: "wraith", origin: "princess" }));
+  stats.record(event("enemyHit", { hitOrigin: "stable", damage: 900, critical: true }));
+  stats.record(event("enemyDefeated", { type: "wraith", origin: "volatile" }));
   stats.record(event("playerHit", { amount: 99, appliedAmount: 17 }));
   stats.record(event("playerHealed", { amount: 12 }));
   stats.record(event("dash"));
@@ -45,14 +45,14 @@ test("run statistics consume canonical combat, progression, origin, and terminal
   stats.record(event("upgradeRerolled"));
 
   stats.sampleTime(10, "playing", true);
-  stats.sampleTime(5, "dialogue", true);
+  stats.sampleTime(5, "bookend", true);
   stats.sampleTime(3, "reward", true);
   stats.sampleTime(2, "roomLoading", true);
   stats.sampleTime(8, "paused", true);
   stats.sampleTime(8, "playing", false);
   stats.record(event("bossCombatStarted"));
   stats.sampleTime(4, "playing", true);
-  stats.record(event("enemyDefeated", { type: "queen", origin: "witch" }));
+  stats.record(event("enemyDefeated", { type: "queen", origin: "stable" }));
 
   const result = stats.finalize(event("runEnded", {
     completed: true,
@@ -66,7 +66,7 @@ test("run statistics consume canonical combat, progression, origin, and terminal
   assert.equal(result.roomsCleared, 1);
   assert.deepEqual(result.enemiesKilled, {
     byType: { wraith: 1, queen: 1 },
-    byOrigin: { princess: 1, witch: 1 },
+    byOrigin: { volatile: 1, stable: 1 },
   });
   assert.equal(result.damageDealt, 42);
   assert.equal(result.damageTaken, 17);
@@ -101,9 +101,9 @@ test("run statistics consume canonical combat, progression, origin, and terminal
 
 test("drafts round-trip for suspension while finalized runs reject resume and duplicate finalize", () => {
   const stats = new RunStatsAccumulator({
-    runId: "run-story-001",
+    runId: "run-relaxed-001",
     seed: "RESUME-SEED",
-    difficultyId: "story",
+    difficultyId: "relaxed",
   });
   stats.record(event("dash"));
   stats.sampleTime(2.5, "playing", true);
@@ -111,7 +111,7 @@ test("drafts round-trip for suspension while finalized runs reject resume and du
 
   assert.deepEqual(validateRunStatisticsDraft(draft), draft);
   const resumed = RunStatsAccumulator.fromDraft(draft);
-  resumed.sampleTime(1.5, "dialogue", true);
+  resumed.sampleTime(1.5, "bookend", true);
   const result = resumed.finalize({ completed: false, cause: "boneguard" });
   assert.deepEqual(result.terminal, { kind: "death", cause: "boneguard" });
   assert.equal(result.durationSeconds, 4);

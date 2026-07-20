@@ -13,7 +13,7 @@ const MAX_PROJECTILES = 96;
 export function endingCorruptionUrgency(game) {
   const endingState = game.ending?.snapshot?.();
   if (game.phase === "endingChoice") return endingState?.decision?.urgency ?? 0;
-  if (endingState?.result?.id === "timeout" && ["dialogue", "endingFade"].includes(game.phase)) return 1;
+  if (endingState?.result?.id === "timeout" && ["bookend", "endingFade"].includes(game.phase)) return 1;
   return 0;
 }
 
@@ -89,7 +89,7 @@ function presentationScale(options) {
   return motionScale * flashScale;
 }
 
-function presentation(bursts, rings, trauma = 0) {
+function presentation(bursts = [], rings = [], trauma = 0) {
   return { bursts, rings, trauma };
 }
 
@@ -213,15 +213,35 @@ export function combatPresentationDescriptor(type, detail = {}, options = {}) {
   if (type === "attack" && playerPosition) {
     const dash = safeDetail.dash === true;
     const heavy = safeDetail.heavy === true;
+    const line = safeDetail.line === true;
     const finisher = safeDetail.comboIndex === 2;
-    const color = heavy || finisher
+    const color = line ? ZEPHYR_PRESENTATION_COLORS.paleCyan : heavy || finisher
       ? ZEPHYR_PRESENTATION_COLORS.brightGold
       : dash ? ZEPHYR_PRESENTATION_COLORS.cyan : ZEPHYR_PRESENTATION_COLORS.paleCyan;
-    const accentRadius = heavy ? 0.82 : finisher ? 0.68 : dash ? 0.54 : 0.38;
+    const accentRadius = line ? 0.94 : heavy ? 0.82 : finisher ? 0.68 : dash ? 0.54 : 0.38;
     return presentation(
-      [{ position: playerPosition, color, count: heavy ? 14 : finisher ? 11 : 7, force: heavy ? 3.8 : 2.7 }],
-      [{ position: playerPosition, radius: radius(accentRadius), color, duration: heavy ? 0.34 : 0.22 }],
-      trauma(heavy ? 0.06 : finisher ? 0.045 : 0),
+      [{ position: playerPosition, color, count: line ? 18 : heavy ? 14 : finisher ? 11 : 7, force: line ? 4.6 : heavy ? 3.8 : 2.7 }],
+      line ? [] : [{ position: playerPosition, radius: radius(accentRadius), color, duration: heavy ? 0.34 : 0.22 }],
+      trauma(line ? 0.08 : heavy ? 0.06 : finisher ? 0.045 : 0),
+    );
+  }
+
+  if (type === "lineChargeStart" && playerPosition) {
+    return presentation([
+      { position: playerPosition, color: ZEPHYR_PRESENTATION_COLORS.cyan, count: 9, force: 2.4 },
+    ]);
+  }
+
+  if (type === "lineChargeReleased" && playerPosition) {
+    return presentation(
+      [{
+        position: playerPosition,
+        color: safeDetail.forced ? ZEPHYR_PRESENTATION_COLORS.brightGold : ZEPHYR_PRESENTATION_COLORS.paleCyan,
+        count: safeDetail.forced ? 26 : 20,
+        force: safeDetail.forced ? 6.2 : 5.1,
+      }],
+      [],
+      trauma(safeDetail.forced ? 0.16 : 0.11),
     );
   }
 
@@ -883,11 +903,11 @@ export class GameRenderer {
       this.cameraSystem.addTrauma(detail.type === "queen" ? 0.85 : 0.24);
     }
     if (type === "enemySpawned") {
-      const color = detail.origin === "princess" ? 0x9b3f63 : 0xc8bee0;
-      this.effects.spawnBurst(detail.position, color, detail.origin === "princess" ? 18 : 10, detail.origin === "princess" ? 5.2 : 3.2);
-      this.effects.spawnRing(detail.position, detail.origin === "princess" ? 0.72 : 0.58, color, 0.3);
+      const color = detail.origin === "volatile" ? 0x9b3f63 : 0xc8bee0;
+      this.effects.spawnBurst(detail.position, color, detail.origin === "volatile" ? 18 : 10, detail.origin === "volatile" ? 5.2 : 3.2);
+      this.effects.spawnRing(detail.position, detail.origin === "volatile" ? 0.72 : 0.58, color, 0.3);
     }
-    if (type === "witchOriginDismissed") {
+    if (type === "stableOriginDismissed") {
       for (const actor of detail.actors ?? []) {
         this.effects.spawnRing(actor.position, 0.7, 0xc8bee0, 0.38);
       }

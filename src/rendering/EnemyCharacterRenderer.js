@@ -612,7 +612,7 @@ export class EnemyCharacterRenderer {
 
   syncProxyActor(record, enemy, alpha, dt) {
     const profile = getEnemyVisualProfile(enemy.type);
-    const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "witch");
+    const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "stable");
     record.age += dt;
     if (!enemy.active) record.deathAge = record.deathAge < 0 ? 0 : record.deathAge + dt;
     const index = this.proxyCounts.get(enemy.type) ?? 0;
@@ -901,7 +901,7 @@ export class EnemyCharacterRenderer {
   }
 
   syncPose(record, enemy) {
-    const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "witch");
+    const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "stable");
     const originPulse = Math.sin(this.clockTime * originProfile.pulseSpeed + (enemy.originPhase ?? 0));
     let scaleX = 1;
     let scaleY = 1;
@@ -997,7 +997,7 @@ export class EnemyCharacterRenderer {
 
   syncMaterials(record, enemy) {
     const flash = clamp01(enemy.hitFlash / HIT_DURATION);
-    const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "witch");
+    const originProfile = getEnemyOriginVisualProfile(enemy.origin ?? "stable");
     const pulse = Math.sin(this.clockTime * originProfile.pulseSpeed + (enemy.originPhase ?? 0));
     this.originColor.set(originProfile.color);
     this.originEmissive.set(originProfile.emissive);

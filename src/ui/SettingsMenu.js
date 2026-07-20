@@ -21,11 +21,10 @@ const TABS = Object.freeze({
     ["audio.dynamicMusic", "Adaptive battle score", "Shift orchestration on bar boundaries as danger changes.", "toggle"],
     ["audio.sfx", "Effects", "Combat sound level.", "range", 0, 1, 0.05],
     ["audio.ui", "Interface", "Menu and notification sounds.", "range", 0, 1, 0.05],
-    ["audio.voice", "Dialogue", "Reserved voice/dialogue bus level.", "range", 0, 1, 0.05],
     ["audio.muteUnfocused", "Mute while unfocused", "Silence the game when switching windows.", "toggle"],
   ],
   gameplay: [
-    ["gameplay.lastDifficultyId", "Difficulty", "Used as the next run's initial selection.", "select", ["story", "standard", "ruthless"]],
+    ["gameplay.lastDifficultyId", "Difficulty", "Used as the next run's initial selection.", "select", ["relaxed", "standard", "ruthless"]],
     ["gameplay.aimAssist", "Aim assist", "Bias attacks toward nearby enemies.", "range", 0, 1, 0.05],
     ["gameplay.autoTarget", "Auto target", "Strength of soft target selection.", "range", 0, 1, 0.05],
     ["gameplay.damageNumbers", "Spatial combat numbers", "Show spatial damage, mitigation, and healing meaning above combatants.", "toggle"],

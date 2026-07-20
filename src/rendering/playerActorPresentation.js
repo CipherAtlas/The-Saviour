@@ -1,4 +1,4 @@
-import { NARRATIVE_TIMING, PLAYER_CONFIG } from "../game/gameConfig.js";
+import { ENDING_TIMING, PLAYER_CONFIG, STRAIGHT_CHARGE_CONFIG } from "../game/gameConfig.js";
 
 const HIT_DURATION = Object.freeze({ light: 0.24, heavy: 0.38 });
 const HEAL_DURATION = 0.56;
@@ -164,6 +164,41 @@ function sampleHeavyAttack(combat) {
   });
 }
 
+function sampleLineAttack(combat) {
+  const progress = attackProgress(combat);
+  const weight = attackWeight(combat);
+  const phase = attackPhase(combat);
+  const active = phase === "active"
+    ? smoothstep((combat.attackTime - combat.attack.activeStart)
+      / Math.max(0.001, combat.attack.activeEnd - combat.attack.activeStart))
+    : phase === "recovery" ? 1 : 0;
+  const brace = phase === "windup" ? weight : 1 - smoothstep(
+    (combat.attackTime - combat.attack.activeEnd)
+      / Math.max(0.001, combat.attack.duration - combat.attack.activeEnd),
+  );
+  return contract({
+    state: `grave-line-${phase}`,
+    clip: "Dodge_Forward",
+    once: true,
+    duration: combat.attack.duration,
+    progress,
+    clipProgress: 0.08 + progress * 0.68,
+    model: { x: -0.12 * brace - 0.42 * active, y: 0, z: 0 },
+    bones: {
+      hips: { x: -0.18 * weight, y: 0, z: -0.08 * weight },
+      spine: { x: -0.28 * brace - 0.36 * active, y: 0, z: 0 },
+      chest: { x: -0.18 * brace - 0.22 * active, y: 0, z: 0 },
+      head: { x: 0.1 * brace, y: 0, z: 0 },
+      "upperarm.r": { x: -0.88 * brace - 0.22 * active, y: -0.16 * brace, z: 0.18 * brace },
+      "lowerarm.r": { x: -0.46 * brace, y: 0, z: -0.08 * brace },
+      "upperarm.l": { x: -0.58 * brace, y: 0.14 * brace, z: -0.18 * brace },
+      "lowerarm.l": { x: -0.34 * brace, y: 0, z: 0.08 * brace },
+      "upperleg.l": { x: 0.34 * active, y: 0, z: 0.12 * brace },
+      "upperleg.r": { x: -0.28 * active, y: 0, z: -0.12 * brace },
+    },
+  });
+}
+
 function sampleDash(combat) {
   const duration = PLAYER_CONFIG.dash.duration;
   const progress = clamp01(combat.dashElapsed / duration);
@@ -209,6 +244,32 @@ function sampleCharge(combat, clockTime) {
       "lowerarm.r": { x: -0.38 * settle, y: 0, z: 0 },
       "upperleg.l": { x: 0.18 * settle, y: 0, z: 0.12 * settle },
       "upperleg.r": { x: -0.16 * settle, y: 0, z: -0.12 * settle },
+    },
+  });
+}
+
+function sampleLineCharge(combat, clockTime) {
+  const ratio = clamp01(combat.primaryCharge / STRAIGHT_CHARGE_CONFIG.buildupDuration);
+  const settle = smoothstep(Math.min(1, (ratio + 0.08) / 0.3));
+  const tension = 0.5 + ratio * 0.5;
+  const breath = Math.sin(clockTime * (5 + ratio * 3));
+  const phase = ratio < 0.18 ? "start" : ratio < 0.98 ? "track" : "ready";
+  return contract({
+    state: `grave-line-charge-${phase}`,
+    clip: "Idle",
+    progress: ratio,
+    model: { x: 0.14 * settle, y: 0, z: breath * 0.012 * settle },
+    bones: {
+      hips: { x: 0.16 * settle, y: 0, z: -0.08 * settle },
+      spine: { x: -0.24 * settle, y: 0, z: breath * 0.012 * settle },
+      chest: { x: -0.16 * settle, y: 0, z: -breath * 0.01 * settle },
+      head: { x: 0.08 * tension, y: 0, z: 0 },
+      "upperarm.r": { x: -0.76 * tension, y: -0.14 * tension, z: 0.2 * tension },
+      "lowerarm.r": { x: -0.48 * tension, y: 0, z: -0.08 * tension },
+      "upperarm.l": { x: -0.46 * tension, y: 0.12 * tension, z: -0.18 * tension },
+      "lowerarm.l": { x: -0.28 * tension, y: 0, z: 0.08 * tension },
+      "upperleg.l": { x: 0.2 * settle, y: 0, z: 0.12 * settle },
+      "upperleg.r": { x: -0.18 * settle, y: 0, z: -0.12 * settle },
     },
   });
 }
@@ -285,7 +346,7 @@ function sampleRevive(transient) {
 
 function sampleEndingStrike(game) {
   const strike = game.endingStrike;
-  const timing = strike?.timing ?? NARRATIVE_TIMING.endingStrike;
+  const timing = strike?.timing ?? ENDING_TIMING.endingStrike;
   const elapsed = Math.max(0, strike?.elapsed ?? 0);
   const progress = clamp01(elapsed / timing.R);
   const phase = elapsed < timing.T ? "anticipation" : elapsed < timing.C ? "travel" : "recovery";
@@ -397,9 +458,11 @@ export class PlayerActorPresentation {
     if (this.reviveRemaining > 0) return sampleRevive(this);
     if (this.hit) return sampleHit(this, game);
     if (combat.attackKind === "dash" && combat.attack) return sampleDashAttack(combat);
+    if (combat.attackKind === "line" && combat.attack) return sampleLineAttack(combat);
     if (combat.attackKind === "heavy" && combat.attack) return sampleHeavyAttack(combat);
     if (combat.attack && combat.comboIndex >= 0) return sampleLightAttack(combat);
     if (combat.isDashing) return sampleDash(combat);
+    if (combat.chargingPrimary) return sampleLineCharge(combat, this.clockTime);
     if (combat.chargingHeavy) return sampleCharge(combat, this.clockTime);
     if (this.healRemaining > 0) return sampleHeal(this);
     if (this.victoryRemaining > 0) return sampleVictory(this, false);

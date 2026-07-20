@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_DIFFICULTY_ID,
+  DEFAULT_RUN_TYPE,
   DIFFICULTY,
   DIFFICULTY_IDS,
   getDifficultyProfile,
+  RUN_TYPE_IDS,
 } from "../src/game/gameConfig.js";
 
 test("difficulty profiles expose a closed deeply immutable run contract", () => {
-  assert.deepEqual(DIFFICULTY_IDS, ["story", "standard", "ruthless"]);
+  assert.deepEqual(DIFFICULTY_IDS, ["relaxed", "standard", "ruthless"]);
   assert.equal(DEFAULT_DIFFICULTY_ID, "standard");
   assert.deepEqual(Object.keys(DIFFICULTY), DIFFICULTY_IDS);
 
@@ -35,7 +37,14 @@ test("difficulty profiles expose a closed deeply immutable run contract", () => 
   }
 });
 
-test("Standard preserves the current scalar baseline while Story retains every attack family", () => {
+test("run types remain orthogonal to the closed difficulty profiles", () => {
+  assert.equal(DEFAULT_RUN_TYPE, "normal");
+  assert.deepEqual(RUN_TYPE_IDS, ["normal", "speedrun"]);
+  assert.equal(Object.isFrozen(RUN_TYPE_IDS), true);
+  assert.equal(DIFFICULTY.speedrun, undefined);
+});
+
+test("Standard preserves the current scalar baseline while Relaxed retains every attack family", () => {
   assert.deepEqual(
     {
       enemyHealth: DIFFICULTY.standard.enemyHealth,
@@ -44,15 +53,15 @@ test("Standard preserves the current scalar baseline while Story retains every a
     },
     { enemyHealth: 1, enemyDamage: 1, enemySpeed: 1 },
   );
-  assert.ok(DIFFICULTY.story.attackBudgets.melee >= 1);
-  assert.ok(DIFFICULTY.story.attackBudgets.ranged >= 1);
-  assert.ok(DIFFICULTY.story.attackBudgets.area >= 1);
-  assert.ok(DIFFICULTY.story.enemyDamage > 0.5, "Story remains interactive rather than invulnerable");
+  assert.ok(DIFFICULTY.relaxed.attackBudgets.melee >= 1);
+  assert.ok(DIFFICULTY.relaxed.attackBudgets.ranged >= 1);
+  assert.ok(DIFFICULTY.relaxed.attackBudgets.area >= 1);
+  assert.ok(DIFFICULTY.relaxed.enemyDamage > 0.5, "Relaxed remains interactive rather than invulnerable");
 });
 
 test("Ruthless increases behavioral pressure while keeping scalar inflation bounded", () => {
   assert.ok(DIFFICULTY.ruthless.attackBudgets.total > DIFFICULTY.standard.attackBudgets.total);
-  assert.ok(DIFFICULTY.ruthless.attackBudgets.melee > DIFFICULTY.story.attackBudgets.melee);
+  assert.ok(DIFFICULTY.ruthless.attackBudgets.melee > DIFFICULTY.relaxed.attackBudgets.melee);
   assert.ok(DIFFICULTY.ruthless.attackBudgets.area > DIFFICULTY.standard.attackBudgets.area);
   assert.ok(DIFFICULTY.ruthless.windupMultiplier < DIFFICULTY.standard.windupMultiplier);
   assert.ok(DIFFICULTY.ruthless.cooldownMultiplier < DIFFICULTY.standard.cooldownMultiplier);
@@ -63,7 +72,7 @@ test("Ruthless increases behavioral pressure while keeping scalar inflation boun
 });
 
 test("difficulty lookup falls back only when requested and never fabricates a profile", () => {
-  assert.equal(getDifficultyProfile("story"), DIFFICULTY.story);
+  assert.equal(getDifficultyProfile("relaxed"), DIFFICULTY.relaxed);
   assert.equal(getDifficultyProfile("unknown"), DIFFICULTY.standard);
   assert.throws(() => getDifficultyProfile("unknown", { fallback: false }), /Unknown difficulty ID/);
 });

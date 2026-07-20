@@ -184,13 +184,15 @@ test("player and revive records resist lower tiers while critical and heal repla
 });
 
 test("pause and hit-stop freeze lifetime while normal updates release at bounded residence", () => {
-  const { fake, layer } = createLayer();
+  const { fake, root, layer } = createLayer();
   try {
     layer.spawn(model());
     const record = layer.records[0];
     layer.projectedVector = { set: () => ({ project: () => ({ x: 0, y: 0, z: 0 }) }) };
     layer.update(0.4, {}, { phase: "paused", hitStopActive: false });
+    assert.equal(root.hidden, true);
     layer.update(0.4, {}, { phase: "playing", hitStopActive: true });
+    assert.equal(root.hidden, false);
     assert.equal(record.elapsed, 0);
     assert.equal(record.node.style.opacity, "1");
     layer.update(record.lifetime, {}, { phase: "playing", hitStopActive: false });
@@ -199,11 +201,26 @@ test("pause and hit-stop freeze lifetime while normal updates release at bounded
   } finally { fake.restore(); }
 });
 
-test("dialogue and choice phases finish numbers while loading and terminal phases clear them", () => {
+test("entering pause clears combat numbers so they cannot reappear on resume", () => {
+  const { fake, root, layer } = createLayer();
+  try {
+    layer.spawn(model());
+    layer.handleEvent({ type: "phaseChanged", detail: { phase: "paused" } });
+    assert.equal(root.hidden, true);
+    assert.equal(layer.metrics().active, 0);
+    assert.ok(layer.records.every((record) => record.node.style.opacity === "0"));
+
+    layer.handleEvent({ type: "phaseChanged", detail: { phase: "playing" } });
+    assert.equal(root.hidden, false);
+    assert.equal(layer.metrics().active, 0);
+  } finally { fake.restore(); }
+});
+
+test("bookend and choice phases finish numbers while loading and terminal phases clear them", () => {
   const { fake, layer } = createLayer();
   try {
     layer.projectedVector = { set: () => ({ project: () => ({ x: 0, y: 0, z: 0 }) }) };
-    for (const phase of ["dialogue", "reward", "blessing"]) {
+    for (const phase of ["bookend", "reward", "blessing"]) {
       layer.spawn(model({ targetId: `enemy:${phase}` }));
       layer.update(DAMAGE_NUMBER_STYLES.normal.lifetime, {}, { phase });
       assert.equal(layer.metrics().active, 0, `${phase} should finish the active number`);

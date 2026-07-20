@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EndingSequence } from "../src/game/EndingSequence.js";
-import { NARRATIVE_TIMING } from "../src/game/gameConfig.js";
+import { ENDING_TIMING } from "../src/game/gameConfig.js";
 import { endingCorruptionUrgency } from "../src/rendering/GameRenderer.js";
 
 test("kill is accepted strictly before the five-second deadline", () => {
@@ -90,7 +90,7 @@ test("fade completes once and reset restores the inactive state", () => {
   const fading = ending.startFade(2_000);
 
   assert.equal(fading.stage, "fading");
-  assert.equal(fading.fade.deadlineMs, 2_000 + NARRATIVE_TIMING.fadeDurationMs);
+  assert.equal(fading.fade.deadlineMs, 2_000 + ENDING_TIMING.fadeDurationMs);
   ending.update(fading.fade.deadlineMs - 1);
   assert.equal(ending.snapshot().stage, "fading");
   ending.update(fading.fade.deadlineMs);
@@ -105,10 +105,10 @@ test("fade completes once and reset restores the inactive state", () => {
   assert.equal(reset.fade, null);
 });
 
-test("narrative timing defaults are immutable millisecond contracts", () => {
-  assert.equal(Object.isFrozen(NARRATIVE_TIMING), true);
-  assert.equal(NARRATIVE_TIMING.decisionDurationMs, 5_000);
-  assert.ok(NARRATIVE_TIMING.fadeDurationMs > 0);
+test("ending timing defaults are immutable millisecond contracts", () => {
+  assert.equal(Object.isFrozen(ENDING_TIMING), true);
+  assert.equal(ENDING_TIMING.decisionDurationMs, 5_000);
+  assert.ok(ENDING_TIMING.fadeDurationMs > 0);
 });
 
 test("corruption urgency clears after a kill and persists through the timeout presentation", () => {
@@ -118,7 +118,7 @@ test("corruption urgency clears after a kill and persists through the timeout pr
   };
   assert.equal(endingCorruptionUrgency(game), 0.81);
 
-  game.phase = "dialogue";
+  game.phase = "bookend";
   game.ending.snapshot = () => ({ decision: { urgency: 0.81 }, result: { id: "kill" } });
   assert.equal(endingCorruptionUrgency(game), 0);
 

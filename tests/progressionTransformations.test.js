@@ -36,7 +36,7 @@ function createGame(seed) {
   const events = [];
   game.on((event) => events.push(event));
   game.startRun(seed);
-  while (game.phase === "dialogue") game.skipDialogue();
+  while (game.phase === "bookend") game.continueBookend();
   for (const enemy of game.director.enemies) enemy.active = false;
   game.director.pendingWaves.length = 0;
   game.phase = "playing";
@@ -76,7 +76,7 @@ function hostileAttempt(id = "moonwell-hit") {
     family: "circle",
     enemyId: 7,
     enemyType: "reaver",
-    enemyOrigin: "witch",
+    enemyOrigin: "stable",
     projectileId: null,
   });
 }

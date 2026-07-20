@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { NARRATIVE_TIMING, PLAYER_CONFIG, SCYTHE_ATTACKS } from "../src/game/gameConfig.js";
+import { ENDING_TIMING, PLAYER_CONFIG, SCYTHE_ATTACKS, STRAIGHT_CHARGE_ATTACK } from "../src/game/gameConfig.js";
 import {
   PLAYER_ACTOR_PRESENTATION_TIMING,
   PlayerActorPresentation,
@@ -100,6 +100,24 @@ test("dash strike owns the body while dash traversal remains active", () => {
   assert.ok(dashStrike.bones.spine.x < -0.2);
 });
 
+test("normal combo animation remains authoritative while dash traversal continues", () => {
+  const presentation = new PlayerActorPresentation();
+  const attack = SCYTHE_ATTACKS[1];
+  const comboDuringDash = presentation.sample(game({
+    combat: {
+      attack,
+      attackTime: (attack.activeStart + attack.activeEnd) / 2,
+      attackKind: "light",
+      comboIndex: 1,
+      isDashing: true,
+      dashElapsed: 0.08,
+    },
+  }));
+
+  assert.equal(comboDuringDash.state, "combo-2-active");
+  assert.equal(comboDuringDash.clip, "2H_Melee_Attack_Spin");
+});
+
 test("dash has authored start, travel, and recovery phases with deterministic clip seeking", () => {
   const presentation = new PlayerActorPresentation();
   const at = (ratio) => presentation.sample(game({
@@ -144,6 +162,28 @@ test("charge start, held loop, release quality, and body commitment are distinct
   assert.equal(partial.state, "charged-reap-partial-active");
   assert.equal(perfect.state, "charged-reap-perfect-active");
   assert.ok(Math.abs(perfect.bones.spine.x) > Math.abs(partial.bones.spine.x));
+});
+
+test("Grave Line charge and release use forward committed silhouettes instead of a spin", () => {
+  const presentation = new PlayerActorPresentation();
+  const charging = presentation.sample(game({
+    combat: { chargingPrimary: true, primaryCharge: 0.36 },
+  }), 1 / 60);
+  assert.equal(charging.state, "grave-line-charge-track");
+  assert.equal(charging.clip, "Idle");
+
+  const attack = presentation.sample(game({
+    combat: {
+      attack: STRAIGHT_CHARGE_ATTACK,
+      attackTime: (STRAIGHT_CHARGE_ATTACK.activeStart + STRAIGHT_CHARGE_ATTACK.activeEnd) / 2,
+      attackKind: "line",
+      comboIndex: -1,
+    },
+  }));
+  assert.equal(attack.state, "grave-line-active");
+  assert.equal(attack.clip, "Dodge_Forward");
+  assert.ok(attack.model.x < -0.3);
+  assert.equal(attack.bones.spine.y, 0);
 });
 
 test("directional hit reaction distinguishes side and severity and freezes with zero dt", () => {
@@ -192,14 +232,14 @@ test("ending strike follows exact anticipation, travel, contact-recovery, and vi
   const sampleAt = (elapsed) => presentation.sample(game({
     phase: "endingStrike",
     endingPresentationStage: "endingStrike",
-    endingStrike: { elapsed, timing: NARRATIVE_TIMING.endingStrike },
+    endingStrike: { elapsed, timing: ENDING_TIMING.endingStrike },
   }));
 
   assert.equal(sampleAt(0).state, "ending-strike-anticipation");
-  assert.equal(sampleAt(NARRATIVE_TIMING.endingStrike.T).state, "ending-strike-travel");
-  assert.equal(sampleAt(NARRATIVE_TIMING.endingStrike.C - 0.001).state, "ending-strike-travel");
-  assert.equal(sampleAt(NARRATIVE_TIMING.endingStrike.C).state, "ending-strike-recovery");
-  assert.equal(sampleAt(NARRATIVE_TIMING.endingStrike.R).progress, 1);
+  assert.equal(sampleAt(ENDING_TIMING.endingStrike.T).state, "ending-strike-travel");
+  assert.equal(sampleAt(ENDING_TIMING.endingStrike.C - 0.001).state, "ending-strike-travel");
+  assert.equal(sampleAt(ENDING_TIMING.endingStrike.C).state, "ending-strike-recovery");
+  assert.equal(sampleAt(ENDING_TIMING.endingStrike.R).progress, 1);
 
   presentation.handleEvent({ type: "endingStrikeCompleted", detail: {} });
   assert.equal(presentation.sample(game({ endingPresentationStage: "kill" }), 0.1).state, "victory");
@@ -216,4 +256,3 @@ test("terminal death overrides all transient actions and run reset clears presen
   presentation.handleEvent({ type: "runStarted", detail: {} });
   assert.equal(presentation.sample(game(), 0).state, "idle");
 });
-

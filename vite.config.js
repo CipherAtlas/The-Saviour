@@ -10,7 +10,6 @@ export const RELEASE_ASSET_DENYLIST = Object.freeze([
   Object.freeze({ pattern: /^assets\/vfx\/[^/]+\.webp$/i, reason: "unresolved legacy VFX art" }),
   Object.freeze({ pattern: /^assets\/menu\/title-bg-01\.png$/, reason: "rejected title background candidate" }),
   Object.freeze({ pattern: /^assets\/menu\/zephyr-c-title\.png$/, reason: "rejected title character candidate" }),
-  Object.freeze({ pattern: /^assets\/vn\/floor01-witch-projection-bg\.png$/, reason: "rejected narrative background candidate" }),
 ]);
 
 export function normalizeReleaseAssetPath(candidate) {
@@ -108,7 +107,6 @@ export default defineConfig(({ command, isPreview }) => ({
         manualChunks(id) {
           if (id.endsWith("/node_modules/three/build/three.core.js")) return "three-core";
           if (id.includes("/node_modules/three/")) return "three-render";
-          if (id.endsWith("/src/game/dialogueContent.js")) return "narrative";
           return undefined;
         },
       },

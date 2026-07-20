@@ -17,10 +17,15 @@ class FakeAudioParam {
     this.value = value;
     this.targets = [];
     this.cancelledAt = [];
+    this.curves = [];
   }
 
   setValueAtTime(value) { this.value = value; }
   cancelScheduledValues(time) { this.cancelledAt.push(time); }
+  setValueCurveAtTime(curve, startAt, duration) {
+    this.curves.push({ curve: [...curve], startAt, duration });
+    this.value = curve.at(-1);
+  }
   linearRampToValueAtTime(value) { this.value = value; }
   exponentialRampToValueAtTime(value) { this.value = value; }
   setTargetAtTime(value, time, constant) {
@@ -53,7 +58,7 @@ class FakeSource extends FakeAudioNode {
     this.onended = null;
   }
 
-  start(time) { this.starts.push(time); }
+  start(time, offset = 0) { this.starts.push({ time, offset }); }
   stop(time) { this.stops.push(time); }
 }
 
@@ -125,6 +130,11 @@ class FakeSettings {
   getAll() { return structuredClone(this.values); }
 }
 
+function finishSoundtrackTransition(context, soundtrack, seconds = 3) {
+  context.currentTime += seconds;
+  soundtrack.update();
+}
+
 function recordEventCues(audio) {
   const calls = [];
   const busName = (destination) => {
@@ -171,7 +181,7 @@ test("score is locked to 132 BPM and recognizes all environment palettes", () =>
   assert.equal(normalizeBiome("void_court"), "voidCourt");
 });
 
-test("mixer leaves headroom, compresses the master, and ducks only music", () => {
+test("mixer leaves headroom and compresses the master", () => {
   const context = new FakeAudioContext();
   const settings = new FakeSettings();
   const audio = new AudioSystem(settings, { contextFactory: () => context });
@@ -182,25 +192,17 @@ test("mixer leaves headroom, compresses the master, and ducks only music", () =>
   assert.ok(audio.buses.master.gain.value < gainFromSlider(settings.get("audio.master")));
   assert.equal(gainFromSlider(0.5), 0.25);
 
-  const sfxBefore = audio.buses.sfx.gain.value;
-  audio.setDialogueDucking(true);
-  assert.ok(audio.nodes.musicDuck.gain.value < 0.3);
-  assert.equal(audio.buses.sfx.gain.value, sfxBefore);
-  audio.setDialogueDucking(false);
   assert.equal(audio.nodes.musicDuck.gain.value, 1);
 });
 
-test("dialogue ducking is restored after pausing and resuming a modal sequence", () => {
+test("bookend events do not alter the music mix", () => {
   const context = new FakeAudioContext();
   const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
   audio.initialize();
 
-  audio.handleEvent({ type: "dialogueStarted", detail: {} });
-  assert.ok(audio.nodes.musicDuck.gain.value < 0.3);
-  audio.handleEvent({ type: "phaseChanged", detail: { phase: "paused" } });
+  audio.handleEvent({ type: "bookendStarted", detail: {} });
+  audio.handleEvent({ type: "phaseChanged", detail: { phase: "bookend" } });
   assert.equal(audio.nodes.musicDuck.gain.value, 1);
-  audio.handleEvent({ type: "phaseChanged", detail: { phase: "dialogue" } });
-  assert.ok(audio.nodes.musicDuck.gain.value < 0.3);
 });
 
 test("music state and biome switches wait for a bar boundary", () => {
@@ -455,6 +457,27 @@ test("boss phases, guard dismissal, and phase-three combo steps have readable SF
   assert.ok(finisher[0].volume > continuation[0].volume);
 });
 
+test("regular enemy combo openers and finishers have distinct restrained accents", () => {
+  const context = new FakeAudioContext();
+  const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
+  audio.initialize();
+  const calls = recordEventCues(audio);
+  const capture = (detail) => {
+    calls.length = 0;
+    audio.handleEvent({ type: "enemyAttack", detail });
+    return structuredClone(calls);
+  };
+  const common = { type: "reaver", comboId: "enemy-2-combo-1", comboLength: 2 };
+
+  const opener = capture({ ...common, attack: "dashLane", comboStep: 1, continuesCombo: true });
+  const finisher = capture({ ...common, attack: "crosscut", comboStep: 2, continuesCombo: false });
+
+  assert.deepEqual(opener.map(({ kind }) => kind), ["tone"]);
+  assert.deepEqual(finisher.map(({ kind }) => kind), ["noise", "tone"]);
+  assert.ok([...opener, ...finisher].every((call) => call.bus === "sfx" && call.volume <= 0.038));
+  assert.ok(finisher.at(-1).glide < finisher.at(-1).frequency);
+});
+
 test("phase-three special combo metadata changes release pitch without adding layers", () => {
   const context = new FakeAudioContext();
   const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
@@ -571,7 +594,7 @@ test("licensed soundtrack covers every required state with authoritative attribu
   assert.ok(Object.values(SOUNDTRACK_CUES).filter((cue) => cue.loop).length >= 6);
 });
 
-test("licensed soundtrack ignores stale decode results and crossfades with at most two sources", async () => {
+test("licensed soundtrack ignores stale decodes and serializes rapid equal-power crossfades", async () => {
   const context = new FakeAudioContext();
   const pending = new Map();
   context.decodeAudioData = async (encoded) => ({ id: encoded.byteLength, duration: 120 });
@@ -593,19 +616,32 @@ test("licensed soundtrack ignores stale decode results and crossfades with at mo
   assert.equal(soundtrack.metrics().activeSources, 1);
   assert.equal(soundtrack.metrics().cacheLimit, SOUNDTRACK_CACHE_LIMIT);
   assert.equal(soundtrack.metrics().loadedCues, 2);
+  const fadeIn = soundtrack.active.gain.gain.curves.at(-1).curve;
+  assert.equal(fadeIn[0], 0);
+  assert.ok(Math.abs(fadeIn.at(-1) - 1) < 0.000_001);
+  assert.ok(fadeIn[Math.floor(fadeIn.length / 2)] > 0.7);
 
+  context.currentTime = 2;
   const boss = soundtrack.request("bossPhase1");
   pending.get(SOUNDTRACK_CUES.bossPhase1.file)({ ok: true, arrayBuffer: async () => new ArrayBuffer(36) });
   assert.equal(await boss, true);
   assert.deepEqual(started, ["combat", "bossPhase1"]);
   assert.equal(soundtrack.metrics().activeSources, 2);
   assert.ok(soundtrack.metrics().activeSources <= 2);
+  const fadeOut = [...soundtrack.retiring][0].gain.gain.curves.at(-1).curve;
+  const midpoint = Math.floor(fadeOut.length / 2);
+  assert.ok(Math.abs(fadeIn[midpoint] ** 2 + fadeOut[midpoint] ** 2 - 1) < 0.03);
 
   const phaseTwo = soundtrack.request("bossPhase2");
   pending.get(SOUNDTRACK_CUES.bossPhase2.file)({ ok: true, arrayBuffer: async () => new ArrayBuffer(48) });
   assert.equal(await phaseTwo, true);
+  assert.equal(soundtrack.metrics().pendingCue, "bossPhase2");
+  assert.deepEqual(started, ["combat", "bossPhase1"]);
+
+  finishSoundtrackTransition(context, soundtrack);
   assert.deepEqual(started, ["combat", "bossPhase1", "bossPhase2"]);
   assert.equal(soundtrack.metrics().activeSources, 2);
+  assert.equal(soundtrack.metrics().pendingCue, null);
   assert.equal(soundtrack.metrics().loadedCues, SOUNDTRACK_CACHE_LIMIT);
   assert.equal(soundtrack.metrics().peakCachedCues, SOUNDTRACK_CACHE_LIMIT);
   assert.equal(soundtrack.metrics().cacheEvictions, 2);
@@ -624,17 +660,22 @@ test("licensed soundtrack evicts decoded cues by LRU order without interrupting 
 
   await soundtrack.request("title");
   await soundtrack.request("exploration");
+  finishSoundtrackTransition(context, soundtrack);
   await soundtrack.request("combat");
   assert.deepEqual(soundtrack.metrics().cachedCues, ["exploration", "combat"]);
   assert.equal(soundtrack.metrics().cacheEvictions, 1);
   assert.equal(soundtrack.metrics().activeSources, 2);
   assert.ok([...soundtrack.retiring, soundtrack.active].every((record) => record.source.buffer));
+  finishSoundtrackTransition(context, soundtrack);
+  assert.equal(soundtrack.metrics().activeSources, 1);
 
   await soundtrack.request("title");
+  assert.equal(soundtrack.metrics().activeSources, 2);
   assert.equal(fetchCounts.get(SOUNDTRACK_CUES.title.file), 2);
   assert.deepEqual(soundtrack.metrics().cachedCues, ["combat", "title"]);
   assert.equal(soundtrack.metrics().cacheEvictions, 2);
-  assert.equal(soundtrack.metrics().activeSources, 2);
+  finishSoundtrackTransition(context, soundtrack);
+  assert.equal(soundtrack.metrics().activeSources, 1);
 
   await soundtrack.request("combat");
   assert.equal(fetchCounts.get(SOUNDTRACK_CUES.combat.file), 1);
@@ -649,6 +690,68 @@ test("licensed soundtrack evicts decoded cues by LRU order without interrupting 
   assert.equal(soundtrack.metrics().pendingLoads, 0);
   assert.equal(soundtrack.metrics().activeSources, 0);
   assert.equal(await soundtrack.request("exploration"), false);
+});
+
+test("licensed loops crossfade before packaged tail silence on the audio clock", async () => {
+  const context = new FakeAudioContext();
+  context.decodeAudioData = async () => ({ duration: 10 });
+  const soundtrack = new LicensedSoundtrack(context, context.destination, {
+    crossfadeDuration: 0.5,
+    fetcher: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }),
+  });
+
+  await soundtrack.request("exploration");
+  const firstPass = soundtrack.active;
+  assert.deepEqual(firstPass.source.starts, [{ time: 0, offset: 0 }]);
+  assert.equal(firstPass.contentEndAt, 7.1);
+
+  context.currentTime = 6.45;
+  soundtrack.update();
+  assert.equal(soundtrack.active, firstPass);
+
+  context.currentTime = 6.5;
+  soundtrack.update();
+  assert.notEqual(soundtrack.active, firstPass);
+  assert.deepEqual(soundtrack.active.source.starts, [{ time: 6.6, offset: 0 }]);
+  assert.deepEqual(firstPass.source.stops, [7.14]);
+  assert.equal(soundtrack.metrics().activeSources, 2);
+
+  finishSoundtrackTransition(context, soundtrack, 1);
+  assert.equal(soundtrack.metrics().activeSources, 1);
+});
+
+test("a cue change during initial fade-in holds the current gain without a jump", async () => {
+  const context = new FakeAudioContext();
+  context.decodeAudioData = async () => ({ duration: 120 });
+  const soundtrack = new LicensedSoundtrack(context, context.destination, {
+    crossfadeDuration: 2,
+    fetcher: async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) }),
+  });
+
+  await soundtrack.request("title");
+  const title = soundtrack.active;
+  context.currentTime = 0.5;
+  const heldGain = soundtrack.gainAt(title, context.currentTime);
+  await soundtrack.request("exploration");
+
+  const fadeOut = title.gain.gain.curves.at(-1).curve;
+  assert.ok(heldGain > 0 && heldGain < 1);
+  assert.ok(Math.abs(fadeOut[0] - heldGain) < 0.000_001);
+});
+
+test("licensed playback takes over the procedural fallback with the same fade envelope", () => {
+  const context = new FakeAudioContext();
+  const audio = new AudioSystem(new FakeSettings(), { contextFactory: () => context });
+  audio.initialize();
+
+  audio.activateLicensedMusic({ startAt: 0.25, duration: 1.75 });
+
+  const fade = audio.nodes.proceduralMusic.gain.curves.at(-1);
+  assert.equal(fade.startAt, 0.25);
+  assert.equal(fade.duration, 1.75);
+  assert.equal(fade.curve[0], 1);
+  assert.ok(Math.abs(fade.curve.at(-1)) < 0.000_001);
+  assert.equal(audio.nodes.licensedMusic.gain.value, 1);
 });
 
 test("disposing during decode prevents a late result from repopulating the cache", async () => {

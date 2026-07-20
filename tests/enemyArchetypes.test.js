@@ -66,6 +66,39 @@ test("six non-boss archetypes expose unique model and behavior contracts", () =>
   assert.ok(NON_BOSS_ARCHETYPE_IDS.every((type) => Object.keys(getEnemyArchetype(type).attacks).length >= 2));
 });
 
+test("the reinforced roster has faster movement, larger health pools, and immutable combo plans", () => {
+  const minimums = {
+    thrall: { health: 78, speed: 5.45 },
+    reaver: { health: 94, speed: 5.9 },
+    boneguard: { health: 182, speed: 3.5 },
+    hexer: { health: 74, speed: 3.95 },
+    wraith: { health: 98, speed: 5.35 },
+    bombardier: { health: 104, speed: 3.7 },
+    queen: { health: 2300, speed: 5.2 },
+  };
+  const comboOpeners = {
+    thrall: "lunge",
+    reaver: "dashLane",
+    boneguard: "guardCharge",
+    hexer: "aimedBolt",
+    wraith: "blinkFlank",
+    bombardier: "lobbedBomb",
+  };
+
+  for (const [type, minimum] of Object.entries(minimums)) {
+    const stats = getEnemyArchetype(type).stats;
+    assert.ok(stats.maxHealth >= minimum.health, `${type} health regressed`);
+    assert.ok(stats.speed >= minimum.speed, `${type} speed regressed`);
+  }
+  for (const [type, attackKind] of Object.entries(comboOpeners)) {
+    const attack = getEnemyArchetype(type).attacks[attackKind];
+    assert.ok(attack.combo?.followup, `${type} is missing a combo follow-up`);
+    assert.ok(attack.combo.gap >= 0 && attack.combo.window > attack.combo.gap);
+    assert.equal(Object.isFrozen(attack.combo), true);
+    if (attack.tracking) assert.equal(Object.isFrozen(attack.tracking), true);
+  }
+});
+
 test("floor weighting unlocks categories progressively without an empty encounter table", () => {
   for (let floor = 1; floor <= 10; floor += 1) {
     const weights = encounterWeightsForFloor(floor);
@@ -181,6 +214,53 @@ test("normal enemies select different telegraphed attacks at meaningful ranges",
   }
 });
 
+test("mobile targets are led by a bounded prediction that remains locked to the telegraph", () => {
+  const { director, events } = createDirector("PREDICTIVE-AIM");
+  const reaver = director.spawnEnemy("reaver", { x: 0, z: 0 }, 6);
+  const player = {
+    position: { x: 6, z: 0 },
+    previousPosition: { x: 5.85, z: 0 },
+    radius: 0.58,
+  };
+  reaver.attackCooldown = 0;
+
+  director.update(1 / 60, player, () => {});
+
+  const telegraph = events.find((event) => event.type === "enemyTelegraph");
+  assert.equal(telegraph.detail.attack, "dashLane");
+  assert.ok(telegraph.detail.target.x > player.position.x);
+  assert.ok(telegraph.detail.target.x <= player.position.x + ENEMY_ARCHETYPES.reaver.attacks.dashLane.tracking.maxLead);
+  assert.deepEqual(reaver.attackTarget, telegraph.detail.target);
+});
+
+test("regular enemies telegraph and execute a deterministic two-step combo", () => {
+  const { director, events } = createDirector("THRALL-COMBO");
+  const thrall = director.spawnEnemy("thrall", { x: 0, z: 0 }, 6);
+  const player = {
+    position: { x: 2.4, z: 0 },
+    previousPosition: { x: 2.4, z: 0 },
+    radius: 0.58,
+  };
+  thrall.attackCooldown = 0;
+
+  for (let step = 0; step < 120; step += 1) director.update(1 / 60, player, () => {});
+
+  const telegraphs = events
+    .filter((event) => event.type === "enemyTelegraph" && event.detail.enemyId === thrall.id)
+    .slice(0, 2)
+    .map((event) => event.detail);
+  const attacks = events
+    .filter((event) => event.type === "enemyAttack" && event.detail.enemyId === thrall.id)
+    .slice(0, 2)
+    .map((event) => event.detail);
+  assert.deepEqual(telegraphs.map(({ attack }) => attack), ["lunge", "graveCleave"]);
+  assert.deepEqual(telegraphs.map(({ comboStep }) => comboStep), [1, 2]);
+  assert.equal(telegraphs[0].comboId, telegraphs[1].comboId);
+  assert.deepEqual(attacks.map(({ attack }) => attack), ["lunge", "graveCleave"]);
+  assert.equal(events.filter((event) => event.type === "enemyComboStarted").length, 1);
+  assert.equal(events.filter((event) => event.type === "enemyComboContinued").length, 1);
+});
+
 test("Queen phase transitions are authored at 70% and 35% and grant a bounded transition lock", () => {
   const { director, events } = createDirector("QUEEN-TRANSITIONS");
   const queen = director.spawnEnemy("queen", { x: 0, z: 0 }, 10);
@@ -268,6 +348,19 @@ test("hexer aimed, fan, and rune spells create distinct pooled projectile kinds"
     const matching = director.projectiles.filter((projectile) => projectile.active && projectile.kind === projectileKind);
     assert.equal(matching.length, spell === "fan" ? 5 : 1);
   }
+});
+
+test("one fan action can damage the player at most once even when shards overlap", () => {
+  const { director } = createDirector("FAN-SINGLE-IMPACT");
+  const hexer = director.spawnEnemy("hexer", { x: 0, z: 0 }, 6);
+  const player = { position: { x: 1, z: 0 }, radius: 0.58 };
+  const attempts = [];
+  const actionId = director.beginAttack(hexer, "fan", player.position, { x: 1, z: 0, distance: 1 });
+
+  director.update(ENEMY_ARCHETYPES.hexer.attacks.fan.windup + 0.01, player, (attempt) => attempts.push(attempt));
+
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0].actionId, actionId);
 });
 
 test("bombardier lob lands at its telegraphed target and resolves pooled area damage", () => {
@@ -539,7 +632,7 @@ test("structured hits emit one immutable enemyHit linked to the returned CombatH
   assert.equal(detail.hitOrigin, result.hit.origin);
   assert.equal(detail.sourceOrigin, result.hit.origin);
   assert.equal(detail.enemyOrigin, result.hit.enemyOrigin);
-  assert.equal(detail.origin, enemy.origin, "event origin remains the enemy narrative origin");
+  assert.equal(detail.origin, enemy.origin, "event origin remains the enemy gameplay variant");
 });
 
 test("structured damage remains single-application and rejects an inactive second defeat", () => {

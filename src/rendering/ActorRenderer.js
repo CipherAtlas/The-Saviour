@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { clone as cloneSkeleton } from "three/addons/utils/SkeletonUtils.js";
-import { CAMERA_CONFIG, HEAVY_ATTACK } from "../game/gameConfig.js";
+import { CAMERA_CONFIG, CHARGE_CONFIG, HEAVY_ATTACK, STRAIGHT_CHARGE_CONFIG } from "../game/gameConfig.js";
 import { publicAssetUrl } from "../publicAssetUrl.js";
 import { createScytheModel } from "./createScytheModel.js";
 import { EnemyCharacterRenderer } from "./EnemyCharacterRenderer.js";
@@ -259,16 +259,26 @@ export class ActorRenderer {
       depthWrite: false,
       side: THREE.DoubleSide,
     });
+    const trailMaterial = new THREE.MeshBasicMaterial({
+      color: 0xd9a85f,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
     this.healthBarBackgrounds = new THREE.InstancedMesh(geometry, backgroundMaterial, MAX_HEALTH_BARS);
+    this.healthBarTrails = new THREE.InstancedMesh(geometry, trailMaterial, MAX_HEALTH_BARS);
     this.healthBarFills = new THREE.InstancedMesh(geometry, fillMaterial, MAX_HEALTH_BARS);
-    for (const mesh of [this.healthBarBackgrounds, this.healthBarFills]) {
+    for (const mesh of [this.healthBarBackgrounds, this.healthBarTrails, this.healthBarFills]) {
       mesh.count = 0;
       mesh.frustumCulled = false;
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     }
     this.healthBarBackgrounds.renderOrder = 20;
-    this.healthBarFills.renderOrder = 21;
-    this.scene.add(this.healthBarBackgrounds, this.healthBarFills);
+    this.healthBarTrails.renderOrder = 21;
+    this.healthBarFills.renderOrder = 22;
+    this.scene.add(this.healthBarBackgrounds, this.healthBarTrails, this.healthBarFills);
   }
 
   sync(game, alpha, dt) {
@@ -297,7 +307,7 @@ export class ActorRenderer {
       allowProxies: game.benchmarkMode === true,
     });
     this.syncHealthBars(game.director.enemies, alpha, dt);
-    this.syncStorySprite(game);
+    this.syncEndingActor(game);
   }
 
   sampleClaimPresentation(game, alpha) {
@@ -443,8 +453,18 @@ export class ActorRenderer {
       });
       scale *= pose.scaleMultiplier;
       this.applyScytheSlicePose(game, pose);
+    } else if (game.combat.chargingPrimary) {
+      const charge = clamp01(game.combat.primaryCharge / STRAIGHT_CHARGE_CONFIG.buildupDuration);
+      const settle = charge * charge * (3 - 2 * charge);
+      const chargePose = {
+        sweepAngle: 0,
+        bladeLift: 0.32 + settle * 0.4 + Math.sin(this.clockTime * 9) * 0.018 * charge,
+        poseWeight: Math.min(1, 0.55 + settle * 0.45),
+      };
+      this.applyScytheSlicePose(game, chargePose);
+      scale *= 1.05 + settle * 0.14;
     } else if (game.combat.chargingHeavy) {
-      const charge = clamp01(game.combat.heavyCharge / 0.9);
+      const charge = clamp01(game.combat.heavyCharge / CHARGE_CONFIG.timing.forcedRelease);
       this.weaponChargeEuler.set(0, 0, Math.sin(this.clockTime * 5.5) * 0.025 * charge);
       this.weaponChargeQuaternion.setFromEuler(this.weaponChargeEuler);
       this.weaponGrip.quaternion.copy(this.weaponBaseQuaternion).multiply(this.weaponChargeQuaternion);
@@ -614,21 +634,27 @@ export class ActorRenderer {
   }
 
   syncCharge(game, x, z) {
-    const charging = game.combat.chargingHeavy;
-    this.chargeAura.visible = charging;
+    const chargingHeavy = game.combat.chargingHeavy;
+    const chargingPrimary = game.combat.chargingPrimary;
+    const charging = chargingHeavy || chargingPrimary;
+    this.chargeAura.visible = chargingHeavy;
     const blade = this.scythe.getObjectByName("ScytheBlade");
     if (!charging) {
       if (blade?.material) blade.material.emissiveIntensity = 0.42;
       return;
     }
-    const ratio = clamp01(game.combat.heavyCharge / 0.9);
+    const ratio = chargingHeavy
+      ? clamp01(game.combat.heavyCharge / CHARGE_CONFIG.timing.forcedRelease)
+      : clamp01(game.combat.primaryCharge / STRAIGHT_CHARGE_CONFIG.buildupDuration);
     const range = HEAVY_ATTACK.range * game.player.reachMultiplier * (0.9 + ratio * 0.22);
     const pulse = Math.sin(this.clockTime * (12 + ratio * 8));
-    this.chargeAura.position.set(x, 0, z);
-    this.chargeAura.scale.set(range, 1, range);
-    this.chargeFill.material.opacity = 0.045 + ratio * 0.1 + pulse * 0.012;
-    this.chargeRim.material.opacity = 0.38 + ratio * 0.48 + pulse * 0.08;
-    this.chargeRim.scale.setScalar(0.985 + pulse * 0.015);
+    if (chargingHeavy) {
+      this.chargeAura.position.set(x, 0, z);
+      this.chargeAura.scale.set(range, 1, range);
+      this.chargeFill.material.opacity = 0.045 + ratio * 0.1 + pulse * 0.012;
+      this.chargeRim.material.opacity = 0.38 + ratio * 0.48 + pulse * 0.08;
+      this.chargeRim.scale.setScalar(0.985 + pulse * 0.015);
+    }
     if (blade?.material) blade.material.emissiveIntensity = 0.42 + ratio * 2.4;
   }
 
@@ -645,36 +671,56 @@ export class ActorRenderer {
       }
       state.seenAt = this.healthSerial;
       if (ratio >= state.displayRatio) state.displayRatio = ratio;
-      else state.displayRatio += (ratio - state.displayRatio) * Math.min(1, dt * 13);
+      else state.displayRatio += (ratio - state.displayRatio) * Math.min(1, dt * 6.5);
       const profile = getEnemyVisualProfile(enemy.type);
       const x = interpolated(enemy.previousPosition.x, enemy.position.x, alpha);
       const z = interpolated(enemy.previousPosition.z, enemy.position.z, alpha);
       const visualHeight = Math.max(profile.healthBar.height, this.enemyRenderer.actorHeight(enemy.id));
-      this.writeHealthBar(x, z, visualHeight + 0.26, profile.healthBar.width, enemy.type === "queen" ? 0.24 : 0.19, state.displayRatio);
+      this.writeHealthBar(
+        x,
+        z,
+        visualHeight + 0.32,
+        profile.healthBar.width,
+        enemy.type === "queen" ? 0.34 : 0.24,
+        ratio,
+        state.displayRatio,
+      );
     }
     for (const [id, state] of this.healthStates) {
       if (state.seenAt !== this.healthSerial) this.healthStates.delete(id);
     }
     this.healthBarBackgrounds.count = this.healthBarCount;
+    this.healthBarTrails.count = this.healthBarCount;
     this.healthBarFills.count = this.healthBarCount;
     this.healthBarBackgrounds.instanceMatrix.needsUpdate = true;
+    this.healthBarTrails.instanceMatrix.needsUpdate = true;
     this.healthBarFills.instanceMatrix.needsUpdate = true;
   }
 
-  writeHealthBar(x, z, y, width, height, healthRatio) {
+  writeHealthBar(x, z, y, width, height, healthRatio, trailRatio = healthRatio) {
     const index = this.healthBarCount;
     const inset = 0.07;
     const innerWidth = Math.max(0.01, width - inset * 2);
     const fillWidth = Math.max(0.015, innerWidth * healthRatio);
     const fillOffset = (fillWidth - innerWidth) * 0.5;
+    const trailWidth = Math.max(0.015, innerWidth * trailRatio);
+    const trailOffset = (trailWidth - innerWidth) * 0.5;
     this.position.set(x, y, z);
     this.scale.set(width, height, 1);
     this.matrix.compose(this.position, this.healthBarRotation, this.scale);
     this.healthBarBackgrounds.setMatrixAt(index, this.matrix);
     this.position.set(
-      x + this.healthBarRightX * fillOffset + this.healthBarForwardX * 0.012,
+      x + this.healthBarRightX * trailOffset + this.healthBarForwardX * 0.012,
       y,
-      z + this.healthBarRightZ * fillOffset + this.healthBarForwardZ * 0.012,
+      z + this.healthBarRightZ * trailOffset + this.healthBarForwardZ * 0.012,
+    );
+    this.scale.set(trailWidth, Math.max(0.04, height - inset * 0.9), 1);
+    this.matrix.compose(this.position, this.healthBarRotation, this.scale);
+    this.healthBarTrails.setMatrixAt(index, this.matrix);
+    this.position.set(
+      x + this.healthBarRightX * fillOffset + this.healthBarForwardX * 0.024,
+      y,
+      z + this.healthBarRightZ * fillOffset + this.healthBarForwardZ * 0.024,
     );
     this.scale.set(fillWidth, Math.max(0.04, height - inset * 0.9), 1);
     this.matrix.compose(this.position, this.healthBarRotation, this.scale);
@@ -682,7 +728,7 @@ export class ActorRenderer {
     this.healthBarCount += 1;
   }
 
-  syncStorySprite(game) {
+  syncEndingActor(game) {
     const stage = game.endingPresentationStage;
     this.princess.visible = !["inactive", "witchDeath", "complete"].includes(stage);
     if (!this.princess.visible) return;

@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { STRAIGHT_CHARGE_ATTACK, STRAIGHT_CHARGE_CONFIG } from "../game/gameConfig.js";
 import { samplePlayerScytheAnimation } from "./playerScytheAnimation.js";
 
 const PARTICLE_CAPACITY = 320;
@@ -33,6 +34,13 @@ function createArcGeometry(innerRadius, outerRadius, arc) {
   const segments = Math.max(12, Math.ceil(SCYTHE_ARC_SEGMENTS * (arc / FULL_CIRCLE)));
   const geometry = new THREE.RingGeometry(innerRadius, outerRadius, segments, 1, -arc / 2, arc);
   geometry.rotateX(-Math.PI / 2);
+  return geometry;
+}
+
+function createStraightLineGeometry(length = 1, width = 1, anchored = true) {
+  const geometry = new THREE.PlaneGeometry(length, width);
+  geometry.rotateX(-Math.PI / 2);
+  if (anchored) geometry.translate(length / 2, 0, 0);
   return geometry;
 }
 
@@ -242,6 +250,7 @@ export class EffectsPool {
     scene.add(this.points);
 
     this.scytheSweep = this.createScytheSweep();
+    this.straightChargeLine = this.createStraightChargeLine();
     this.rings = Array.from({ length: 20 }, () => this.createRing());
     this.telegraphBatches = new Map();
     this.telegraphMatrix = new THREE.Matrix4();
@@ -300,6 +309,38 @@ export class EffectsPool {
       heavy: false,
       stage: -1,
     };
+  }
+
+  createStraightChargeLine() {
+    const group = new THREE.Group();
+    group.visible = false;
+    const coverage = new THREE.Mesh(
+      createStraightLineGeometry(),
+      createGroundMaterial(0x2bc8ef, THREE.NormalBlending),
+    );
+    const core = new THREE.Mesh(createStraightLineGeometry(), createGroundMaterial(0xeafcff));
+    const center = new THREE.Mesh(createStraightLineGeometry(), createGroundMaterial(0xffd77b));
+    const railGeometry = createStraightLineGeometry();
+    const leftRail = new THREE.Mesh(railGeometry, createGroundMaterial(0x8cecff));
+    const rightRail = new THREE.Mesh(railGeometry.clone(), createGroundMaterial(0x8cecff));
+    const head = new THREE.Mesh(
+      createStraightLineGeometry(0.018, 1, false),
+      createGroundMaterial(0xffffff),
+    );
+    coverage.position.y = 0.058;
+    core.position.y = 0.078;
+    center.position.y = 0.088;
+    leftRail.position.set(0, 0.098, 0.485);
+    rightRail.position.set(0, 0.098, -0.485);
+    head.position.y = 0.112;
+    core.scale.z = 0.72;
+    center.scale.z = 0.16;
+    leftRail.scale.z = 0.03;
+    rightRail.scale.z = 0.03;
+    for (const mesh of [coverage, core, center, leftRail, rightRail, head]) mesh.renderOrder = 9;
+    group.add(coverage, core, center, leftRail, rightRail, head);
+    this.scene.add(group);
+    return { group, coverage, core, center, leftRail, rightRail, head };
   }
 
   createTelegraph() {
@@ -408,6 +449,12 @@ export class EffectsPool {
   syncPlayerAttack(player, combat) {
     const attack = combat.attack;
     const sweep = this.scytheSweep;
+    if (combat.chargingPrimary || attack?.shape === "line") {
+      sweep.group.visible = false;
+      this.syncStraightChargeLine(player, combat, attack);
+      return;
+    }
+    this.straightChargeLine.group.visible = false;
     if (!attack) {
       sweep.group.visible = false;
       return;
@@ -473,6 +520,67 @@ export class EffectsPool {
     sweep.outerRim.scale.setScalar(1 + impactPulse * 0.012 + pulse * 0.002 + queuedPulse);
     sweep.leadingBlade.scale.set(1, 1, 0.8 + impactPulse * 0.65);
     sweep.movingGlow.scale.setScalar(0.8 + impactPulse * 0.85);
+  }
+
+  syncStraightChargeLine(player, combat, attack) {
+    const line = this.straightChargeLine;
+    const charging = combat.chargingPrimary && !attack;
+    const rawRatio = charging
+      ? clamp01(combat.primaryCharge / STRAIGHT_CHARGE_CONFIG.buildupDuration)
+      : clamp01(attack?.chargeRatio ?? 1);
+    const easedRatio = 1 - (1 - rawRatio) ** 3;
+    const rangeScale = STRAIGHT_CHARGE_CONFIG.minimumRange
+      + (1 - STRAIGHT_CHARGE_CONFIG.minimumRange) * easedRatio;
+    const widthScale = STRAIGHT_CHARGE_CONFIG.minimumWidth
+      + (1 - STRAIGHT_CHARGE_CONFIG.minimumWidth) * easedRatio;
+    const range = (charging ? STRAIGHT_CHARGE_ATTACK.range * rangeScale : attack.range) * player.reachMultiplier;
+    const width = charging ? STRAIGHT_CHARGE_ATTACK.width * widthScale : attack.width;
+    const facing = charging
+      ? player.aimAngle
+      : Number.isFinite(combat.attackFacing) ? combat.attackFacing : player.aimAngle;
+    const pulse = this.settings.get("camera.reducedMotion") ? 0 : Math.sin((combat.primaryCharge + combat.attackTime) * 32);
+    const flashScale = this.settings.get("accessibility.screenFlashes") ? 1 : 0.66;
+    const contrastScale = this.settings.get("accessibility.highContrast") ? 1.2 : 1;
+    let reveal = 1;
+    let fade = 1;
+    let impact = 0;
+    if (!charging) {
+      const duration = Math.max(0.001, attack.duration);
+      const activeStart = Math.max(0.001, attack.activeStart);
+      const activeEnd = Math.max(activeStart + 0.001, attack.activeEnd);
+      const time = clamp01(combat.attackTime / duration) * duration;
+      const active = clamp01((time - activeStart) / (activeEnd - activeStart));
+      const recovery = clamp01((time - activeEnd) / Math.max(0.001, duration - activeEnd));
+      reveal = time < activeStart ? 0.015 : time <= activeEnd ? 1 - (1 - active) ** 3 : 1;
+      fade = time > activeEnd ? 1 - recovery : 1;
+      impact = time >= activeStart && time <= activeEnd ? Math.sin(active * Math.PI) : 0;
+    }
+
+    line.group.visible = true;
+    line.group.position.set(player.position.x, 0, player.position.z);
+    line.group.rotation.y = -facing;
+    line.group.scale.set(range, 1, width);
+    line.core.scale.x = Math.max(0.012, reveal);
+    line.center.scale.x = Math.max(0.012, reveal);
+    line.head.position.x = Math.max(0.012, reveal);
+    line.head.scale.z = 0.82 + impact * 0.34;
+
+    if (charging) {
+      line.coverage.material.opacity = (0.07 + easedRatio * 0.08) * contrastScale;
+      line.core.material.opacity = (0.12 + easedRatio * 0.28 + pulse * 0.025) * flashScale;
+      line.center.material.opacity = (0.2 + easedRatio * 0.48 + pulse * 0.04) * flashScale;
+      line.leftRail.material.opacity = (0.48 + easedRatio * 0.42 + pulse * 0.05) * flashScale;
+      line.rightRail.material.opacity = line.leftRail.material.opacity;
+      line.head.material.opacity = (0.7 + easedRatio * 0.28) * flashScale;
+      return;
+    }
+
+    line.coverage.material.opacity = (0.12 + impact * 0.12) * fade * contrastScale;
+    line.core.material.opacity = (0.3 + impact * 0.5) * fade * flashScale;
+    line.center.material.opacity = (0.54 + impact * 0.44 + pulse * 0.04) * fade * flashScale;
+    line.leftRail.material.opacity = (0.72 + impact * 0.26) * fade * flashScale;
+    line.rightRail.material.opacity = line.leftRail.material.opacity;
+    line.head.material.opacity = (0.82 + impact * 0.18) * fade * flashScale;
   }
 
   spawnRing(position, radius, color = 0xcf6de7, duration = 0.35) {

@@ -255,6 +255,8 @@ test("every player action contract has one bounded actor-attached presentation i
     ["chargeReleased", { quality: "partial" }],
     ["chargeReleased", { quality: "full" }],
     ["chargeReleased", { quality: "perfect" }],
+    ["lineChargeStart", {}],
+    ["lineChargeReleased", { forced: true }],
     ["dash", {}],
     ["dashEnded", { reason: "ended" }],
     ["perfectDash", {}],

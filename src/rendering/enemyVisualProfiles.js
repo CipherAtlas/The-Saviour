@@ -12,7 +12,7 @@ const profile = (definition) => Object.freeze({
 const originProfile = (definition) => Object.freeze({ ...definition });
 
 export const ENEMY_ORIGIN_VISUAL_PROFILES = Object.freeze({
-  witch: originProfile({
+  stable: originProfile({
     color: 0xc8bee0,
     colorMix: 0.08,
     emissive: 0x6f628d,
@@ -23,7 +23,7 @@ export const ENEMY_ORIGIN_VISUAL_PROFILES = Object.freeze({
     sway: 0,
     spawnLean: 0,
   }),
-  princess: originProfile({
+  volatile: originProfile({
     color: 0x9b3f63,
     colorMix: 0.2,
     emissive: 0x7d173d,
@@ -47,7 +47,7 @@ export const ENEMY_VISUAL_PROFILES = Object.freeze({
     spawnClip: "Skeletons_Awaken_Standing",
     hitClip: "Hit_A",
     deathClip: "Death_C_Skeletons",
-    healthBar: { width: 1.75, height: 2.45 },
+    healthBar: { width: 2.1, height: 2.52 },
     attacks: {
       lunge: { clip: "1H_Melee_Attack_Chop", impactRatio: 0.62, recovery: 0.18 },
       graveCleave: { clip: "2H_Melee_Attack_Spin", impactRatio: 0.68, recovery: 0.24 },
@@ -64,7 +64,7 @@ export const ENEMY_VISUAL_PROFILES = Object.freeze({
     hitClip: "Hit_A",
     deathClip: "Death_C_Skeletons",
     dashClip: "Dodge_Forward",
-    healthBar: { width: 1.85, height: 2.6 },
+    healthBar: { width: 2.2, height: 2.68 },
     attacks: {
       dashLane: { clip: "Dualwield_Melee_Attack_Slice", impactRatio: 0.7, recovery: 0.2 },
       crosscut: { clip: "Dualwield_Melee_Attack_Slice", impactRatio: 0.66, recovery: 0.2 },
@@ -82,7 +82,7 @@ export const ENEMY_VISUAL_PROFILES = Object.freeze({
     deathClip: "Death_C_Skeletons",
     blockClip: "Block",
     castShadow: true,
-    healthBar: { width: 2.3, height: 3.1 },
+    healthBar: { width: 2.7, height: 3.2 },
     attacks: {
       shieldSlam: { clip: "2H_Melee_Attack_Chop", impactRatio: 0.66, recovery: 0.28 },
       guardCharge: { clip: "2H_Melee_Attack_Spin", impactRatio: 0.68, recovery: 0.26 },
@@ -98,7 +98,7 @@ export const ENEMY_VISUAL_PROFILES = Object.freeze({
     spawnClip: "Skeletons_Awaken_Standing",
     hitClip: "Hit_A",
     deathClip: "Death_C_Skeletons",
-    healthBar: { width: 1.9, height: 2.85 },
+    healthBar: { width: 2.25, height: 2.94 },
     attacks: {
       aimedBolt: { clip: "Spellcast_Shoot", impactRatio: 0.7, recovery: 0.2 },
       fan: { clip: "Spellcast_Long", impactRatio: 0.74, recovery: 0.24 },
@@ -117,7 +117,7 @@ export const ENEMY_VISUAL_PROFILES = Object.freeze({
     hitClip: "Hit_A",
     deathClip: "Death_C_Skeletons",
     dashClip: "Dodge_Forward",
-    healthBar: { width: 1.9, height: 2.85 },
+    healthBar: { width: 2.25, height: 2.94 },
     attacks: {
       blinkFlank: { clip: "Dualwield_Melee_Attack_Slice", impactRatio: 0.68, recovery: 0.22 },
       veilSweep: { clip: "2H_Melee_Attack_Spin", impactRatio: 0.7, recovery: 0.25 },
@@ -133,7 +133,7 @@ export const ENEMY_VISUAL_PROFILES = Object.freeze({
     spawnClip: "Skeletons_Awaken_Standing",
     hitClip: "Hit_A",
     deathClip: "Death_C_Skeletons",
-    healthBar: { width: 1.95, height: 2.72 },
+    healthBar: { width: 2.3, height: 2.82 },
     attacks: {
       lobbedBomb: { clip: "Spellcast_Shoot", impactRatio: 0.72, recovery: 0.28 },
       cinderBurst: { clip: "Spellcast_Summon", impactRatio: 0.7, recovery: 0.3 },
@@ -152,7 +152,7 @@ export const ENEMY_VISUAL_PROFILES = Object.freeze({
     deathClip: "Death_C_Skeletons",
     dashClip: "Dodge_Forward",
     castShadow: true,
-    healthBar: { width: 3.6, height: 4.4 },
+    healthBar: { width: 4.4, height: 4.55 },
     attacks: {
       royalVolley: { clip: "Spellcast_Summon", impactRatio: 0.72, recovery: 0.3 },
       royalFan: { clip: "Spellcast_Long", impactRatio: 0.72, recovery: 0.28 },
@@ -190,7 +190,7 @@ export function getEnemyVisualProfile(type) {
   return result;
 }
 
-export function getEnemyOriginVisualProfile(origin = "witch") {
+export function getEnemyOriginVisualProfile(origin = "stable") {
   const result = ENEMY_ORIGIN_VISUAL_PROFILES[origin];
   if (!result) throw new RangeError(`Unknown enemy visual origin: ${origin}`);
   return result;

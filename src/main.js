@@ -8,7 +8,7 @@ import { AutoplayAgent } from "./playtest/AutoplayAgent.js";
 import { PlaytestReporter } from "./playtest/PlaytestReporter.js";
 import { GameRenderer } from "./rendering/GameRenderer.js";
 import { SettingsStore } from "./settings/SettingsStore.js";
-import { NarrativeProgressStore } from "./settings/NarrativeProgressStore.js";
+import { SpeedrunRecordsStore } from "./settings/SpeedrunRecordsStore.js";
 import { StatisticsStore } from "./settings/StatisticsStore.js";
 import { SuspendedRunStore } from "./settings/SuspendedRunStore.js";
 import { GameUi } from "./ui/GameUi.js";
@@ -84,7 +84,7 @@ function autoplayState(game, telegraphs) {
       timeRemaining: projectile.life,
     })),
     telegraphs: telegraphs.map((telegraph) => ({ ...telegraph, position: { ...telegraph.position } })),
-    dialogue: game.phase === "dialogue" ? { active: Boolean(game.dialogue.view()) } : null,
+    bookend: game.phase === "bookend" ? { active: Boolean(game.bookend.snapshot()) } : null,
     ending: game.ending.snapshot(),
     blessing: game.phase === "blessing" ? {
       choices: game.pendingBlessings.map(({ id, name, description, path, rank, nextRank, maxRank }) => ({
@@ -132,7 +132,7 @@ function createAutoplayRuntime({ game, input, renderer, settings, runNumber, see
     });
     const action = intent.uiAction;
     if (!action) return;
-    if (action.type === "continueDialogue") game.continueDialogue();
+    if (action.type === "continueBookend") game.continueBookend();
     if (action.type === "killPrincess") game.tryKillPrincess(performance.now());
     if (action.type === "chooseRoomReward") game.chooseRoomReward(action.id);
     if (action.type === "chooseBlessing") game.chooseBlessing(action.id);
@@ -273,34 +273,31 @@ runtimeProbe.id = "runtime-probe";
 runtimeProbe.hidden = true;
 document.body.append(runtimeProbe);
 const settings = new SettingsStore(searchParams.get("benchmark") === "1" ? null : undefined);
-const narrativeProgress = new NarrativeProgressStore(searchParams.get("benchmark") === "1" ? null : undefined);
 const statistics = new StatisticsStore(searchParams.get("benchmark") === "1" ? null : undefined);
+const speedrunRecords = new SpeedrunRecordsStore(searchParams.get("benchmark") === "1" ? null : undefined);
 const suspendedRuns = new SuspendedRunStore(searchParams.get("benchmark") === "1" ? null : undefined);
 if (autoplayEnabled) settings.set("gameplay.difficulty", searchParams.get("difficulty") ?? "standard");
 const input = new InputController(canvas, settings);
 const audio = new AudioSystem(settings);
 const renderer = new GameRenderer(canvas, settings, combatOverlay);
-const game = new Game(input, settings, { requireRoomReady: true, narrativeProgress });
+const game = new Game(input, settings, { requireRoomReady: true });
 const runSession = new RunSessionController({
   game,
   settings,
   suspendedRuns,
   statistics,
+  speedrunRecords,
   platform: Object.freeze({ canQuit: false, quit: null }),
 });
 const settingsMenu = new SettingsMenu(uiRoot, settings, input);
-const ui = new GameUi(uiRoot, game, settings, input, audio, settingsMenu, narrativeProgress, runSession);
+const ui = new GameUi(uiRoot, game, settings, input, audio, settingsMenu, runSession);
+renderer.setLoadProgressListener((progress) => ui.setLoadingProgress(progress));
 let autoplayRuntime = null;
 
 input.onActiveDeviceChanged((event) => game.emit(event.type, event.detail));
 
-renderer.setLoadProgressListener((progress) => ui.setLoadingProgress(progress));
-
 game.on((event) => {
   runSession.handleEvent(event);
-  if (event.type === "endingCompleted" && narrativeProgress.unlockGlossary()) {
-    game.emit("glossaryUnlocked", narrativeProgress.getSnapshot());
-  }
   renderer.handleEvent(event, game);
   audio.handleEvent(event);
   ui.handleEvent(event);
@@ -308,7 +305,10 @@ game.on((event) => {
   if (event.type === "arenaChanged") {
     const { loadToken } = event.detail;
     renderer.whenWorldReady()
-      .then((readyToken) => game.acknowledgeRoomReady(readyToken))
+      .then(async (readyToken) => {
+        await ui.completeRoomLoad();
+        game.acknowledgeRoomReady(readyToken);
+      })
       .catch((error) => {
         console.error("Unable to build dungeon biome", error);
         game.failRoomLoad(loadToken);
@@ -334,13 +334,13 @@ window.addEventListener("blur", () => {
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) runSession.flush();
-  if (document.hidden && ["playing", "dialogue", "endingChoice"].includes(game.phase)) game.togglePause(performance.now());
+  if (document.hidden && ["playing", "endingChoice"].includes(game.phase)) game.togglePause(performance.now());
 });
 window.addEventListener("pagehide", () => runSession.flush());
 
 try {
   await renderer.ready;
-  ui.setReady();
+  await ui.setReady();
 } catch (error) {
   console.error("Unable to prepare game assets", error);
   ui.setLoadError();
@@ -375,8 +375,6 @@ if (searchParams.get("benchmark") === "1") {
 let previousTime = performance.now();
 let accumulator = 0;
 let lastPresentedAt = 0;
-let dialogueFastForwardHeld = false;
-
 renderer.setAnimationLoop((time) => {
   input.pollGamepads(undefined, time);
   const fpsLimit = settings.get("graphics.fpsLimit");
@@ -388,63 +386,28 @@ renderer.setAnimationLoop((time) => {
   previousTime = time;
   lastPresentedAt = time;
   runSession.sampleTime(rawDelta, game.phase, foregroundFocused && !document.hidden);
+  ui.updateSpeedrunTimer(runSession.speedrunSnapshot());
 
-  const dialogueWasActive = game.phase === "dialogue";
-  const menuInputHandled = dialogueWasActive ? false : ui.handleMenuInput(time);
-  if (!dialogueWasActive && !menuInputHandled) {
+  const bookendWasActive = game.phase === "bookend";
+  const menuInputHandled = bookendWasActive ? false : ui.handleMenuInput(time);
+  if (!bookendWasActive && !menuInputHandled) {
     const pauseInput = input.consumePressed("pause");
     if (pauseInput) game.togglePause(pauseInput.timeStamp);
   }
 
-  if (dialogueWasActive) {
-    const view = game.dialogue.snapshot();
+  if (bookendWasActive) {
     const attackInput = input.consumePressed("attack");
     const interactInput = input.consumePressed("interact");
     const advanceInput = attackInput ?? interactInput;
-    const autoInput = input.consumePressed("heavy");
-    const historyInput = input.consumePressed("dash");
-    const hideInput = input.consumePressed("moveUp");
-    const skipInput = input.consumePressed("moveDown");
-    const pauseInput = input.consumePressed("pause");
-    if (view?.backlogOpen) {
-      const closeInput = pauseInput ?? historyInput;
-      if (closeInput) game.closeDialogueBacklog(closeInput.timeStamp);
-    } else if (view?.skipConfirmationOpen) {
-      if (advanceInput) game.confirmDialogueSkip(advanceInput.timeStamp);
-      else {
-        const cancelInput = pauseInput ?? historyInput;
-        if (cancelInput) game.cancelDialogueOverlay(cancelInput.timeStamp);
-      }
-    } else {
-      if (pauseInput) {
-        if (dialogueFastForwardHeld) game.setDialogueFastForward(false, pauseInput.timeStamp);
-        dialogueFastForwardHeld = false;
-        game.togglePause(pauseInput.timeStamp);
-      }
-      else if (advanceInput) game.continueDialogue(advanceInput.timeStamp);
-      else if (autoInput) game.toggleDialogueAuto(autoInput.timeStamp);
-      else if (historyInput) game.openDialogueBacklog(historyInput.timeStamp);
-      else if (hideInput) game.toggleDialogueUi(hideInput.timeStamp);
-      else if (skipInput) game.requestDialogueSkip(skipInput.timeStamp);
-    }
-    if (game.phase === "dialogue") {
-      const activeView = game.dialogue.snapshot();
-      const fastForwardHeld = !activeView?.backlogOpen && !activeView?.skipConfirmationOpen && input.isDown("claim");
-      if (fastForwardHeld !== dialogueFastForwardHeld) {
-        dialogueFastForwardHeld = fastForwardHeld;
-        game.setDialogueFastForward(fastForwardHeld, time);
-      }
-    }
+    if (advanceInput) game.continueBookend();
     input.flushActions(["attack", "interact", "heavy", "dash", "moveUp", "moveDown", "claim", "pause"]);
-  } else {
-    dialogueFastForwardHeld = false;
   }
 
   if (game.phase === "endingChoice") {
     const killInput = input.consumePressed("attack") ?? input.consumePressed("interact");
     if (killInput) game.tryKillPrincess(killInput.timeStamp);
   }
-  game.updateNarrativeClock(time);
+  game.updateEndingClock(time);
 
   if (game.player && !autoplayRuntime?.active) {
     const pointerGround = renderer.screenToGround(input.pointerNdc);

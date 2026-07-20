@@ -9,6 +9,8 @@ import {
   HEAVY_ATTACK,
   PLAYER_CONFIG,
   SCYTHE_ATTACKS,
+  STRAIGHT_CHARGE_ATTACK,
+  STRAIGHT_CHARGE_CONFIG,
 } from "../src/game/gameConfig.js";
 import { PlayerCombat } from "../src/game/PlayerCombat.js";
 
@@ -111,6 +113,117 @@ test("charged-reap timing and quality configuration is frozen, ordered, and usef
     assert.ok(values.harvestUnits >= 0);
   }
   assert.equal(CHARGE_CONFIG.qualities.perfect.harvestUnits, HARVEST_CONFIG.gainUnits.perfectCharge);
+});
+
+test("primary tap keeps the combo while a hold previews and releases Grave Line", () => {
+  const tapInput = createInput();
+  const tapEvents = [];
+  const tapCombat = new PlayerCombat((type, detail) => tapEvents.push({ type, detail }));
+  const player = createPlayer();
+  tapInput.press("attack", true, 1_000);
+  tapCombat.update(STEP, tapInput, player, { x: 0, y: 0 }, callbacks());
+  assert.equal(tapCombat.attack, null);
+  tapInput.release("attack", 1_080);
+  tapCombat.update(STEP, tapInput, player, { x: 0, y: 0 }, callbacks());
+  assert.equal(tapCombat.attack, SCYTHE_ATTACKS[0]);
+
+  const holdInput = createInput();
+  const holdEvents = [];
+  const holdCombat = new PlayerCombat((type, detail) => holdEvents.push({ type, detail }));
+  holdCombat.harvest.ensureFloorMinimum();
+  holdInput.press("attack", true, 2_000);
+  for (let frame = 0; frame < 30 && !holdCombat.chargingPrimary; frame += 1) {
+    holdCombat.update(STEP, holdInput, player, { x: 0, y: 0 }, callbacks());
+  }
+  assert.equal(holdCombat.chargingPrimary, true);
+  assert.equal(holdCombat.attack, null);
+  assert.equal(holdEvents.filter((event) => event.type === "lineChargeStart").length, 1);
+  for (let frame = 0; frame < 18; frame += 1) {
+    holdCombat.update(STEP, holdInput, player, { x: 0, y: 0 }, callbacks());
+  }
+  holdInput.release("attack", 2_520);
+  holdCombat.update(STEP, holdInput, player, { x: 0, y: 0 }, callbacks());
+
+  const release = holdEvents.find((event) => event.type === "lineChargeReleased")?.detail;
+  assert.ok(release.ratio > 0 && release.ratio < 1);
+  assert.equal(release.forced, false);
+  assert.equal(holdCombat.attack.shape, "line");
+  assert.equal(holdCombat.attack.name, STRAIGHT_CHARGE_ATTACK.name);
+  assert.equal(holdCombat.attackKind, "line");
+  assert.equal(holdCombat.harvest.snapshot().units, 0);
+  assert.equal(holdEvents.filter((event) => event.type === "attack").at(-1).detail.line, true);
+});
+
+test("Grave Line auto-fires exactly once at full buildup and falls back when Harvest is empty", () => {
+  const input = createInput();
+  const events = [];
+  const combat = new PlayerCombat((type, detail) => events.push({ type, detail }));
+  const player = createPlayer();
+  combat.harvest.ensureFloorMinimum();
+  input.press("attack", true, 3_000);
+  for (let frame = 0; frame < 90 && !events.some((event) => event.type === "lineChargeReleased"); frame += 1) {
+    combat.update(STEP, input, player, { x: 0, y: 0 }, callbacks());
+  }
+  const release = events.find((event) => event.type === "lineChargeReleased")?.detail;
+  assert.equal(release.forced, true);
+  assert.equal(release.ratio, 1);
+  assert.equal(release.range, STRAIGHT_CHARGE_ATTACK.range);
+  assert.equal(release.width, STRAIGHT_CHARGE_ATTACK.width);
+  assert.equal(events.filter((event) => event.type === "lineChargeReleased").length, 1);
+  assert.equal(Object.isFrozen(release), true);
+
+  const emptyInput = createInput();
+  const emptyEvents = [];
+  const emptyCombat = new PlayerCombat((type, detail) => emptyEvents.push({ type, detail }));
+  emptyInput.press("attack", true, 4_000);
+  const frames = Math.ceil(STRAIGHT_CHARGE_CONFIG.holdThreshold / STEP) + 2;
+  for (let frame = 0; frame < frames; frame += 1) {
+    emptyCombat.update(STEP, emptyInput, player, { x: 0, y: 0 }, callbacks());
+  }
+  assert.equal(emptyEvents.filter((event) => event.type === "lineChargeRejected").length, 1);
+  assert.equal(emptyCombat.attack, SCYTHE_ATTACKS[0]);
+  assert.equal(emptyCombat.chargingPrimary, false);
+});
+
+test("Grave Line keeps building through exactly one dash and reports the spent allowance", () => {
+  const input = createInput();
+  const events = [];
+  const combat = new PlayerCombat((type, detail) => events.push({ type, detail }));
+  const player = createPlayer();
+  combat.harvest.ensureFloorMinimum();
+  input.press("attack", true, 5_000);
+  for (let frame = 0; frame < 30 && !combat.chargingPrimary; frame += 1) {
+    combat.update(STEP, input, player, { x: 1, y: 0 }, callbacks());
+  }
+
+  const chargeActionId = combat.primaryChargeActionId;
+  input.press("dash", false, 5_250);
+  combat.update(STEP, input, player, { x: 1, y: 0 }, callbacks());
+  const chargeAtDashStart = combat.primaryCharge;
+  assert.equal(combat.isDashing, true);
+  assert.equal(combat.chargingPrimary, true);
+  assert.equal(combat.primaryChargeActionId, chargeActionId);
+  assert.equal(combat.primaryChargeDashesUsed, STRAIGHT_CHARGE_CONFIG.dashAllowance);
+
+  while (combat.isDashing) {
+    combat.update(STEP, input, player, { x: 1, y: 0 }, callbacks());
+  }
+  assert.equal(combat.chargingPrimary, true);
+  assert.ok(combat.primaryCharge > chargeAtDashStart);
+
+  combat.dashCooldown = 0;
+  input.press("dash", false, 5_500);
+  combat.update(STEP, input, player, { x: 1, y: 0 }, callbacks());
+  assert.equal(combat.isDashing, false);
+  assert.equal(combat.dashBuffer, 0);
+  assert.equal(events.filter((event) => event.type === "dash").length, 1);
+
+  input.release("attack", 5_550);
+  combat.update(STEP, input, player, { x: 0, y: 0 }, callbacks());
+  const release = events.find((event) => event.type === "lineChargeReleased")?.detail;
+  assert.equal(release.dashesUsed, STRAIGHT_CHARGE_CONFIG.dashAllowance);
+  assert.equal(combat.attack?.shape, "line");
+  assert.equal(combat.primaryChargeDashesUsed, 0);
 });
 
 test("captured release timestamps classify every charged-reap boundary exactly once", () => {
@@ -467,28 +580,57 @@ test("dash attack accepts a buffered follow-up instead of swallowing it", () => 
   assert.equal(attacks[1], SCYTHE_ATTACKS[1].name);
 });
 
-test("a buffered dash waits for recovery and then cancels deliberately", () => {
+test("a dash overlaps the normal combo without cancelling its buffered follow-up", () => {
   const input = createInput();
   const player = createPlayer();
   const cancelled = [];
+  const attacks = [];
   const combat = new PlayerCombat((type, detail) => {
     if (type === "attackCancelled") cancelled.push(detail);
+    if (type === "attack") attacks.push(detail.name);
   });
   combat.startAttack(SCYTHE_ATTACKS[0], 0, false, player.aimAngle);
 
-  while (combat.attackTime < 0.15) {
+  while (combat.attackTime < 0.11) {
     combat.update(STEP, input, player, { x: 0, y: 0 }, callbacks());
   }
   input.press("dash");
+  input.press("attack");
   combat.update(STEP, input, player, { x: 1, y: 0 }, callbacks());
-  assert.equal(combat.isDashing, false);
-  assert.ok(combat.attack);
+  assert.equal(combat.isDashing, true);
+  assert.equal(combat.attack, SCYTHE_ATTACKS[0]);
+  assert.deepEqual(cancelled, []);
 
-  for (let frame = 0; frame < 5 && !combat.isDashing; frame += 1) {
+  for (let frame = 0; frame < 20 && attacks.length < 2; frame += 1) {
     combat.update(STEP, input, player, { x: 1, y: 0 }, callbacks());
   }
+  assert.equal(attacks[1], SCYTHE_ATTACKS[1].name);
   assert.equal(combat.isDashing, true);
-  assert.deepEqual(cancelled, [{ name: SCYTHE_ATTACKS[0].name, reason: "dash" }]);
+  assert.deepEqual(cancelled, []);
+});
+
+test("combo grace starts the next normal strike during a dash instead of replacing it", () => {
+  const input = createInput();
+  const player = createPlayer();
+  const attacks = [];
+  const combat = new PlayerCombat((type, detail) => {
+    if (type === "attack") attacks.push(detail);
+  });
+  combat.startAttack(SCYTHE_ATTACKS[0], 0, false, player.aimAngle);
+  while (combat.attack) {
+    combat.update(STEP, input, player, { x: 0, y: 0 }, callbacks());
+  }
+  assert.ok(combat.comboWindow > 0);
+
+  input.press("dash");
+  combat.update(STEP, input, player, { x: 1, y: 0 }, callbacks());
+  input.press("attack");
+  combat.update(STEP, input, player, { x: 1, y: 0 }, callbacks());
+
+  assert.equal(combat.isDashing, true);
+  assert.equal(combat.attack, SCYTHE_ATTACKS[1]);
+  assert.equal(attacks.at(-1).name, SCYTHE_ATTACKS[1].name);
+  assert.equal(attacks.at(-1).dash, false);
 });
 
 test("heavy input remains buffered when an attack is about to recover", () => {

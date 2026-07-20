@@ -1,19 +1,21 @@
 import { BLESSINGS, BLESSING_FALLBACK } from "../game/blessings.js";
-import { NARRATIVE_SEQUENCES, UPGRADE_SEQUENCE_IDS } from "../game/dialogueContent.js";
 import { HARVEST_CONFIG, RUN_CONFIG } from "../game/gameConfig.js";
 import { CHAMBER_FALLBACK, RUN_UPGRADES } from "../game/runUpgrades.js";
 import { validateRunStatisticsDraft } from "../game/RunStatsAccumulator.js";
 
 export const SUSPENDED_RUN_KEY = "hollow-crown-suspended-run";
-export const SUSPENDED_RUN_VERSION = 1;
+export const SUSPENDED_RUN_VERSION = 3;
 
-const DIFFICULTY_IDS = new Set(["story", "standard", "ruthless"]);
+const DIFFICULTY_IDS = new Set(["relaxed", "standard", "ruthless"]);
+const RUN_TYPE_IDS = new Set(["normal", "speedrun"]);
 const RUN_FLAG_IDS = new Set(["queenDefeated", "princeKilledByPrincess"]);
 const TOP_LEVEL_KEYS = new Set([
   "version",
   "savedAt",
   "seed",
   "difficultyId",
+  "runType",
+  "speedrun",
   "nextFloor",
   "nextRoom",
   "player",
@@ -24,10 +26,15 @@ const TOP_LEVEL_KEYS = new Set([
   "blessingIds",
   "rerollsUsedByFloor",
   "runFlags",
-  "seenRunSequenceIds",
-  "completedUpgradeSequenceIds",
   "statisticsDraft",
 ]);
+const V2_TOP_LEVEL_KEYS = new Set([
+  ...TOP_LEVEL_KEYS,
+  "seenRunSequenceIds",
+  "completedUpgradeSequenceIds",
+]);
+const V1_TOP_LEVEL_KEYS = new Set([...V2_TOP_LEVEL_KEYS]
+  .filter((key) => !["runType", "speedrun"].includes(key)));
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -55,12 +62,6 @@ function validId(value, ids) {
   return typeof value === "string" && ids.has(value);
 }
 
-function uniqueStrings(values) {
-  return Array.isArray(values)
-    && values.every((value) => typeof value === "string")
-    && new Set(values).size === values.length;
-}
-
 function maxRankFor(definition, selectionLimit) {
   return Number.isFinite(definition.maxRank) ? definition.maxRank : selectionLimit;
 }
@@ -79,8 +80,6 @@ function createDefaultCatalog() {
         maxRankFor(definition, RUN_CONFIG.totalFloors - 1),
       ]),
     ),
-    sequenceIds: new Set(Object.keys(NARRATIVE_SEQUENCES)),
-    upgradeSequenceIds: new Set(UPGRADE_SEQUENCE_IDS),
   });
 }
 
@@ -135,26 +134,47 @@ function normalizeFlags(candidate) {
   return runFlags;
 }
 
-function normalizeNarrative(candidate, catalog) {
-  if (!uniqueStrings(candidate.seenRunSequenceIds)) return null;
-  if (!candidate.seenRunSequenceIds.every((id) => catalog.sequenceIds.has(id))) return null;
-  if (!uniqueStrings(candidate.completedUpgradeSequenceIds)) return null;
-  const seen = new Set(candidate.seenRunSequenceIds);
-  if (!candidate.completedUpgradeSequenceIds.every((id) => (
-    catalog.upgradeSequenceIds.has(id) && seen.has(id)
-  ))) return null;
-  return {
-    seenRunSequenceIds: [...candidate.seenRunSequenceIds].sort(),
-    completedUpgradeSequenceIds: [...candidate.completedUpgradeSequenceIds].sort(),
-  };
+function migrateCandidate(candidate) {
+  if (!isRecord(candidate)) return candidate;
+  if (candidate.version === SUSPENDED_RUN_VERSION) return candidate;
+  if (candidate.version === 1 && !hasExactKeys(candidate, V1_TOP_LEVEL_KEYS)) return candidate;
+  if (candidate.version === 2 && !hasExactKeys(candidate, V2_TOP_LEVEL_KEYS)) return candidate;
+  if (![1, 2].includes(candidate.version)) return candidate;
+  const migrated = clone(candidate);
+  delete migrated.seenRunSequenceIds;
+  delete migrated.completedUpgradeSequenceIds;
+  if (candidate.version === 1) {
+    migrated.runType = "normal";
+    migrated.speedrun = { elapsedSeconds: 0, finished: false };
+  }
+  if (migrated.difficultyId === "story") migrated.difficultyId = "relaxed";
+  if (migrated.statisticsDraft?.difficultyId === "story") migrated.statisticsDraft.difficultyId = "relaxed";
+  if (migrated.statisticsDraft?.version === 1) migrated.statisticsDraft.version = 2;
+  const origins = migrated.statisticsDraft?.enemiesKilled?.byOrigin;
+  if (isRecord(origins)) {
+    const stable = (origins.stable ?? 0) + (origins.witch ?? 0);
+    const volatile = (origins.volatile ?? 0) + (origins.princess ?? 0);
+    migrated.statisticsDraft.enemiesKilled.byOrigin = {};
+    if (stable > 0) migrated.statisticsDraft.enemiesKilled.byOrigin.stable = stable;
+    if (volatile > 0) migrated.statisticsDraft.enemiesKilled.byOrigin.volatile = volatile;
+  }
+  migrated.version = SUSPENDED_RUN_VERSION;
+  return migrated;
 }
 
-function normalizeCandidate(candidate, catalog) {
+function normalizeCandidate(rawCandidate, catalog) {
+  const candidate = migrateCandidate(rawCandidate);
   if (!hasExactKeys(candidate, TOP_LEVEL_KEYS)) return null;
   if (candidate.version !== SUSPENDED_RUN_VERSION) return null;
   if (!Number.isFinite(candidate.savedAt) || candidate.savedAt < 0) return null;
   if (typeof candidate.seed !== "string" || candidate.seed.length === 0 || candidate.seed.length > 256) return null;
   if (!DIFFICULTY_IDS.has(candidate.difficultyId)) return null;
+  if (!RUN_TYPE_IDS.has(candidate.runType)) return null;
+  if (candidate.runType === "speedrun" && candidate.difficultyId !== "ruthless") return null;
+  if (!hasExactKeys(candidate.speedrun, new Set(["elapsedSeconds", "finished"]))) return null;
+  if (!Number.isFinite(candidate.speedrun.elapsedSeconds) || candidate.speedrun.elapsedSeconds < 0) return null;
+  if (typeof candidate.speedrun.finished !== "boolean") return null;
+  if (candidate.runType === "normal" && (candidate.speedrun.elapsedSeconds !== 0 || candidate.speedrun.finished)) return null;
   if (!Number.isInteger(candidate.nextFloor) || candidate.nextFloor < 1 || candidate.nextFloor > RUN_CONFIG.totalFloors) return null;
   if (!Number.isInteger(candidate.nextRoom) || candidate.nextRoom < 1 || candidate.nextRoom > RUN_CONFIG.roomsPerFloor) return null;
   if (!hasExactKeys(candidate.player, new Set(["health"]))) return null;
@@ -178,9 +198,8 @@ function normalizeCandidate(candidate, catalog) {
   const upgrades = normalizeUpgradeState(candidate, catalog);
   const blessingIds = normalizeBlessings(candidate, catalog);
   const runFlags = normalizeFlags(candidate);
-  const narrative = normalizeNarrative(candidate, catalog);
   const statisticsDraft = validateRunStatisticsDraft(candidate.statisticsDraft);
-  if (!upgrades || !blessingIds || !runFlags || !narrative || !statisticsDraft || statisticsDraft.finalized) return null;
+  if (!upgrades || !blessingIds || !runFlags || !statisticsDraft || statisticsDraft.finalized) return null;
   if (statisticsDraft.seed !== candidate.seed || statisticsDraft.difficultyId !== candidate.difficultyId) return null;
   const expectedChamberSelections = (candidate.nextFloor - 1) * (RUN_CONFIG.roomsPerFloor - 1) + (candidate.nextRoom - 1);
   const expectedBlessings = candidate.nextFloor - 1;
@@ -207,16 +226,13 @@ function normalizeCandidate(candidate, catalog) {
     || statisticsDraft.rerollsUsed !== candidate.rerollsUsedByFloor.reduce((total, used) => total + used, 0)
   ) return null;
 
-  const expectedCompletedIds = [...UPGRADE_SEQUENCE_IDS]
-    .slice(0, statisticsDraft.selections.length)
-    .sort();
-  if (JSON.stringify(narrative.completedUpgradeSequenceIds) !== JSON.stringify(expectedCompletedIds)) return null;
-
   return deepFreeze({
     version: SUSPENDED_RUN_VERSION,
     savedAt: candidate.savedAt,
     seed: candidate.seed,
     difficultyId: candidate.difficultyId,
+    runType: candidate.runType,
+    speedrun: { ...candidate.speedrun },
     nextFloor: candidate.nextFloor,
     nextRoom: candidate.nextRoom,
     player: { health: candidate.player.health },
@@ -226,7 +242,6 @@ function normalizeCandidate(candidate, catalog) {
     blessingIds,
     rerollsUsedByFloor: [...candidate.rerollsUsedByFloor],
     runFlags,
-    ...narrative,
     statisticsDraft,
   });
 }
@@ -272,6 +287,8 @@ export class SuspendedRunStore {
       ...clone(snapshot),
       version: SUSPENDED_RUN_VERSION,
       savedAt,
+      runType: snapshot?.runType ?? "normal",
+      speedrun: snapshot?.speedrun ?? { elapsedSeconds: 0, finished: false },
     }, this.catalog);
     if (!candidate) {
       this.lastError = "invalid";

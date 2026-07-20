@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { circleIntersectsArc, moveCircle, moveCircleDetailed } from "../src/game/collision.js";
+import { circleIntersectsArc, circleIntersectsLine, moveCircle, moveCircleDetailed } from "../src/game/collision.js";
 import { BLESSINGS } from "../src/game/blessings.js";
 import { Game } from "../src/game/Game.js";
-import { DASH_ATTACK, HEAVY_ATTACK, PLAYER_CONFIG, RUN_CONFIG, SCYTHE_ATTACKS } from "../src/game/gameConfig.js";
+import { DASH_ATTACK, HEAVY_ATTACK, PLAYER_CONFIG, PORTAL_CONFIG, RUN_CONFIG, SCYTHE_ATTACKS, STRAIGHT_CHARGE_ATTACK } from "../src/game/gameConfig.js";
 import { PlayerCombat } from "../src/game/PlayerCombat.js";
 
 function createGameInput(movement) {
@@ -25,7 +25,7 @@ function createGameSettings() {
 }
 
 function finishOpening(game) {
-  while (game.phase === "dialogue") game.skipDialogue();
+  while (game.phase === "bookend") game.continueBookend();
 }
 
 test("the scythe combo maintains long reach and grows through the chain", () => {
@@ -62,6 +62,16 @@ test("arc collision rejects targets behind a forward sweep", () => {
   assert.equal(circleIntersectsArc(origin, 0, 4.5, Math.PI / 2, { x: 3.5, z: 0 }, 0.5), true);
   assert.equal(circleIntersectsArc(origin, 0, 4.5, Math.PI / 2, { x: -2, z: 0 }, 0.5), false);
   assert.equal(circleIntersectsArc(origin, 0, 4.5, Math.PI / 2, { x: 6, z: 0 }, 0.5), false);
+});
+
+test("Grave Line collision is a thick forward rectangle with no curved side coverage", () => {
+  const origin = { x: 0, z: 0 };
+  const attack = STRAIGHT_CHARGE_ATTACK;
+  assert.equal(circleIntersectsLine(origin, 0, attack.range, attack.width, { x: 8.8, z: 0 }, 0.3), true);
+  assert.equal(circleIntersectsLine(origin, 0, attack.range, attack.width, { x: 5, z: attack.width / 2 + 0.31 }, 0.3), false);
+  assert.equal(circleIntersectsLine(origin, 0, attack.range, attack.width, { x: -1, z: 0 }, 0.3), false);
+  assert.equal(circleIntersectsLine(origin, Math.PI / 2, attack.range, attack.width, { x: 0, z: 7 }, 0.3), true);
+  assert.equal(circleIntersectsLine(origin, Math.PI / 2, attack.range, attack.width, { x: 4, z: 4 }, 0.3), false);
 });
 
 test("dash invulnerability outlasts the movement burst", () => {
@@ -152,11 +162,14 @@ test("clearing a room grants bounded threshold recovery before the next encounte
   game.checkRoomProgress(RUN_CONFIG.roomClearDelay);
 
   assert.equal(game.player.health, 61);
-  assert.equal(game.portalActive, false);
-  assert.equal(game.phase, "dialogue");
-  finishOpening(game);
-  assert.equal(game.phase, "reward");
+  assert.equal(game.portalActive, true);
+  assert.equal(game.phase, "playing");
+  assert.equal(game.activeBookend, null);
   assert.equal(recoveries[0].amount, 21);
+
+  assert.equal(game.beginPortalTraversal(), true);
+  game.updatePortalTraversal(PORTAL_CONFIG.traversalDuration);
+  assert.equal(game.phase, "reward");
 });
 
 test("the Moonwell floor blessing increases percentage recovery on later chamber clears", () => {

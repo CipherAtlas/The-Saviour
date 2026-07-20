@@ -1,10 +1,10 @@
 import { AdaptiveMusic } from "./AdaptiveMusic.js";
 import { LicensedSoundtrack, SOUNDTRACK_CUES } from "./LicensedSoundtrack.js";
+import { scheduleEqualPowerFade } from "./gainAutomation.js";
 import { BIOME_PALETTES, normalizeBiome } from "./musicScore.js";
 import { ProceduralInstruments } from "./ProceduralInstruments.js";
 
 const MASTER_HEADROOM_DB = -4;
-const DIALOGUE_DUCK_DB = -11;
 const CRITICAL_SFX_DUCK_DB = -4.5;
 const QUEEN_CUE_DISCONNECT_MS = 850;
 
@@ -48,7 +48,6 @@ export class AudioSystem {
     this.musicCue = "title";
     this.licensedPlaybackActive = false;
     this.queenActionCues = new Map();
-    this.ducked = false;
     this.focused = true;
   }
 
@@ -69,7 +68,6 @@ export class AudioSystem {
     const musicDuck = this.context.createGain();
     const sfx = this.context.createGain();
     const ui = this.context.createGain();
-    const voice = this.context.createGain();
     const mix = this.context.createGain();
     const compressor = this.context.createDynamicsCompressor();
     const master = this.context.createGain();
@@ -86,20 +84,22 @@ export class AudioSystem {
     proceduralMusic.connect(music);
     licensedMusic.connect(music);
     proceduralMusic.gain.value = 1;
-    licensedMusic.gain.value = 0;
+    licensedMusic.gain.value = 1;
     music.connect(musicTone).connect(musicDuck).connect(mix);
     sfx.connect(mix);
     ui.connect(mix);
-    voice.connect(mix);
     mix.connect(compressor).connect(master).connect(this.context.destination);
 
-    this.buses = { master, music, sfx, ui, voice };
+    this.buses = { master, music, sfx, ui };
     this.nodes = { musicTone, musicDuck, proceduralMusic, licensedMusic, mix, compressor };
     this.instruments = new ProceduralInstruments(this.context, { maxSources: 72 });
     this.music = new AdaptiveMusic(this.context, proceduralMusic, this.instruments);
     if (typeof this.context.decodeAudioData === "function" && typeof globalThis.fetch === "function") {
       this.soundtrack = new LicensedSoundtrack(this.context, licensedMusic, {
-        onPlaybackStart: () => this.activateLicensedMusic(),
+        onPlaybackStart: (cueKey, transition) => {
+          this.activateLicensedMusic(transition);
+          this.preloadFollowingCue(cueKey);
+        },
       });
     }
     this.applySettings(this.settings.getAll());
@@ -107,6 +107,7 @@ export class AudioSystem {
 
   update() {
     if (!this.context || this.context.state !== "running") return;
+    this.soundtrack?.update();
     if (!this.licensedPlaybackActive) this.music.update();
   }
 
@@ -143,12 +144,22 @@ export class AudioSystem {
     return true;
   }
 
-  activateLicensedMusic() {
+  activateLicensedMusic({ startAt = this.context?.currentTime ?? 0, duration = 1.6 } = {}) {
     if (!this.nodes || this.licensedPlaybackActive) return;
     this.licensedPlaybackActive = true;
-    const now = this.context.currentTime;
-    this.nodes.proceduralMusic.gain.setTargetAtTime(0, now, 0.22);
-    this.nodes.licensedMusic.gain.setTargetAtTime(1, now, 0.18);
+    scheduleEqualPowerFade(this.nodes.proceduralMusic.gain, 1, 0, startAt, duration);
+  }
+
+  preloadFollowingCue(cueKey) {
+    const nextCue = {
+      title: "exploration",
+      exploration: "combat",
+      combat: "exploration",
+      bossPhase1: "bossPhase2",
+      bossPhase2: "bossPhase3",
+      bossPhase3: "exploration",
+    }[cueKey];
+    if (nextCue) void this.soundtrack?.preload(nextCue);
   }
 
   setBiome(value) {
@@ -160,16 +171,8 @@ export class AudioSystem {
     this.nodes.musicTone.frequency.setTargetAtTime(targetFrequency, this.context.currentTime, 0.35);
   }
 
-  setDialogueDucking(active) {
-    if (!this.context || this.ducked === active) return;
-    this.ducked = active;
-    const target = active ? decibelsToGain(DIALOGUE_DUCK_DB) : 1;
-    this.nodes.musicDuck.gain.cancelScheduledValues(this.context.currentTime);
-    this.nodes.musicDuck.gain.setTargetAtTime(target, this.context.currentTime, active ? 0.018 : 0.32);
-  }
-
   duckMusicForCriticalSfx(duration = 0.32) {
-    if (!this.context || this.ducked) return;
+    if (!this.context) return;
     const now = this.context.currentTime;
     const musicGain = this.nodes.musicDuck.gain;
     musicGain.cancelScheduledValues(now);
@@ -307,14 +310,32 @@ export class AudioSystem {
     this.playTone(continues ? 349.23 : 174.61, continues ? 0.11 : 0.16, continues ? 0.03 : 0.047, this.buses.sfx, now, "triangle", continues ? 523.25 : 87.31);
   }
 
+  playEnemyComboAccent(detail, now) {
+    if (detail.type === "queen" || detail.comboLength !== 2) return;
+    const continues = detail.comboStep === 1 && detail.continuesCombo === true;
+    const finisher = detail.comboStep === 2;
+    if (!continues && !finisher) return;
+    if (finisher) this.playNoise(0.07, 0.032, this.buses.sfx, now, 520);
+    this.playTone(
+      continues ? 293.66 : 146.83,
+      continues ? 0.09 : 0.14,
+      continues ? 0.022 : 0.038,
+      this.buses.sfx,
+      now,
+      "triangle",
+      continues ? 440 : 73.42,
+    );
+  }
+
   handleEvent({ type, detail = {} } = {}) {
     if (!this.context || this.context.state !== "running") return;
     detail ??= {};
     const now = this.context.currentTime;
 
     if (type === "attack") {
-      this.playNoise(0.09, detail.heavy ? 0.22 : 0.11, this.buses.sfx, now, detail.heavy ? 520 : 860);
-      this.playTone(detail.heavy ? 95 : 145, 0.1, 0.075, this.buses.sfx, now, "sawtooth", detail.heavy ? 48 : 88);
+      const line = detail.line === true;
+      this.playNoise(line ? 0.18 : 0.09, line ? 0.26 : detail.heavy ? 0.22 : 0.11, this.buses.sfx, now, line ? 920 : detail.heavy ? 520 : 860);
+      this.playTone(line ? 73.42 : detail.heavy ? 95 : 145, line ? 0.22 : 0.1, line ? 0.11 : 0.075, this.buses.sfx, now, "sawtooth", line ? 36.71 : detail.heavy ? 48 : 88);
     }
     if (type === "enemyHit") this.playTone(detail.critical ? 760 : 480, 0.075, detail.critical ? 0.13 : 0.075, this.buses.sfx);
     if (type === "harvestChanged" && Number(detail.delta) > 0) {
@@ -361,6 +382,19 @@ export class AudioSystem {
     if (type === "chargeStart") {
       this.playTone(146.83, 0.16, 0.035, this.buses.sfx, now, "triangle", 196);
     }
+    if (type === "lineChargeStart") {
+      this.playNoise(0.16, 0.032, this.buses.sfx, now, 1280);
+      this.playTone(110, 0.38, 0.045, this.buses.sfx, now, "triangle", 440);
+    }
+    if (type === "lineChargeReleased") {
+      this.duckMusicForCriticalSfx(detail.forced ? 0.4 : 0.32);
+      this.playNoise(0.24, detail.forced ? 0.14 : 0.11, this.buses.sfx, now, 420);
+      this.playTone(65.41, 0.34, detail.forced ? 0.14 : 0.11, this.buses.sfx, now, "sawtooth", 32.7);
+      this.playTone(523.25, 0.2, 0.055, this.buses.sfx, now + 0.035, "triangle", detail.forced ? 1046.5 : 783.99);
+    }
+    if (type === "lineChargeRejected") {
+      this.playTone(116.54, 0.12, 0.04, this.buses.ui, now, "square", 82.41);
+    }
     if (type === "enemyDefeated") {
       this.playTone(detail.type === "queen" ? 92 : 220, detail.type === "queen" ? 0.8 : 0.18, 0.11, this.buses.sfx, now, "triangle", detail.type === "queen" ? 46 : 110);
     }
@@ -401,10 +435,13 @@ export class AudioSystem {
     if (type === "queenSpecialRecovered") this.playQueenSpecialRecovery(detail, now);
     if (type === "queenSpecialCancelled") this.cancelQueenActionCue(detail.actionId);
     if (type === "queenGuardsDismissed") this.playQueenGuardDismissal(detail, now);
-    if (type === "enemyAttack") this.playQueenComboAccent(detail, now);
+    if (type === "enemyAttack") {
+      this.playQueenComboAccent(detail, now);
+      this.playEnemyComboAccent(detail, now);
+    }
     if (type === "encounterWaveStarted") {
-      const princessCount = detail.originCounts?.princess ?? 0;
-      if (princessCount > 0) {
+      const volatileCount = detail.originCounts?.volatile ?? 0;
+      if (volatileCount > 0) {
         this.playNoise(0.18, 0.045, this.buses.sfx, now, 430);
         this.playTone(164.81, 0.3, 0.055, this.buses.sfx, now, "sawtooth", 110);
       } else {
@@ -417,10 +454,10 @@ export class AudioSystem {
     }
     if (type === "witchMagicCeased") {
       this.playNoise(0.8, 0.1, this.buses.sfx, now, 310);
-      this.playTone(146.83, 0.9, 0.09, this.buses.voice, now, "sine", 55);
+      this.playTone(146.83, 0.9, 0.09, this.buses.sfx, now, "sine", 55);
     }
     if (type === "princessHumanReturned") {
-      this.playTone(392, 0.5, 0.07, this.buses.voice, now, "sine", 523.25);
+      this.playTone(392, 0.5, 0.07, this.buses.sfx, now, "sine", 523.25);
     }
     if (type === "endingDecisionStarted") {
       this.playTone(98, 0.36, 0.08, this.buses.ui, now, "triangle", 82.41);
@@ -444,10 +481,6 @@ export class AudioSystem {
     if (type === "endingStrikeCompleted") {
       this.playTone(261.63, 0.62, 0.055, this.buses.sfx, now, "sine", 130.81);
     }
-    if (type === "glossaryUnlocked") {
-      this.playTone(523.25, 0.22, 0.07, this.buses.ui, now, "triangle", 783.99);
-      this.playTone(659.25, 0.35, 0.06, this.buses.ui, now + 0.1, "triangle", 1046.5);
-    }
     if (type === "runStarted") {
       this.clearQueenActionCues();
       this.setMusicState("exploration");
@@ -456,9 +489,7 @@ export class AudioSystem {
       this.clearQueenActionCues();
       if (detail.completed !== true) this.setMusicState("exploration");
     }
-    if (type === "dialogueStarted") this.setDialogueDucking(true);
     if (type === "phaseChanged") {
-      this.setDialogueDucking(detail.phase === "dialogue");
       if (detail.phase === "title") this.setSoundtrackCue("title");
     }
     if (type === "blessingChosen") this.playTone(523.25, 0.42, 0.1, this.buses.ui, now, "triangle", 1046.5);
@@ -473,7 +504,6 @@ export class AudioSystem {
     this.buses.music.gain.setTargetAtTime(gainFromSlider(values.audio.music), now, 0.05);
     this.buses.sfx.gain.setTargetAtTime(gainFromSlider(values.audio.sfx), now, 0.05);
     this.buses.ui.gain.setTargetAtTime(gainFromSlider(values.audio.ui), now, 0.05);
-    this.buses.voice.gain.setTargetAtTime(gainFromSlider(values.audio.voice), now, 0.05);
     this.music.setIntensity(values.audio.musicIntensity);
     this.music.setDynamic(values.audio.dynamicMusic);
   }

@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as THREE from "three";
 import { ENEMY_ARCHETYPES } from "../src/game/enemyArchetypes.js";
+import { ActorRenderer } from "../src/rendering/ActorRenderer.js";
 import {
   detailedEnemyLimit,
   ENEMY_LOD_CONFIG,
@@ -65,6 +67,24 @@ test("visual profile data is immutable", () => {
     for (const attack of Object.values(profile.attacks)) assert.ok(Object.isFrozen(attack));
   }
   assert.throws(() => getEnemyVisualProfile("missing"), RangeError);
+});
+
+test("enemy health bars are enlarged and use a separate delayed-damage trail", () => {
+  for (const type of Object.keys(ENEMY_ARCHETYPES)) {
+    const profile = getEnemyVisualProfile(type);
+    assert.ok(profile.healthBar.width >= (type === "queen" ? 4.4 : 2.1), `${type} health bar is too narrow`);
+  }
+
+  const scene = new THREE.Scene();
+  const renderer = new ActorRenderer(scene, null);
+  renderer.createHealthBars();
+  renderer.writeHealthBar(0, 0, 3, 2.2, 0.24, 0.4, 0.72);
+  assert.equal(renderer.healthBarBackgrounds.isInstancedMesh, true);
+  assert.equal(renderer.healthBarTrails.isInstancedMesh, true);
+  assert.equal(renderer.healthBarFills.isInstancedMesh, true);
+  assert.equal(renderer.healthBarTrails.renderOrder, 21);
+  assert.equal(renderer.healthBarFills.renderOrder, 22);
+  assert.equal(renderer.healthBarCount, 1);
 });
 
 test("3D detail budgets preserve nearby quality and bound stress rendering", () => {

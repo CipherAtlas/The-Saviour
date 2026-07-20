@@ -9,7 +9,7 @@ import {
   offerUpgradeChoices,
   RUN_UPGRADES,
 } from "../src/game/runUpgrades.js";
-import { DEATH_DEFIANCE_GRANT_CAP, RUN_CONFIG } from "../src/game/gameConfig.js";
+import { DEATH_DEFIANCE_GRANT_CAP, PORTAL_CONFIG, RUN_CONFIG } from "../src/game/gameConfig.js";
 import { defineProgressionCard } from "../src/game/progressionModel.js";
 import { SeededRandom } from "../src/generation/seededRandom.js";
 
@@ -30,12 +30,12 @@ function createSettings() {
 function startGame(seed) {
   const game = new Game(createInput(), createSettings());
   game.startRun(seed);
-  while (game.phase === "dialogue") game.skipDialogue();
+  while (game.phase === "bookend") game.continueBookend();
   return game;
 }
 
-function completeNarrative(game) {
-  while (game.phase === "dialogue") game.skipDialogue();
+function completeBookend(game) {
+  while (game.phase === "bookend") game.continueBookend();
 }
 
 function choiceSummary(choices) {
@@ -137,10 +137,11 @@ test("Game offer events expose complete frozen chamber and blessing card snapsho
   game.player = previewPlayer();
   game.floor = 1;
   game.room = 1;
+  game.roomClearResolved = true;
+  game.portalTraversal = { completed: true };
 
   game.offerRoomReward();
-  assert.equal(game.phase, "dialogue");
-  completeNarrative(game);
+  assert.equal(game.phase, "reward");
   const chamberChoices = events.find((event) => event.type === "roomRewardOffered").detail.choices;
   assert.equal(Object.isFrozen(chamberChoices), true);
   const chamber = chamberChoices[0];
@@ -151,8 +152,7 @@ test("Game offer events expose complete frozen chamber and blessing card snapsho
   game.roomRewardPending = false;
   game.room = RUN_CONFIG.roomsPerFloor;
   game.advanceRoom();
-  assert.equal(game.phase, "dialogue");
-  completeNarrative(game);
+  assert.equal(game.phase, "blessing");
   const blessingChoices = events.find((event) => event.type === "blessingOffered").detail.choices;
   assert.equal(Object.isFrozen(blessingChoices), true);
   const blessing = blessingChoices[0];
@@ -160,7 +160,7 @@ test("Game offer events expose complete frozen chamber and blessing card snapsho
   assert.deepEqual(blessing.preview, game.pendingBlessings[0].preview);
 });
 
-test("pending encounter waves prevent an early room clear and reward phase", () => {
+test("pending waves delay portal opening and portal entry gates the reward phase", () => {
   const game = startGame("NO-EARLY-CLEAR");
   for (const enemy of game.director.enemies) enemy.active = false;
   game.director.pendingWaves = [{ index: 1, delay: 0.5, entries: [] }];
@@ -172,14 +172,18 @@ test("pending encounter waves prevent an early room clear and reward phase", () 
 
   game.director.pendingWaves = [];
   game.checkRoomProgress(RUN_CONFIG.roomClearDelay);
-  assert.equal(game.portalActive, false);
-  assert.equal(game.phase, "dialogue");
-  completeNarrative(game);
+  assert.equal(game.portalActive, true);
+  assert.equal(game.phase, "playing");
+  assert.equal(game.activeBookend, null);
+  assert.equal(game.pendingRoomRewards.length, 0);
+
+  assert.equal(game.beginPortalTraversal(), true);
+  game.updatePortalTraversal(PORTAL_CONFIG.traversalDuration);
   assert.equal(game.phase, "reward");
   assert.equal(game.pendingRoomRewards.length, 3);
 });
 
-test("chambers one and two grant a ranked reward before returning to the portal", () => {
+test("chambers one and two grant a ranked reward only after portal entry", () => {
   const game = startGame("CHAMBER-REWARD");
   const events = [];
   game.on((event) => events.push(event));
@@ -187,8 +191,11 @@ test("chambers one and two grant a ranked reward before returning to the portal"
   game.director.pendingWaves.length = 0;
 
   game.checkRoomProgress(RUN_CONFIG.roomClearDelay);
-  assert.equal(game.phase, "dialogue");
-  completeNarrative(game);
+  assert.equal(game.phase, "playing");
+  assert.equal(game.portalActive, true);
+  assert.equal(events.some((event) => event.type === "roomRewardOffered"), false);
+  assert.equal(game.beginPortalTraversal(), true);
+  game.updatePortalTraversal(PORTAL_CONFIG.traversalDuration);
   assert.equal(game.phase, "reward");
   assert.equal(game.portalActive, false);
   const choice = game.pendingRoomRewards[0];
@@ -198,14 +205,15 @@ test("chambers one and two grant a ranked reward before returning to the portal"
   game.chooseRoomReward(choice.id);
 
   assert.equal(game.phase, "playing");
-  assert.equal(game.portalActive, true);
+  assert.equal(game.room, 2);
+  assert.equal(game.portalActive, false);
   assert.equal(game.upgradeRanks.get(choice.id), 1);
   assert.ok(events.some((event) => event.type === "roomRewardOffered"));
   assert.ok(events.some((event) => event.type === "roomRewardChosen" && event.detail.rank === 1));
   assert.ok(events.some((event) => event.type === "portalOpened"));
   assert.ok(
-    events.findIndex((event) => event.type === "roomRewardOffered") <
-    events.findIndex((event) => event.type === "portalOpened"),
+    events.findIndex((event) => event.type === "portalOpened") <
+    events.findIndex((event) => event.type === "roomRewardOffered"),
   );
 });
 
@@ -221,9 +229,9 @@ test("third chambers retain the major blessing transition before the next floor"
 
   assert.equal(game.phase, "playing");
   assert.equal(game.pendingRoomRewards.length, 0);
-  game.advanceRoom();
-  assert.equal(game.phase, "dialogue");
-  completeNarrative(game);
+  assert.equal(game.portalActive, true);
+  assert.equal(game.beginPortalTraversal(), true);
+  game.updatePortalTraversal(PORTAL_CONFIG.traversalDuration);
   assert.equal(game.phase, "blessing");
   assert.equal(game.pendingBlessings.length, 3);
 
@@ -251,14 +259,14 @@ test("boss showcase enters the final arena in a playable invulnerable state", ()
   assert.equal(game.phase, "playing");
   assert.equal(game.player.invulnerable, Number.POSITIVE_INFINITY);
   assert.equal(game.director.activeBoss()?.bossPhase, 1);
-  assert.equal(game.dialogue.current, null);
+  assert.equal(game.bookend.current, null);
   assert.ok(events.some((event) => event.type === "showcaseStarted" && event.detail.mode === "boss"));
 
   game.startRun("NORMAL-ROUTE");
   assert.equal(game.showcaseMode, null);
   assert.equal(game.floor, 1);
   assert.equal(game.room, 1);
-  assert.equal(game.phase, "dialogue");
+  assert.equal(game.phase, "bookend");
 });
 
 test("reward showcase exposes a deterministic real chamber offer without choosing it", () => {
@@ -273,7 +281,7 @@ test("reward showcase exposes a deterministic real chamber offer without choosin
   assert.equal(first.portalActive, false);
   assert.equal(first.roomRewardPending, true);
   assert.equal(first.director.hasCombatRemaining(), false);
-  assert.equal(first.dialogue.current, null);
+  assert.equal(first.bookend.current, null);
   assert.equal(first.pendingRoomRewards.length, 3);
   assert.deepEqual(new Set(first.pendingRoomRewards.map((choice) => choice.path)), new Set(["Reaper", "Shade", "Grave"]));
   assert.deepEqual(choiceSummary(first.pendingRoomRewards), choiceSummary(second.pendingRoomRewards));
@@ -318,7 +326,7 @@ test("an unused floor reroll can be spent on blessings and identical fallback of
   const events = [];
   game.on((event) => events.push(event));
   game.startRun("BLESSING-REROLL");
-  completeNarrative(game);
+  completeBookend(game);
   game.phase = "blessing";
   game.pendingBlessings = [BLESSINGS[0], BLESSINGS[3], BLESSINGS[6]]
     .map((choice) => ({ ...choice, rank: 0, nextRank: 1, preview: null }));
@@ -328,7 +336,7 @@ test("an unused floor reroll can be spent on blessings and identical fallback of
 
   const fallbackGame = new Game(createInput(), createSettings());
   fallbackGame.startRun("FALLBACK-REROLL");
-  completeNarrative(fallbackGame);
+  completeBookend(fallbackGame);
   fallbackGame.phase = "blessing";
   fallbackGame.pendingBlessings = [BLESSING_FALLBACK];
   assert.equal(fallbackGame.rerollUpgradeOffer(), false);
@@ -378,7 +386,7 @@ test("accepted Death Defiance grants and revivals publish separate immutable lif
   );
   assert.equal(Object.isFrozen(granted), true);
 
-  completeNarrative(game);
+  completeBookend(game);
   game.phase = "playing";
   game.player.health = 1;
   game.player.invulnerable = 0;

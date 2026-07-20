@@ -6,6 +6,8 @@ import {
   PLAYER_CONFIG,
   PROGRESSION_TRANSFORMATION_CONFIG,
   SCYTHE_ATTACKS,
+  STRAIGHT_CHARGE_ATTACK,
+  STRAIGHT_CHARGE_CONFIG,
 } from "./gameConfig.js";
 import { HarvestState } from "./HarvestState.js";
 import { ReapersClaim } from "./ReapersClaim.js";
@@ -38,6 +40,15 @@ export class PlayerCombat {
     this.comboNextIndex = 0;
     this.queuedAttack = false;
     this.attackBuffer = 0;
+    this.primaryHoldArmed = false;
+    this.primaryHoldTime = 0;
+    this.primaryCharge = 0;
+    this.chargingPrimary = false;
+    this.primaryChargeRequest = null;
+    this.primaryReleaseRequest = null;
+    this.primaryChargeDashesUsed = 0;
+    this.primaryChargeActionSerial = 0;
+    this.primaryChargeActionId = null;
     this.dashBuffer = 0;
     this.dashRequest = null;
     this.heavyBuffer = 0;
@@ -80,6 +91,7 @@ export class PlayerCombat {
     this.tryStartDash(player, movement, callbacks);
 
     if (!this.claim.blocksWeaponActions) {
+      this.updatePrimaryInput(dt, input, player);
       this.updateHeavyInput(dt, input, player);
       this.tryStartBufferedAttack(player);
     }
@@ -115,8 +127,22 @@ export class PlayerCombat {
     const attackPress = this.consumePress(input, "attack");
     if (attackPress) {
       const followup = this.claim.bufferFollowup(attackPress.timeStamp);
-      if (!followup.accepted && !this.claim.blocksWeaponActions) this.attackBuffer = PLAYER_CONFIG.combat.attackBuffer;
+      if (!followup.accepted && !this.claim.blocksWeaponActions) {
+        const canHold = typeof input.isDown === "function"
+          && input.isDown("attack")
+          && !this.attack
+          && !this.chargingHeavy
+          && !this.primaryHoldArmed
+          && !this.chargingPrimary
+          && this.dashTime <= 0
+          && this.dashMomentumTime <= 0
+          && this.comboWindow <= 0;
+        if (canHold) this.armPrimaryHold(attackPress);
+        else this.attackBuffer = PLAYER_CONFIG.combat.attackBuffer;
+      }
     }
+    const attackRelease = this.consumeRelease(input, "attack");
+    if (attackRelease) this.primaryReleaseRequest = attackRelease;
     const dashPress = this.consumePress(input, "dash");
     if (dashPress) {
       this.dashBuffer = PLAYER_CONFIG.combat.dashBuffer;
@@ -147,7 +173,7 @@ export class PlayerCombat {
 
   tryStartClaim(player) {
     if (this.claimBuffer <= 0 || this.claim.phase !== "idle") return;
-    if (this.attack || this.chargingHeavy || this.dashTime > 0) return;
+    if (this.attack || this.chargingHeavy || this.primaryHoldArmed || this.chargingPrimary || this.dashTime > 0) return;
     const inputTime = this.claimRequest?.timeStamp ?? performance.now();
     this.claimBuffer = 0;
     this.claimRequest = null;
@@ -199,14 +225,30 @@ export class PlayerCombat {
   }
 
   tryStartDash(player, movement, callbacks) {
-    if (this.dashBuffer <= 0 || this.dashTime > 0 || this.dashCooldown > 0) return;
+    if (this.dashBuffer <= 0 || this.dashTime > 0) return;
+    const preservingPrimaryCharge = this.primaryHoldArmed || this.chargingPrimary;
+    if (
+      preservingPrimaryCharge
+      && this.primaryChargeDashesUsed >= STRAIGHT_CHARGE_CONFIG.dashAllowance
+    ) {
+      this.dashBuffer = 0;
+      this.dashRequest = null;
+      return;
+    }
+    if (this.dashCooldown > 0) return;
     if (this.claim.blocksWeaponActions) {
       if (!this.claim.canCancelToDash) return;
       this.claim.cancel("dash");
     }
-    if (this.attack && this.attackTime < (this.attack.cancelToDashAt ?? this.attack.activeEnd)) return;
+    const preservingLightCombo = this.attackKind === "light" && this.comboIndex >= 0;
+    if (
+      this.attack
+      && !preservingLightCombo
+      && this.attackTime < (this.attack.cancelToDashAt ?? this.attack.activeEnd)
+    ) return;
 
-    if (this.attack) this.cancelAttack("dash");
+    if (this.attack && !preservingLightCombo) this.cancelAttack("dash");
+    if (preservingPrimaryCharge) this.primaryChargeDashesUsed += 1;
     if (this.chargingHeavy) this.cancelHeavyCharge();
     this.dashBuffer = 0;
     this.startDash(player, movement, this.dashRequest);
@@ -214,24 +256,194 @@ export class PlayerCombat {
   }
 
   tryStartBufferedAttack(player) {
-    if (this.attackBuffer <= 0 || this.attack || this.chargingHeavy || this.claim.blocksWeaponActions) return;
+    if (
+      this.attackBuffer <= 0
+      || this.attack
+      || this.chargingHeavy
+      || this.primaryHoldArmed
+      || this.chargingPrimary
+      || this.claim.blocksWeaponActions
+    ) return;
 
     this.attackBuffer = 0;
-    if (this.dashTime > 0 || this.dashMomentumTime > 0) {
+    const continuingCombo = this.comboWindow > 0;
+    if ((this.dashTime > 0 || this.dashMomentumTime > 0) && !continuingCombo) {
       const facing = Math.atan2(this.dashDirection.z, this.dashDirection.x);
       this.startAttack(DASH_ATTACK, -1, true, facing);
       return;
     }
 
-    const comboIndex = this.comboWindow > 0 ? this.comboNextIndex : 0;
+    const comboIndex = continuingCombo ? this.comboNextIndex : 0;
     this.startAttack(SCYTHE_ATTACKS[comboIndex], comboIndex, false, player.aimAngle);
+  }
+
+  armPrimaryHold(request) {
+    this.primaryHoldArmed = true;
+    this.primaryHoldTime = 0;
+    this.primaryCharge = 0;
+    this.primaryChargeRequest = request;
+    this.primaryReleaseRequest = null;
+    this.primaryChargeDashesUsed = 0;
+  }
+
+  updatePrimaryInput(dt, input, player) {
+    if (this.primaryReleaseRequest) {
+      const release = this.primaryReleaseRequest;
+      this.primaryReleaseRequest = null;
+      if (this.chargingPrimary) {
+        this.releasePrimaryCharge(player, false, release.timeStamp);
+        return;
+      }
+      if (this.primaryHoldArmed) {
+        this.cancelPrimaryCharge();
+        this.attackBuffer = PLAYER_CONFIG.combat.attackBuffer;
+        return;
+      }
+    }
+
+    if (this.primaryHoldArmed) {
+      const previous = this.primaryHoldTime;
+      this.primaryHoldTime += dt;
+      if (this.primaryHoldTime >= STRAIGHT_CHARGE_CONFIG.holdThreshold) {
+        if (this.harvest.snapshot().filledSegments < STRAIGHT_CHARGE_CONFIG.costSegments) {
+          const inputTime = this.primaryChargeRequest?.timeStamp ?? performance.now();
+          this.emit("lineChargeRejected", Object.freeze({
+            reason: "insufficientHarvest",
+            inputTime,
+            costSegments: STRAIGHT_CHARGE_CONFIG.costSegments,
+          }));
+          this.cancelPrimaryCharge();
+          this.attackBuffer = PLAYER_CONFIG.combat.attackBuffer;
+          return;
+        }
+        const overflow = Math.max(0, this.primaryHoldTime - STRAIGHT_CHARGE_CONFIG.holdThreshold);
+        this.startPrimaryCharge(player, this.primaryChargeRequest?.timeStamp ?? performance.now(), overflow);
+        if (this.primaryCharge >= STRAIGHT_CHARGE_CONFIG.buildupDuration) {
+          this.releasePrimaryCharge(player, true);
+        }
+        return;
+      } else if (previous === 0 && typeof input.isDown === "function" && !input.isDown("attack")) {
+        this.cancelPrimaryCharge();
+        this.attackBuffer = PLAYER_CONFIG.combat.attackBuffer;
+        return;
+      }
+    }
+
+    if (!this.chargingPrimary) return;
+    this.primaryCharge = Math.min(STRAIGHT_CHARGE_CONFIG.buildupDuration, this.primaryCharge + dt);
+    if (this.primaryCharge >= STRAIGHT_CHARGE_CONFIG.buildupDuration) {
+      this.releasePrimaryCharge(
+        player,
+        true,
+        (this.primaryChargeRequest?.timeStamp ?? performance.now())
+          + (STRAIGHT_CHARGE_CONFIG.holdThreshold + STRAIGHT_CHARGE_CONFIG.buildupDuration) * 1000,
+      );
+    }
+  }
+
+  startPrimaryCharge(player, inputTime, initialCharge = 0) {
+    this.primaryChargeActionSerial += 1;
+    this.primaryChargeActionId = `line-charge-${this.primaryChargeActionSerial}`;
+    this.primaryHoldArmed = false;
+    this.chargingPrimary = true;
+    this.primaryCharge = Math.min(STRAIGHT_CHARGE_CONFIG.buildupDuration, Math.max(0, initialCharge));
+    this.emit("lineChargeStart", Object.freeze({
+      actionId: this.primaryChargeActionId,
+      inputTime,
+      costSegments: STRAIGHT_CHARGE_CONFIG.costSegments,
+      dashAllowance: STRAIGHT_CHARGE_CONFIG.dashAllowance,
+      position: Object.freeze({ ...player.position }),
+    }));
+  }
+
+  primaryChargeValues() {
+    const rawRatio = Math.min(1, this.primaryCharge / STRAIGHT_CHARGE_CONFIG.buildupDuration);
+    const easedRatio = 1 - (1 - rawRatio) ** 3;
+    const power = STRAIGHT_CHARGE_CONFIG.minimumPower
+      + (1 - STRAIGHT_CHARGE_CONFIG.minimumPower) * easedRatio;
+    const rangeScale = STRAIGHT_CHARGE_CONFIG.minimumRange
+      + (1 - STRAIGHT_CHARGE_CONFIG.minimumRange) * easedRatio;
+    const widthScale = STRAIGHT_CHARGE_CONFIG.minimumWidth
+      + (1 - STRAIGHT_CHARGE_CONFIG.minimumWidth) * easedRatio;
+    return Object.freeze({ rawRatio, easedRatio, power, rangeScale, widthScale });
+  }
+
+  releasePrimaryCharge(player, forced = false, releaseTime = performance.now()) {
+    if (!this.chargingPrimary) return false;
+    const values = this.primaryChargeValues();
+    const spend = this.harvest.trySpend(STRAIGHT_CHARGE_CONFIG.costSegments, "lineCharge");
+    if (!spend.accepted) {
+      this.emit("lineChargeRejected", Object.freeze({
+        actionId: this.primaryChargeActionId,
+        reason: "insufficientHarvest",
+        inputTime: releaseTime,
+        costSegments: STRAIGHT_CHARGE_CONFIG.costSegments,
+      }));
+      this.cancelPrimaryCharge();
+      return false;
+    }
+    const chargedAttack = Object.freeze({
+      ...STRAIGHT_CHARGE_ATTACK,
+      range: STRAIGHT_CHARGE_ATTACK.range * values.rangeScale,
+      width: STRAIGHT_CHARGE_ATTACK.width * values.widthScale,
+      damage: STRAIGHT_CHARGE_ATTACK.damage * values.power,
+      poiseDamage: STRAIGHT_CHARGE_ATTACK.poiseDamage * values.power,
+      chargeKind: "line",
+      chargeRatio: values.rawRatio,
+      lineChargeActionId: this.primaryChargeActionId,
+    });
+    const actionId = this.primaryChargeActionId;
+    const dashesUsed = this.primaryChargeDashesUsed;
+    const inputTime = this.primaryChargeRequest?.timeStamp ?? releaseTime;
+    this.primaryHoldArmed = false;
+    this.chargingPrimary = false;
+    this.primaryCharge = 0;
+    this.emit("lineChargeReleased", Object.freeze({
+      actionId,
+      inputTime,
+      releaseTime,
+      elapsed: STRAIGHT_CHARGE_CONFIG.holdThreshold + values.rawRatio * STRAIGHT_CHARGE_CONFIG.buildupDuration,
+      ratio: values.rawRatio,
+      forced,
+      range: chargedAttack.range,
+      width: chargedAttack.width,
+      damage: chargedAttack.damage,
+      poiseDamage: chargedAttack.poiseDamage,
+      costSegments: STRAIGHT_CHARGE_CONFIG.costSegments,
+      dashesUsed,
+      position: Object.freeze({ ...player.position }),
+      facing: player.aimAngle,
+    }));
+    this.startAttack(chargedAttack, -1, false, player.aimAngle);
+    this.primaryChargeActionId = null;
+    this.primaryChargeRequest = null;
+    this.primaryChargeDashesUsed = 0;
+    return true;
+  }
+
+  cancelPrimaryCharge() {
+    this.primaryHoldArmed = false;
+    this.primaryHoldTime = 0;
+    this.primaryCharge = 0;
+    this.chargingPrimary = false;
+    this.primaryChargeRequest = null;
+    this.primaryReleaseRequest = null;
+    this.primaryChargeDashesUsed = 0;
+    this.primaryChargeActionId = null;
   }
 
   updateHeavyInput(dt, input, player) {
     if (this.claim.blocksWeaponActions) return;
     const mode = input.settings.get("gameplay.chargeMode");
 
-    if (this.heavyBuffer > 0 && this.heavyCooldown <= 0 && !this.attack && this.dashTime <= 0) {
+    if (
+      this.heavyBuffer > 0
+      && this.heavyCooldown <= 0
+      && !this.attack
+      && !this.primaryHoldArmed
+      && !this.chargingPrimary
+      && this.dashTime <= 0
+    ) {
       if (!this.chargingHeavy) {
         this.heavyBuffer = 0;
         this.startHeavyCharge(player, this.heavyRequest?.timeStamp ?? performance.now(), mode);
@@ -437,9 +649,10 @@ export class PlayerCombat {
 
   cancelPlayerActions(reason) {
     const attackActive = Boolean(this.attack);
-    const chargeActive = this.chargingHeavy || this.chargeState !== "idle";
+    const chargeActive = this.chargingHeavy || this.chargeState !== "idle" || this.primaryHoldArmed || this.chargingPrimary;
     const dashActive = this.dashActionId !== null;
     if (attackActive) this.cancelAttack(reason);
+    this.cancelPrimaryCharge();
     this.cancelHeavyCharge();
     const dash = this.cancelDash(reason, true);
     this.attackBuffer = 0;
@@ -473,7 +686,7 @@ export class PlayerCombat {
     this.attackTime = 0;
     this.attackHitIds.clear();
     this.attackFacing = facing;
-    this.attackKind = isDashAttack ? "dash" : comboIndex >= 0 ? "light" : "heavy";
+    this.attackKind = isDashAttack ? "dash" : definition.shape === "line" ? "line" : comboIndex >= 0 ? "light" : "heavy";
     this.comboIndex = comboIndex;
     this.comboWindow = 0;
     this.comboNextIndex = definition.nextComboIndex;
@@ -490,11 +703,15 @@ export class PlayerCombat {
       comboIndex,
       facing,
       heavy: comboIndex < 0 && !isDashAttack,
+      line: definition.shape === "line",
+      shape: definition.shape ?? "arc",
+      width: definition.width ?? null,
       dash: isDashAttack,
       chargeActionId: definition.chargeActionId ?? null,
       chargeQuality: definition.chargeQuality ?? null,
       poiseDamage: definition.poiseDamage ?? null,
       harvestUnits: definition.harvestUnits ?? 0,
+      lineChargeActionId: definition.lineChargeActionId ?? null,
     }));
   }
 
@@ -571,7 +788,7 @@ export class PlayerCombat {
       };
     }
 
-    const movementScale = this.chargingHeavy
+    const movementScale = this.chargingHeavy || this.chargingPrimary
       ? PLAYER_CONFIG.combat.chargeMoveScale
       : this.attack
         ? this.attack.moveScale ?? PLAYER_CONFIG.combat.attackMoveScale

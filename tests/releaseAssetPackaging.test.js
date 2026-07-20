@@ -24,7 +24,6 @@ const BLOCKED_RELEASE_ASSETS = Object.freeze([
   "assets/vfx/combat-vfx.webp",
   "assets/menu/title-bg-01.png",
   "assets/menu/zephyr-c-title.png",
-  "assets/vn/floor01-witch-projection-bg.png",
 ]);
 
 test("release path validation rejects traversal and absolute paths", () => {

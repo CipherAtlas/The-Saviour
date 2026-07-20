@@ -7,7 +7,7 @@ import { SettingsMenu } from "../src/ui/SettingsMenu.js";
 
 const settingsSource = readFileSync(new URL("../src/ui/SettingsMenu.js", import.meta.url), "utf8");
 
-test("dialogue text is unconditional and Settings has no misleading subtitles toggle", () => {
+test("bookend text is unconditional and Settings has no misleading subtitles toggle", () => {
   assert.doesNotMatch(settingsSource, /accessibility\.subtitles|Subtitles/);
 });
 
