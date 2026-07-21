@@ -130,7 +130,7 @@ test("HUD and touch source retain the accessibility, capture, and authored layou
   assert.match(styles, /\.reduced-motion \.harvest-meter\[data-feedback\]/);
   assert.match(styles, /@media \(max-height: 620px\)/);
   assert.doesNotMatch(styles, /\.reroll-button/);
-  assert.match(styles, /\.upgrade-actions/);
+  assert.doesNotMatch(styles, /\.upgrade-actions|\.upgrade-confirm/);
 });
 
 test("spatial combat numbers replace HUD damage spam and expose bounded renderer and benchmark metrics", () => {
@@ -164,7 +164,7 @@ test("the Oath overlay uses concise cards and a compact mastery list", () => {
   assert.match(uiSource, /content\.className = "upgrade-card-content"/);
   assert.equal([...uiSource.matchAll(/class="upgrade-ledger"/g)].length, 1);
   assert.equal([...uiSource.matchAll(/data-upgrade-detail role="region" aria-live="polite"/g)].length, 0);
-  assert.equal([...uiSource.matchAll(/data-upgrade-confirm disabled/g)].length, 1);
+  assert.doesNotMatch(uiSource, /data-upgrade-confirm|upgrade-confirm|upgrade-actions/);
   assert.doesNotMatch(uiSource, /description\.textContent = choice\.description/);
   assert.doesNotMatch(uiSource, /current-build-summary|data-build-summary|pause-build-summary/);
   assert.match(uiSource, /data-screen="build" data-menu-overlay role="dialog"/);
@@ -187,17 +187,19 @@ test("the Oath overlay uses concise cards and a compact mastery list", () => {
   assert.equal([...uiSource.matchAll(/data-action="reroll-upgrades"/g)].length, 0);
   assert.doesNotMatch(uiSource, /Choose a focused rank before opening the next chamber\./);
   assert.doesNotMatch(uiSource, /One deterministic reroll remains on this floor\./);
-  assert.match(uiSource, /button\.setAttribute\("aria-pressed", "false"\)/);
-  assert.match(uiSource, /confirm\.onclick = \(\) => choose\(choice\.id\)/);
+  assert.match(uiSource, /button\.addEventListener\("click", \(\) => choose\(choice\.id\)\)/);
+  assert.match(uiSource, /addEventListener\("contextmenu", \(event\) => \{[\s\S]*choiceButton\.click\(\)/);
+  assert.match(uiSource, /accept with Space, E, or right click/);
   assert.match(uiSource, /\["ArrowDown", "ArrowRight"\]\.includes\(event\.key\)/);
-  assert.doesNotMatch(uiSource, /selectChoice\(choices\[preferredIndex\]|findIndex\(\(button\) => button\.classList\.contains\("path-shade"\)/);
-  assert.match(uiSource, /else screen\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(uiSource, /event\.preventDefault\(\);\s*event\.stopPropagation\(\);\s*const nextIndex/);
+  assert.doesNotMatch(uiSource, /selectChoice|confirm\.onclick|findIndex\(\(button\) => button\.classList\.contains\("path-shade"\)/);
+  assert.match(uiSource, /queueMicrotask\(\(\) => buttons\[0\]\?\.focus\(\{ preventScroll: true \}\)\)/);
   assert.match(styles, /\.upgrade-dial-art/);
   assert.match(styles, /\.upgrade-card\.path-shade \{[\s\S]*?--path-color: #69c8e8;/);
   assert.match(styles, /\.upgrade-card \{[\s\S]*?border: 1px solid color-mix\(in srgb, var\(--path-color\) 72%/);
   assert.match(styles, /\.upgrade-ledger \{[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
   assert.match(styles, /\.upgrade-grid \{[\s\S]*?grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
-  assert.match(styles, /\.upgrade-card\.is-selected \{/);
+  assert.doesNotMatch(styles, /\.upgrade-card\.is-selected/);
   assert.match(styles, /\.upgrade-grid\.is-mastery/);
   assert.match(styles, /\.mastery-choice/);
   assert.match(styles, /\.build-panel \{/);

@@ -528,9 +528,6 @@ export class GameUi {
           <div class="upgrade-ledger">
             <div class="upgrade-grid" data-blessings role="group" aria-label="Oath choices"></div>
           </div>
-          <div class="upgrade-actions">
-            <button class="button primary upgrade-confirm" data-upgrade-confirm disabled>Select an Oath</button>
-          </div>
         </div>
       </section>
 
@@ -819,6 +816,19 @@ export class GameUi {
       }
       if (action === "bookend-continue") this.game.continueBookend();
       if (action === "kill-princess") this.game.tryKillPrincess(event.timeStamp);
+    });
+
+    this.root.addEventListener("contextmenu", (event) => {
+      const screen = event.target.closest?.("[data-screen='blessing']");
+      if (this.game.phase !== "blessing" || !screen) return;
+      const focusedCard = screen.contains(document.activeElement)
+        ? document.activeElement.closest?.(".upgrade-card")
+        : null;
+      const choiceButton = event.target.closest?.(".upgrade-card") ?? focusedCard;
+      if (!choiceButton) return;
+      event.preventDefault();
+      event.stopPropagation();
+      choiceButton.click();
     });
 
     this.root.addEventListener("keydown", (event) => {
@@ -2079,41 +2089,20 @@ export class GameUi {
     kicker.textContent = mastery ? "Technique Mastery" : "Technique Oath";
     title.textContent = mastery ? "Master an Oath" : `${technique} Oath`;
     context.textContent = mastery
-      ? "Choose one owned Oath to raise to Rank II."
-      : "Choose how this technique changes for the rest of the descent.";
+      ? "Choose one owned Oath to raise to Rank II. Cycle with movement keys; accept with Space, E, or right click."
+      : "Choose how this technique changes for the rest of the descent. Cycle with movement keys; accept with Space, E, or right click.";
   }
 
   showUpgradeChoices(grid, choices, choose, { mastery = false } = {}) {
-    const screen = this.root.querySelector("[data-screen='blessing']");
-    const confirm = screen.querySelector("[data-upgrade-confirm]");
-    const actions = confirm.closest(".upgrade-actions");
     grid.replaceChildren();
     grid.classList.toggle("is-mastery", mastery);
-    actions?.classList.toggle("hidden", mastery);
-    confirm.classList.toggle("hidden", mastery);
-    confirm.className = "button primary upgrade-confirm";
-    confirm.textContent = "Select an Oath";
-    confirm.disabled = true;
-    confirm.onclick = null;
     const buttons = [];
-    const selectChoice = (choice, index) => {
-      for (const [buttonIndex, button] of buttons.entries()) {
-        const selected = buttonIndex === index;
-        button.classList.toggle("is-selected", selected);
-        button.setAttribute("aria-pressed", String(selected));
-      }
-      confirm.className = `button primary upgrade-confirm path-${choice.path.toLowerCase()}`;
-      confirm.textContent = `Take ${choice.name}`;
-      confirm.disabled = false;
-      confirm.onclick = () => choose(choice.id);
-    };
 
     for (const [index, choice] of choices.entries()) {
       const button = document.createElement("button");
       const choicePath = PROGRESSION_PATHS.includes(choice.path) ? choice.path : "Reaper";
       button.className = `upgrade-card path-${choicePath.toLowerCase()}${mastery ? " mastery-choice" : ""}`;
       button.type = "button";
-      button.setAttribute("aria-pressed", "false");
       const stud = document.createElement("img");
       stud.className = "upgrade-card-stud";
       stud.src = publicAssetUrl(`assets/ui/upgrade-option-${choicePath.toLowerCase()}-stud.png`);
@@ -2157,13 +2146,11 @@ export class GameUi {
         }
       }
       button.append(stud, content);
-      button.addEventListener("click", () => {
-        if (mastery) choose(choice.id);
-        else selectChoice(choice, index);
-      });
+      button.addEventListener("click", () => choose(choice.id));
       button.addEventListener("keydown", (event) => {
         if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
         event.preventDefault();
+        event.stopPropagation();
         const nextIndex = event.key === "Home"
           ? 0
           : event.key === "End"
@@ -2174,10 +2161,7 @@ export class GameUi {
       buttons.push(button);
       grid.append(button);
     }
-    queueMicrotask(() => {
-      if (this.activeInputDevice === "gamepad") buttons[0]?.focus();
-      else screen.focus({ preventScroll: true });
-    });
+    queueMicrotask(() => buttons[0]?.focus({ preventScroll: true }));
   }
 
   showBlessings(blessings = [], offer = {}) {
